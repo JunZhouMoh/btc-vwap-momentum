@@ -80,7 +80,7 @@ signal_logger.setLevel(logging.DEBUG)
 
 # Project imports
 from src.config_loader import load_config, validate_config
-from src.web_dashboard import WebSnapshotHolder, start_web_dashboard
+from src.web_dashboard import WebSnapshotHolder, start_web_dashboard, build_app
 from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
@@ -94,6 +94,11 @@ WSS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 RTDS_URL = "wss://ws-live-data.polymarket.com"
 
 console = Console()
+
+# ASGI entrypoint for `uvicorn main:app`.
+# This standalone app is separate from the in-process dashboard server that the bot starts.
+_asgi_holder = WebSnapshotHolder()
+app = build_app(_asgi_holder)
 
 
 # =============================================================================
