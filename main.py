@@ -1824,6 +1824,17 @@ class Dashboard:
             btc_block["buffer_avg_abs_usd"] = round(buffer_stats["avg_abs_usd"], 6)
             btc_block["buffer_avg_abs_pct"] = round(buffer_stats["avg_abs_pct"], 6)
 
+        # Last 5 window moves for display
+        recent_windows = list(self.state.btc_window_moves)[-5:]
+        btc_block["buffer_windows"] = [
+            {
+                "window_ts": int(r.get("window", 0)),
+                "abs_usd": round(float(r.get("abs_usd", 0.0)), 2),
+                "abs_pct": round(float(r.get("abs_pct", 0.0)), 4),
+            }
+            for r in recent_windows
+        ]
+
         st = self.stats
         bet = self.config.entry.bet_amount_usd
         wr_str = f"{st.win_rate:.1f}%" if st.trade_count > 0 else None
