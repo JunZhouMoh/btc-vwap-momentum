@@ -2068,10 +2068,28 @@ class LiveTradingBot:
 
         wd = self.config.web_dashboard
         if wd.enabled:
+            env_port = os.getenv("PORT")
+            env_host = os.getenv("HOST")
+            if env_port:
+                try:
+                    wd.port = int(env_port)
+                except ValueError:
+                    logger.warning(f"Invalid PORT env value: {env_port}")
+            if env_host:
+                wd.host = env_host
+
+            # Railway and similar platforms require binding on 0.0.0.0
+            if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+                wd.host = "0.0.0.0"
+
             self._web_snapshot_holder = WebSnapshotHolder()
             ok = start_web_dashboard(wd.host, wd.port, self._web_snapshot_holder)
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
-            if wd.host in ("0.0.0.0", ""):
+            railway_public = os.getenv("RAILWAY_PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
+            if railway_public:
+                public_host = railway_public.replace("https://", "").replace("http://", "")
+                open_url = f"https://{public_host}/"
+            elif wd.host in ("0.0.0.0", ""):
                 open_url = f"http://127.0.0.1:{wd.port}/"
             elif wd.host in ("::", "[::]"):
                 open_url = f"http://[::1]:{wd.port}/"
