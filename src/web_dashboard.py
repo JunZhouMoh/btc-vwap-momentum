@@ -109,6 +109,12 @@ _HTML = """<!DOCTYPE html>
             "Checks: P=" + chk(ck.price) + " T=" + chk(ck.time) + " D=" + chk(ck.dev) +
             " M=" + chk(ck.mom) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
           ];
+            if (st.up_line) {
+              strategyBits.push("UP: " + esc(st.up_line));
+            }
+            if (st.down_line) {
+              strategyBits.push("DOWN: " + esc(st.down_line));
+            }
           if (st.btc_buffer_line) {
             strategyBits.push("BTC Buffer: " + esc(st.btc_buffer_line));
           }
@@ -145,7 +151,15 @@ _HTML = """<!DOCTYPE html>
             if (b.buffer_avg_abs_usd != null || b.buffer_avg_abs_pct != null) {
               var usdPart = b.buffer_avg_abs_usd != null ? "$" + esc(numFmt(b.buffer_avg_abs_usd, 2)) : "\u2014";
               var pctPart = b.buffer_avg_abs_pct != null ? esc(numFmt(b.buffer_avg_abs_pct, 3)) + "%" : "\u2014";
-              btcBits.push("Buffer(5): +/-" + usdPart + " ( +/-" + pctPart + " )");
+              btcBits.push("Buffer avg(5): +/-" + usdPart + " (+/-" + pctPart + ")");
+            }
+            if (b.buffer_windows && b.buffer_windows.length) {
+              btcBits.push("\u2014 last 5 windows \u2014");
+              for (var wi = 0; wi < b.buffer_windows.length; wi++) {
+                var w = b.buffer_windows[wi];
+                var wt = w.window_ts ? new Date(w.window_ts * 1000).toISOString().substr(11, 8) : "?";
+                btcBits.push(esc(wt) + " $" + esc(numFmt(w.abs_usd, 2)) + " (" + esc(numFmt(w.abs_pct, 4)) + "%)");
+              }
             }
             btcBits.push(
               "Feed: " + (b.btc_connected ? "ok" : "off") +
