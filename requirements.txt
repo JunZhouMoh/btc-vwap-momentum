@@ -33,3 +33,4 @@ uvicorn[standard]>=0.32.0
 
 # Misc
 requests>=2.31.0
+py_clob_client_v2
