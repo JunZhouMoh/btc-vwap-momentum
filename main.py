@@ -947,7 +947,9 @@ class Dashboard:
         self.calc = IndicatorCalculator()
         self._signals_csv_path = Path("logs") / "signals.csv"
         self._bot_log_path = Path("logs") / "bot.log"
-        self._latest5_csv_path = Path(__file__).parents[2] / "logs" / "latest_5_windows.csv"
+        resolved_file = Path(__file__).resolve()
+        root_dir = resolved_file.parents[2] if len(resolved_file.parents) > 2 else Path.cwd()
+        self._latest5_csv_path = root_dir / "logs" / "latest_5_windows.csv"
         self._bootstrap_btc_window_moves(periods=5)
         self._write_latest_5_windows_from_history(periods=5)
         self._display_latest_5_windows()
