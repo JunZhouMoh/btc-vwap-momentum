@@ -1247,8 +1247,8 @@ class Dashboard:
         current_abs_usd = abs(self.state.btc_current_price - self.state.btc_anchor_price)
         current_abs_pct = abs((self.state.btc_current_price - self.state.btc_anchor_price) / self.state.btc_anchor_price * 100)
         
-        # Apply floor of 90 USD to buffer threshold
-        buffer_abs_usd = max(90.0, buffer_stats["avg_abs_usd"])
+        # Apply floor of 25 USD to buffer threshold
+        buffer_abs_usd = max(25.0, buffer_stats["avg_abs_usd"])
         
         return {
             "current_abs_usd": current_abs_usd,
