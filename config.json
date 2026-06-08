@@ -10,7 +10,7 @@
     "min_price": 0.6,
     "max_price": 0.99,
     "_comment_5m": "Below min_elapsed / no_entry_cutoff are scaled for 5m (300s). For 15m, raise e.g. min_elapsed_sec 530, no_entry_before_end_sec 335.",
-    "min_elapsed_sec": 60,
+    "min_elapsed_sec": 120,
     "min_deviation_pct": 5,
     "max_deviation_pct": 100,
     "no_entry_before_end_sec": 0,
@@ -20,7 +20,7 @@
   },
 
   "entry": {
-    "bet_amount_usd": 2,
+    "bet_amount_usd": 8,
     "price_offset": 0.02,
     "order_type": "FAK",
     "max_retries": 3,
