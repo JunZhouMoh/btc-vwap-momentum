@@ -27,7 +27,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 from pathlib import Path
 
 import aiohttp
@@ -91,6 +91,7 @@ from src.auto_redeemer import AsyncAutoRedeemer
 from src.telegram_notifier import TelegramNotifier
 from src.user_websocket import UserWebSocket
 from src.simulation_history import SimulationHistoryLogger
+from src.btc_volume_feed import BTCVolumeFeed
 
 # Constants
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -271,6 +272,52 @@ class IndicatorCalculator:
         mean_price = statistics.mean(prices)
         std_price = statistics.stdev(prices) if len(prices) > 1 else 0.001
         return (current_price - mean_price) / std_price if std_price > 0 else 0.0
+    
+    @staticmethod
+    def calc_ema(trades: deque, period: int = 9, window: float = 3600) -> Optional[float]:
+        """
+        Calculate EMA (Exponential Moving Average) for a given period.
+        
+        Args:
+            trades: deque of Trade objects
+            period: EMA period (e.g., 9 or 21)
+            window: time window in seconds to extract trades from
+        
+        Returns:
+            EMA value or None if not enough data
+        """
+        if not trades or period < 1:
+            return None
+        
+        now = time.time()
+        recent_trades = [t for t in trades if t.timestamp >= now - window]
+        
+        if len(recent_trades) < period:
+            return None
+        
+        prices = [t.price for t in recent_trades]
+        
+        # Calculate multiplier
+        multiplier = 2.0 / (period + 1)
+        
+        # Start with SMA for first value
+        ema = sum(prices[:period]) / period
+        
+        # Calculate EMA for remaining prices
+        for price in prices[period:]:
+            ema = (price - ema) * multiplier + ema
+        
+        return ema
+    
+    @staticmethod
+    def calc_ema_9(trades: deque, window: float = 3600) -> Optional[float]:
+        """Calculate 9-period EMA."""
+        return IndicatorCalculator.calc_ema(trades, period=9, window=window)
+    
+    @staticmethod
+    def calc_ema_21(trades: deque, window: float = 3600) -> Optional[float]:
+        """Calculate 21-period EMA."""
+        return IndicatorCalculator.calc_ema(trades, period=21, window=window)
 
 
 class WinRateTable:
@@ -960,6 +1007,38 @@ class Dashboard:
         self.last_signal = ""
         self.entry_flash = False
         self.hedge_flash = False
+        self.btc_volume_feed: Optional[BTCVolumeFeed] = None
+        self._btc_roll_cache: Dict[str, Optional[float]] = {
+            "UP": None,
+            "DOWN": None,
+        }
+
+    def _get_btc_roll_key(self, label: str) -> str:
+        text = (label or "").upper()
+        return "UP" if text.startswith("UP") else "DOWN"
+
+    def _get_btc_rolling_indicators(
+        self,
+        label: str,
+        vwap_window: float,
+    ) -> Optional[float]:
+        """
+        Keep BTC vol ratio rolling across minute boundaries.
+        Binance 1m klines are timestamped at minute open, so very short windows
+        (e.g. 30s) often return empty results between closes.
+        """
+        key = self._get_btc_roll_key(label)
+        cached = self._btc_roll_cache.get(key)
+
+        if self.btc_volume_feed and self.btc_volume_feed.is_connected:
+            btc_window = max(int(vwap_window), 120)
+            vol_ratio = self.btc_volume_feed.get_volume_ratio(window_seconds=btc_window)
+
+            if vol_ratio is not None:
+                cached = vol_ratio
+                self._btc_roll_cache[key] = cached
+
+        return cached
 
     def _display_latest_5_windows(self) -> None:
         """Load and log the latest 5 completed windows from CSV."""
@@ -984,7 +1063,7 @@ class Dashboard:
                 usd = float(row.get("abs_usd_move", 0.0))
                 pct = float(row.get("abs_pct_move", 0.0))
                 source = row.get("source", "")
-                logger.info(f"  [{i}] {start} → {end} | ${usd:.2f} ({pct:.4f}%) | {source}")
+                logger.info(f"  [{i}] {start} -> {end} | ${usd:.2f} ({pct:.4f}%) | {source}")
         except Exception as e:
             logger.warning(f"Failed to display latest 5 windows: {e}")
 
@@ -1247,8 +1326,8 @@ class Dashboard:
         current_abs_usd = abs(self.state.btc_current_price - self.state.btc_anchor_price)
         current_abs_pct = abs((self.state.btc_current_price - self.state.btc_anchor_price) / self.state.btc_anchor_price * 100)
         
-        # Apply floor of 25 USD to buffer threshold
-        buffer_abs_usd = max(25.0, buffer_stats["avg_abs_usd"])
+        # Apply floor of buffer value from config to buffer threshold
+        buffer_abs_usd = max(self.config.buffer, buffer_stats["avg_abs_usd"])
         
         return {
             "current_abs_usd": current_abs_usd,
@@ -1356,10 +1435,13 @@ class Dashboard:
         mom_window = self.config.strategy.momentum_window_sec
         
         vwap_window = self.config.strategy.vwap_window_sec
-        vwap = self.calc.calc_vwap(self.calc.get_trades_in_window(token.trades, vwap_window))
+        trades_in_window = self.calc.get_trades_in_window(token.trades, vwap_window)
+        vwap = self.calc.calc_vwap(trades_in_window)
         deviation = self.calc.calc_deviation(token.last_price, vwap)
         zscore = self.calc.calc_zscore(token.trades, token.last_price, window=5)
         momentum = self.calc.calc_momentum(token.trades, token.last_price, window=mom_window)
+        ema9 = self.calc.calc_ema_9(token.trades, window=vwap_window)
+        ema21 = self.calc.calc_ema_21(token.trades, window=vwap_window)
         
         def fmt_vol(v):
             if v >= 1_000_000:
@@ -1368,11 +1450,26 @@ class Dashboard:
                 return f"{v/1_000:.1f}K"
             return f"{v:.0f}"
         
+        def fmt_ema(e):
+            if e is None:
+                return "[dim]N/A[/dim]"
+            return f"{e:.4f}"
+        
+        # BTC-volume indicators roll from previous closed window when current one is sparse.
+        vol_ratio = self._get_btc_rolling_indicators(label, vwap_window)
+        
         lines = [
-            f"VWAP {vwap_window}s:   {vwap:.4f}",
+            f"PM VWAP {vwap_window}s: {vwap:.4f}  [dim](poly vol)[/dim]",
+        ]
+        
+        ratio_str = f"{vol_ratio:+.1f}%" if vol_ratio is not None else "N/A"
+        ratio_color = "green" if (vol_ratio or 0) > 0 else "red"
+        lines += [
             f"Deviation:   {self._fmt_dev(deviation)}",
             f"Z-Score 5s:  {self._fmt_zscore(zscore)}",
             f"Mom {mom_window}s:   {self._fmt_momentum(momentum)}",
+            f"EMA9:        {fmt_ema(ema9)}  EMA21: {fmt_ema(ema21)}",
+            f"BTC Vol Bias: [{ratio_color}]{ratio_str}[/{ratio_color}]",
             "",
             f"Trades:      {token.trade_count}",
             f"Volume:      {fmt_vol(token.volume_total)}",
@@ -1544,7 +1641,7 @@ class Dashboard:
         for trade in s.trades[-3:][::-1]:
             icon = "✅" if trade.won else "❌"
             trade_time = datetime.fromtimestamp(trade.timestamp).strftime('%Y-%m-%d %H:%M:%S')
-            last_trades_lines.append(f"  {icon} {trade_time} | {trade.token_name} @ {trade.entry_price:.2f} → ${trade.pnl:+.2f}")
+            last_trades_lines.append(f"  {icon} {trade_time} | {trade.token_name} @ {trade.entry_price:.2f} -> ${trade.pnl:+.2f}")
         
         lines = [stats_line, pnl_line, "", pos_line]
         if ur_line:
@@ -1686,14 +1783,21 @@ class Dashboard:
             if token.trades:
                 vw = self.config.strategy.vwap_window_sec
                 mw = self.config.strategy.momentum_window_sec
-                vwap = self.calc.calc_vwap(self.calc.get_trades_in_window(token.trades, vw))
+                trades_in_window = self.calc.get_trades_in_window(token.trades, vw)
+                vwap = self.calc.calc_vwap(trades_in_window)
+                ema9 = self.calc.calc_ema_9(token.trades, window=vw)
+                ema21 = self.calc.calc_ema_21(token.trades, window=vw)
+                btc_vol_ratio = self._get_btc_rolling_indicators(token.name, vw)
                 ind = {
                     "vwap_window_sec": vw,
-                    "vwap": vwap,
+                    "pm_vwap": vwap,
                     "deviation_pct": self.calc.calc_deviation(token.last_price, vwap),
                     "zscore": self.calc.calc_zscore(token.trades, token.last_price, window=5),
                     "momentum_window_sec": mw,
                     "momentum_pct": self.calc.calc_momentum(token.trades, token.last_price, window=mw),
+                    "ema9": ema9,
+                    "ema21": ema21,
+                    "btc_vol_ratio": btc_vol_ratio,
                 }
             return {"book": book, "indicators": ind}
 
@@ -1874,7 +1978,7 @@ class Dashboard:
             icon = "✅" if trade.won else "❌"
             trade_time = datetime.fromtimestamp(trade.timestamp).strftime('%Y-%m-%d %H:%M:%S')
             trading["recent_trades"].append({
-                "line": f"{icon} {trade_time} | {trade.token_name} @ {trade.entry_price:.2f} → ${trade.pnl:+.2f}",
+                "line": f"{icon} {trade_time} | {trade.token_name} @ {trade.entry_price:.2f} -> ${trade.pnl:+.2f}",
             })
 
         return {
@@ -1914,6 +2018,10 @@ class LiveTradingBot:
         # Chainlink BTC price
         self.chainlink_client: ChainlinkPriceClient = None
         self._chainlink_task: Optional[asyncio.Task] = None
+        
+        # BTC volume feed (Binance)
+        self.btc_volume_feed: BTCVolumeFeed = None
+        self._btc_volume_task: Optional[asyncio.Task] = None
         
         # Control
         self.running = False
@@ -2074,8 +2182,14 @@ class LiveTradingBot:
         self._chainlink_task = asyncio.create_task(self.chainlink_client.connect())
         console.print("[green]✓ Chainlink BTC/USD price feed starting...[/green]")
         
+        # BTC volume feed (Binance)
+        self.btc_volume_feed = BTCVolumeFeed()
+        self._btc_volume_task = asyncio.create_task(self.btc_volume_feed.start())
+        console.print("[green]✓ Binance BTC volume feed starting...[/green]")
+        
         # Dashboard
         self.dashboard = Dashboard(self.state, self.stats, self.config)
+        self.dashboard.btc_volume_feed = self.btc_volume_feed
 
         wd = self.config.web_dashboard
         if wd.enabled:
@@ -2472,28 +2586,13 @@ class LiveTradingBot:
                 if hedge_result.success:
                     self.dashboard.hedge_flash = True
                     hedge_cost = hedge_result.contracts * hedge_result.price
-                    
-                    hsim = "🎮 <b>[SIMULATION]</b>\n" if self.config.simulation.enabled else ""
-                    await self.telegram.send_message(
-                        f"{hsim}"
-                        f"🛡️ <b>Hedge Order Placed (GTD)</b>\n"
-                        f"📦 {hedge_result.contracts} contracts @ ${hedge_result.price}\n"
-                        f"💰 Cost: ${hedge_cost:.2f}\n"
-                        f"🔖 Order ID: {hedge_result.order_id[:20]}...\n"
-                        f"📋 Status: LIVE (passive)\n"
-                        f"🔄 Attempts: {hedge_result.attempts}"
-                    )
+                
                     
                     # Register WebSocket handler for hedge fills
                     self._register_hedge_ws_handler()
                     
                     logger.info(f"GTD hedge placed: {hedge_result.contracts} @ ${hedge_result.price}")
                 else:
-                    await self.telegram.send_message(
-                        f"⚠️ <b>Hedge Failed</b>\n"
-                        f"❌ {hedge_result.error}\n"
-                        f"🔄 Attempts: {hedge_result.attempts}"
-                    )
                     logger.error(f"Hedge failed: {hedge_result.error}")
         else:
             signal_logger.error(f"ENTRY FAILED: {result.error}")
@@ -2719,6 +2818,14 @@ class LiveTradingBot:
             if record:
                 self._simulation_log_close(record, hedged_was)
                 status = "✅ WIN" if record.won else "❌ LOSS"
+                winner = pos.token_name if record.won else ("DOWN" if pos.token_name == "UP" else "UP")
+
+                await self.telegram.notify_market_end(
+                    winner=winner,
+                    pnl=record.pnl,
+                    total_pnl=self.stats.total_pnl,
+                    win_rate=self.stats.win_rate,
+                )
                 
                 signal_logger.info(f"  Result: {'WIN' if record.won else 'LOSS'}")
                 signal_logger.info(f"  P&L: ${record.pnl:+.2f}")
@@ -2891,6 +2998,16 @@ class LiveTradingBot:
                 try:
                     self._chainlink_task.cancel()
                     await self._chainlink_task
+                except:
+                    pass
+            
+            # Stop BTC volume feed
+            if self.btc_volume_feed:
+                await self.btc_volume_feed.stop()
+            if self._btc_volume_task:
+                try:
+                    self._btc_volume_task.cancel()
+                    await self._btc_volume_task
                 except:
                     pass
             
