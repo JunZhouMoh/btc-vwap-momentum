@@ -77,5 +77,6 @@
     "clob_host": "https://clob.polymarket.com",
     "chain_id": "",
     "signature_type": ""
-  }
+  },
+    "buffer": 25.0
 }
