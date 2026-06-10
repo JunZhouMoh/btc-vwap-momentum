@@ -48,7 +48,7 @@
 
   "simulation": {
     "_comment": "Paper trading: live market data, no CLOB orders or redeemer. API keys optional when enabled.",
-    "enabled": false,
+    "enabled": true,
     "separate_trading_log": true,
     "trading_log_path": "logs/trading_log_sim.json",
     "history_csv_path": "logs/simulation_trades.csv",
