@@ -131,8 +131,10 @@ _HTML = """<!DOCTYPE html>
             el.innerHTML = [
               "Last " + esc(bk.last_price),
               "Bid " + esc(bk.best_bid) + " / Ask " + esc(bk.best_ask),
-              "VWAP " + numFmt(ind.vwap, 4) +
-                " \u00b7 Dev " + (ind.deviation_pct != null ? numFmt(ind.deviation_pct, 2) + "%" : "\u2014"),
+              "PM VWAP " + numFmt(ind.pm_vwap, 4) +
+                " \u00b7 BTC VWAP " + (ind.btc_vwap_weighted != null ? numFmt(ind.btc_vwap_weighted, 4) : "\u2014"),
+              "Dev " + (ind.deviation_pct != null ? numFmt(ind.deviation_pct, 2) + "%" : "\u2014") +
+                " \u00b7 BTC Vol Bias " + (ind.btc_vol_ratio != null ? numFmt(ind.btc_vol_ratio, 1) + "%" : "\u2014"),
               "Z " + numFmt(ind.zscore, 2) +
                 " \u00b7 Mom " + (ind.momentum_pct != null ? numFmt(ind.momentum_pct, 2) + "%" : "\u2014"),
               "Vol " + (bk.volume_total != null ? esc(Math.round(bk.volume_total)) : "\u2014"),
