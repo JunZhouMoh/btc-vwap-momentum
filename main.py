@@ -1531,7 +1531,7 @@ class Dashboard:
         price_ok = min_price <= fav_price <= max_price
         time_ok = elapsed_sec >= min_elapsed
         dev_ok = fav_dev > min_dev and fav_dev < max_dev
-        mom_ok = fav_mom is not None and fav_mom > 30
+        mom_ok = fav_mom is not None and fav_mom > 0
         time_cutoff_ok = time_left > no_entry_cutoff
         btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
         
