@@ -10,8 +10,8 @@
     "min_price": 0.6,
     "max_price": 0.99,
     "_comment_5m": "Below min_elapsed / no_entry_cutoff are scaled for 5m (300s). For 15m, raise e.g. min_elapsed_sec 530, no_entry_before_end_sec 335.",
-    "min_elapsed_sec": 150,
-    "min_deviation_pct": 5,
+    "min_elapsed_sec": 60,
+    "min_deviation_pct": 0,
     "max_deviation_pct": 100,
     "no_entry_before_end_sec": 0,
     "momentum_window_sec": 60,
@@ -48,7 +48,7 @@
 
   "simulation": {
     "_comment": "Paper trading: live market data, no CLOB orders or redeemer. API keys optional when enabled.",
-    "enabled": false,
+    "enabled": true,
     "separate_trading_log": true,
     "trading_log_path": "logs/trading_log_sim.json",
     "history_csv_path": "logs/simulation_trades.csv",
