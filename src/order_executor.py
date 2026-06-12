@@ -38,7 +38,7 @@ order_logger.setLevel(logging.DEBUG)
 
 # Polymarket minimums
 MIN_ORDER_USD = 1.0
-MIN_CONTRACTS = 5
+MIN_CONTRACTS = 2
 
 
 def _coerce_int(value: Any, default: int) -> int:
