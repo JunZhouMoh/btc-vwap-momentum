@@ -756,6 +756,15 @@ class ChainlinkPriceClient:
         return int(ts) // d * d
     
     DATA_TIMEOUT = 30  # seconds without any message → force reconnect
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        return (symbol or "").strip().lower().replace("/", "").replace("-", "").replace("_", "")
+
+    @classmethod
+    def _is_btc_symbol(cls, symbol: str) -> bool:
+        s = cls._normalize_symbol(symbol)
+        return s in {"btcusd", "btcusdt"}
     
     async def connect(self):
         """Connect to RTDS and subscribe to Chainlink BTC/USD prices. Always on."""
@@ -770,14 +779,22 @@ class ChainlinkPriceClient:
                     self._last_msg_time = time.time()
                     logger.info("RTDS Chainlink connected")
                     
-                    # Subscribe to chainlink prices (all symbols, filter in code)
+                    # Subscribe to both feeds: chainlink may be sparse/unavailable,
+                    # while crypto_prices currently streams btcusdt reliably.
                     subscribe_msg = json.dumps({
                         "action": "subscribe",
-                        "subscriptions": [{
-                            "topic": "crypto_prices_chainlink",
-                            "type": "*",
-                            "filters": ""
-                        }]
+                        "subscriptions": [
+                            {
+                                "topic": "crypto_prices_chainlink",
+                                "type": "*",
+                                "filters": ""
+                            },
+                            {
+                                "topic": "crypto_prices",
+                                "type": "*",
+                                "filters": ""
+                            },
+                        ]
                     })
                     await ws.send(subscribe_msg)
                     
@@ -845,14 +862,14 @@ class ChainlinkPriceClient:
             
             data = json.loads(message)
             topic = data.get("topic", "")
-            
-            if topic != "crypto_prices_chainlink":
+
+            if topic not in {"crypto_prices_chainlink", "crypto_prices"}:
                 return
             
             payload = data.get("payload", {})
             symbol = payload.get("symbol", "")
-            
-            if symbol != "btc/usd":
+
+            if not self._is_btc_symbol(symbol):
                 return
             
             price = float(payload.get("value", 0))
@@ -933,7 +950,7 @@ class ChainlinkPriceClient:
             self._last_price_before_boundary = price
             self._last_price_ts = price_ts
             
-        except (json.JSONDecodeError, ValueError, KeyError):
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError):
             pass
     
     async def _ping_loop(self, ws):
@@ -965,11 +982,18 @@ class ChainlinkPriceClient:
                 # Unsubscribe before closing
                 unsub_msg = json.dumps({
                     "action": "unsubscribe",
-                    "subscriptions": [{
-                        "topic": "crypto_prices_chainlink",
-                        "type": "*",
-                        "filters": ""
-                    }]
+                    "subscriptions": [
+                        {
+                            "topic": "crypto_prices_chainlink",
+                            "type": "*",
+                            "filters": ""
+                        },
+                        {
+                            "topic": "crypto_prices",
+                            "type": "*",
+                            "filters": ""
+                        },
+                    ]
                 })
                 await self._ws.send(unsub_msg)
                 await self._ws.close(code=1000, reason="Normal shutdown")
@@ -1249,6 +1273,15 @@ class Dashboard:
 
     def _get_recent_btc_buffer(self, periods: int = 5) -> Optional[Dict[str, float]]:
         """Average absolute BTC move over the last N completed windows (live rolling)."""
+        def _decayed_average(values_newest_first: List[float]) -> float:
+            half_life = max(float(getattr(self.config.buffer_decay, "half_life_windows", 2.5)), 1e-9)
+            decay_lambda = math.log(2.0) / half_life
+            weights = [math.exp(-decay_lambda * idx) for idx in range(len(values_newest_first))]
+            total_weight = sum(weights)
+            if total_weight <= 0:
+                return values_newest_first[0]
+            return sum(v * w for v, w in zip(values_newest_first, weights)) / total_weight
+
         live_rows = list(self.state.btc_window_moves)[-periods:]
         if live_rows:
             # Periodically refresh the display of latest windows (every 20 calls)
@@ -1256,10 +1289,14 @@ class Dashboard:
                 self._display_latest_5_windows()
             abs_pct_moves = [float(r.get("abs_pct", 0.0)) for r in live_rows]
             abs_usd_moves = [float(r.get("abs_usd", 0.0)) for r in live_rows]
+            abs_pct_newest_first = list(reversed(abs_pct_moves))
+            abs_usd_newest_first = list(reversed(abs_usd_moves))
             return {
                 "periods": float(len(live_rows)),
                 "avg_abs_pct": sum(abs_pct_moves) / len(abs_pct_moves),
                 "avg_abs_usd": sum(abs_usd_moves) / len(abs_usd_moves),
+                "decayed_abs_pct": _decayed_average(abs_pct_newest_first),
+                "decayed_abs_usd": _decayed_average(abs_usd_newest_first),
             }
 
         if not self._signals_csv_path.exists():
@@ -1301,6 +1338,8 @@ class Dashboard:
                 "periods": float(len(recent_rows)),
                 "avg_abs_pct": sum(abs_pct_moves) / len(abs_pct_moves),
                 "avg_abs_usd": sum(abs_usd_moves) / len(abs_usd_moves),
+                "decayed_abs_pct": _decayed_average(abs_pct_moves),
+                "decayed_abs_usd": _decayed_average(abs_usd_moves),
             }
         except Exception:
             return None
@@ -1309,6 +1348,13 @@ class Dashboard:
         buffer_stats = self._get_recent_btc_buffer(periods)
         if not buffer_stats:
             return None
+
+        if self.config.buffer_decay.enabled and buffer_stats["periods"] >= float(self.config.buffer_decay.min_periods):
+            return (
+                f"Buffer({int(buffer_stats['periods'])}): avg +/-${buffer_stats['avg_abs_usd']:,.2f} "
+                f"(+/-{buffer_stats['avg_abs_pct']:.3f}%), decay +/-${buffer_stats['decayed_abs_usd']:,.2f} "
+                f"(+/-{buffer_stats['decayed_abs_pct']:.3f}%)"
+            )
 
         return (
             f"Buffer({int(buffer_stats['periods'])}): +/-${buffer_stats['avg_abs_usd']:,.2f} "
@@ -1326,14 +1372,35 @@ class Dashboard:
         current_abs_usd = abs(self.state.btc_current_price - self.state.btc_anchor_price)
         current_abs_pct = abs((self.state.btc_current_price - self.state.btc_anchor_price) / self.state.btc_anchor_price * 100)
         
-        # Apply floor of buffer value from config to buffer threshold
-        buffer_abs_usd = max(30, buffer_stats["avg_abs_usd"])
+        use_decay = (
+            self.config.buffer_decay.enabled
+            and buffer_stats["periods"] >= float(self.config.buffer_decay.min_periods)
+        )
+        stats_abs_usd = buffer_stats["decayed_abs_usd"] if use_decay else buffer_stats["avg_abs_usd"]
+        stats_abs_pct = buffer_stats["decayed_abs_pct"] if use_decay else buffer_stats["avg_abs_pct"]
+
+        # Base threshold from static buffer and adaptive window stats.
+        base_buffer_abs_usd = max(self.config.buffer, stats_abs_usd)
+
+        in_window_multiplier = 1.0
+        if self.config.in_window_buffer_decay.enabled and self.state.end_time > 0:
+            time_left_sec = max(0.0, self.state.end_time - time.time())
+            start_decay_sec = float(self.config.in_window_buffer_decay.start_before_end_sec)
+            if time_left_sec <= start_decay_sec:
+                progress = 1.0 - (time_left_sec / start_decay_sec)
+                min_multiplier = float(self.config.in_window_buffer_decay.min_multiplier)
+                in_window_multiplier = 1.0 - (1.0 - min_multiplier) * progress
+
+        buffer_abs_usd = base_buffer_abs_usd * in_window_multiplier
         
         return {
             "current_abs_usd": current_abs_usd,
             "current_abs_pct": current_abs_pct,
             "buffer_abs_usd": buffer_abs_usd,
-            "buffer_abs_pct": buffer_stats["avg_abs_pct"],
+            "base_buffer_abs_usd": base_buffer_abs_usd,
+            "in_window_multiplier": in_window_multiplier,
+            "buffer_abs_pct": stats_abs_pct,
+            "buffer_metric": "decay" if use_decay else "average",
             "ok": current_abs_usd >= buffer_abs_usd,
         }
     
@@ -1531,7 +1598,7 @@ class Dashboard:
         price_ok = min_price <= fav_price <= max_price
         time_ok = elapsed_sec >= min_elapsed
         dev_ok = fav_dev > min_dev and fav_dev < max_dev
-        mom_ok = fav_mom is not None and fav_mom > 0
+        mom_ok = fav_mom is not None and fav_mom > self.config.strategy.momentum_min_pct
         time_cutoff_ok = time_left > no_entry_cutoff
         btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
         
@@ -1853,7 +1920,7 @@ class Dashboard:
             price_ok = min_price <= fav_price <= max_price
             time_ok = elapsed_sec >= min_elapsed
             dev_ok = fav_dev > min_dev and fav_dev < max_dev
-            mom_ok = fav_mom is not None and fav_mom > 30
+            mom_ok = fav_mom is not None and fav_mom > self.config.strategy.momentum_min_pct
             time_cutoff_ok = time_left > no_entry_cutoff
             btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
 
