@@ -1386,7 +1386,7 @@ class Dashboard:
         stats_abs_pct = buffer_stats["decayed_abs_pct"] if use_decay else buffer_stats["avg_abs_pct"]
 
         # Base threshold from static buffer and adaptive window stats.
-        base_buffer_abs_usd = max(self.config.buffer, stats_abs_usd)
+        base_buffer_abs_usd = max(float(getattr(self.config, "buffer", 25.0)), stats_abs_usd)
 
         in_window_multiplier = 1.0
         in_window_decay_cfg = getattr(self.config, "in_window_buffer_decay", None)
