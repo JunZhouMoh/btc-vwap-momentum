@@ -54,6 +54,7 @@ class StrategyConfig:
     max_deviation_pct: float = 100.0
     no_entry_before_end_sec: int = 90
     momentum_window_sec: int = 120
+    momentum_min_pct: float = 0.0
     vwap_window_sec: int = 30
     win_rate_csv: str = "data/win_rate.csv"
 
@@ -143,6 +144,7 @@ class Config:
     market: MarketConfig
     simulation: SimulationConfig
     strategy: StrategyConfig
+    buffer: float
     entry: EntryConfig
     hedge: HedgeConfig
     redeem: RedeemConfig
@@ -194,10 +196,11 @@ def load_config(config_path: Optional[str] = None) -> Config:
         max_deviation_pct=strategy_data.get("max_deviation_pct", 100.0),
         no_entry_before_end_sec=strategy_data.get("no_entry_before_end_sec", 90),
         momentum_window_sec=strategy_data.get("momentum_window_sec", 120),
+        momentum_min_pct=float(strategy_data.get("momentum_min_pct", 0.0)),
         vwap_window_sec=strategy_data.get("vwap_window_sec", 30),
         win_rate_csv=strategy_data.get("win_rate_csv", "data/win_rate.csv"),
     )
-    
+
     # Entry
     entry_data = data.get("entry", {})
     entry = EntryConfig(
@@ -264,6 +267,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         market=market,
         simulation=simulation,
         strategy=strategy,
+        buffer=float(data.get("buffer", 25.0)),
         entry=entry,
         hedge=hedge,
         redeem=redeem,
@@ -333,6 +337,9 @@ def validate_config(config: Config) -> list:
             f"max_deviation_pct ({config.strategy.max_deviation_pct}) "
             f"must be greater than min_deviation_pct ({config.strategy.min_deviation_pct})"
         )
+
+    if config.buffer < 0:
+        errors.append("buffer must be >= 0")
 
     if config.web_dashboard.enabled:
         if not (1 <= config.web_dashboard.port <= 65535):
