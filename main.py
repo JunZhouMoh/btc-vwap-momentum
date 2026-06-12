@@ -1273,16 +1273,6 @@ class Dashboard:
 
     def _get_recent_btc_buffer(self, periods: int = 5) -> Optional[Dict[str, float]]:
         """Average absolute BTC move over the last N completed windows (live rolling)."""
-        def _decayed_average(values_newest_first: List[float]) -> float:
-            buffer_decay_cfg = getattr(self.config, "buffer_decay", None)
-            half_life = max(float(getattr(buffer_decay_cfg, "half_life_windows", 2.5)), 1e-9)
-            decay_lambda = math.log(2.0) / half_life
-            weights = [math.exp(-decay_lambda * idx) for idx in range(len(values_newest_first))]
-            total_weight = sum(weights)
-            if total_weight <= 0:
-                return values_newest_first[0]
-            return sum(v * w for v, w in zip(values_newest_first, weights)) / total_weight
-
         live_rows = list(self.state.btc_window_moves)[-periods:]
         if live_rows:
             # Periodically refresh the display of latest windows (every 20 calls)
@@ -1290,14 +1280,10 @@ class Dashboard:
                 self._display_latest_5_windows()
             abs_pct_moves = [float(r.get("abs_pct", 0.0)) for r in live_rows]
             abs_usd_moves = [float(r.get("abs_usd", 0.0)) for r in live_rows]
-            abs_pct_newest_first = list(reversed(abs_pct_moves))
-            abs_usd_newest_first = list(reversed(abs_usd_moves))
             return {
                 "periods": float(len(live_rows)),
                 "avg_abs_pct": sum(abs_pct_moves) / len(abs_pct_moves),
                 "avg_abs_usd": sum(abs_usd_moves) / len(abs_usd_moves),
-                "decayed_abs_pct": _decayed_average(abs_pct_newest_first),
-                "decayed_abs_usd": _decayed_average(abs_usd_newest_first),
             }
 
         if not self._signals_csv_path.exists():
@@ -1339,8 +1325,6 @@ class Dashboard:
                 "periods": float(len(recent_rows)),
                 "avg_abs_pct": sum(abs_pct_moves) / len(abs_pct_moves),
                 "avg_abs_usd": sum(abs_usd_moves) / len(abs_usd_moves),
-                "decayed_abs_pct": _decayed_average(abs_pct_moves),
-                "decayed_abs_usd": _decayed_average(abs_usd_moves),
             }
         except Exception:
             return None
@@ -1349,17 +1333,6 @@ class Dashboard:
         buffer_stats = self._get_recent_btc_buffer(periods)
         if not buffer_stats:
             return None
-
-        buffer_decay_cfg = getattr(self.config, "buffer_decay", None)
-        if (
-            bool(getattr(buffer_decay_cfg, "enabled", False))
-            and buffer_stats["periods"] >= float(getattr(buffer_decay_cfg, "min_periods", 2))
-        ):
-            return (
-                f"Buffer({int(buffer_stats['periods'])}): avg +/-${buffer_stats['avg_abs_usd']:,.2f} "
-                f"(+/-{buffer_stats['avg_abs_pct']:.3f}%), decay +/-${buffer_stats['decayed_abs_usd']:,.2f} "
-                f"(+/-{buffer_stats['decayed_abs_pct']:.3f}%)"
-            )
 
         return (
             f"Buffer({int(buffer_stats['periods'])}): +/-${buffer_stats['avg_abs_usd']:,.2f} "
@@ -1376,38 +1349,22 @@ class Dashboard:
 
         current_abs_usd = abs(self.state.btc_current_price - self.state.btc_anchor_price)
         current_abs_pct = abs((self.state.btc_current_price - self.state.btc_anchor_price) / self.state.btc_anchor_price * 100)
-        
-        buffer_decay_cfg = getattr(self.config, "buffer_decay", None)
-        use_decay = (
-            bool(getattr(buffer_decay_cfg, "enabled", False))
-            and buffer_stats["periods"] >= float(getattr(buffer_decay_cfg, "min_periods", 2))
-        )
-        stats_abs_usd = buffer_stats["decayed_abs_usd"] if use_decay else buffer_stats["avg_abs_usd"]
-        stats_abs_pct = buffer_stats["decayed_abs_pct"] if use_decay else buffer_stats["avg_abs_pct"]
+
+        stats_abs_usd = buffer_stats["avg_abs_usd"]
+        stats_abs_pct = buffer_stats["avg_abs_pct"]
 
         # Base threshold from static buffer and adaptive window stats.
-        base_buffer_abs_usd = max(float(getattr(self.config, "buffer", 25.0)), stats_abs_usd)
+        base_buffer_abs_usd = max(self.config.buffer, stats_abs_usd)
 
-        in_window_multiplier = 1.0
-        in_window_decay_cfg = getattr(self.config, "in_window_buffer_decay", None)
-        if bool(getattr(in_window_decay_cfg, "enabled", False)) and self.state.end_time > 0:
-            time_left_sec = max(0.0, self.state.end_time - time.time())
-            start_decay_sec = float(getattr(in_window_decay_cfg, "start_before_end_sec", 60))
-            if time_left_sec <= start_decay_sec:
-                progress = 1.0 - (time_left_sec / start_decay_sec)
-                min_multiplier = float(getattr(in_window_decay_cfg, "min_multiplier", 0.6))
-                in_window_multiplier = 1.0 - (1.0 - min_multiplier) * progress
-
-        buffer_abs_usd = base_buffer_abs_usd * in_window_multiplier
+        buffer_abs_usd = base_buffer_abs_usd
         
         return {
             "current_abs_usd": current_abs_usd,
             "current_abs_pct": current_abs_pct,
             "buffer_abs_usd": buffer_abs_usd,
             "base_buffer_abs_usd": base_buffer_abs_usd,
-            "in_window_multiplier": in_window_multiplier,
             "buffer_abs_pct": stats_abs_pct,
-            "buffer_metric": "decay" if use_decay else "average",
+            "buffer_metric": "average",
             "ok": current_abs_usd >= buffer_abs_usd,
         }
     
@@ -1605,8 +1562,7 @@ class Dashboard:
         price_ok = min_price <= fav_price <= max_price
         time_ok = elapsed_sec >= min_elapsed
         dev_ok = fav_dev > min_dev and fav_dev < max_dev
-        momentum_min_pct = float(getattr(self.config.strategy, "momentum_min_pct", 0.0))
-        mom_ok = fav_mom is not None and fav_mom > momentum_min_pct
+        mom_ok = fav_mom is not None and fav_mom > self.config.strategy.momentum_min_pct
         time_cutoff_ok = time_left > no_entry_cutoff
         btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
         
@@ -1928,8 +1884,7 @@ class Dashboard:
             price_ok = min_price <= fav_price <= max_price
             time_ok = elapsed_sec >= min_elapsed
             dev_ok = fav_dev > min_dev and fav_dev < max_dev
-            momentum_min_pct = float(getattr(self.config.strategy, "momentum_min_pct", 0.0))
-            mom_ok = fav_mom is not None and fav_mom > momentum_min_pct
+            mom_ok = fav_mom is not None and fav_mom > self.config.strategy.momentum_min_pct
             time_cutoff_ok = time_left > no_entry_cutoff
             btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
 
