@@ -96,7 +96,7 @@ from src.btc_volume_feed import BTCVolumeFeed
 # Constants
 GAMMA_API = "https://gamma-api.polymarket.com"
 WSS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-RTDS_URL = "wss://ws-live-data.polymarket.com"
+RTDS_URL = os.getenv("BTC_PRICE_WSS_URL", "wss://stream.binance.com:9443/ws/btcusdt@trade")
 
 console = Console()
 
@@ -725,10 +725,11 @@ class WebSocketClient:
 
 class ChainlinkPriceClient:
     """
-    Always-on BTC/USD price stream from Polymarket RTDS (Chainlink source).
-    
-    Connects to wss://ws-live-data.polymarket.com and subscribes to
-    crypto_prices_chainlink for btc/usd.
+    Always-on BTC price stream.
+
+    Defaults to Binance BTCUSDT trade stream:
+    wss://stream.binance.com:9443/ws/btcusdt@trade
+    Override with BTC_PRICE_WSS_URL env variable.
     
     Autonomously tracks market boundaries (epoch-aligned to interval length)
     and snapshots the anchor price at the exact boundary crossing, independent
@@ -767,7 +768,7 @@ class ChainlinkPriceClient:
         return s in {"btcusd", "btcusdt"}
     
     async def connect(self):
-        """Connect to RTDS and subscribe to Chainlink BTC/USD prices. Always on."""
+        """Connect to BTC price stream. Always on."""
         self.running = True
         self._last_msg_time = time.time()
         
@@ -777,26 +778,7 @@ class ChainlinkPriceClient:
                     self._ws = ws
                     self.state.btc_connected = True
                     self._last_msg_time = time.time()
-                    logger.info("RTDS Chainlink connected")
-                    
-                    # Subscribe to both feeds: chainlink may be sparse/unavailable,
-                    # while crypto_prices currently streams btcusdt reliably.
-                    subscribe_msg = json.dumps({
-                        "action": "subscribe",
-                        "subscriptions": [
-                            {
-                                "topic": "crypto_prices_chainlink",
-                                "type": "*",
-                                "filters": ""
-                            },
-                            {
-                                "topic": "crypto_prices",
-                                "type": "*",
-                                "filters": ""
-                            },
-                        ]
-                    })
-                    await ws.send(subscribe_msg)
+                    logger.info(f"BTC feed connected: {RTDS_URL}")
                     
                     # Start ping task and watchdog
                     self._ping_task = asyncio.create_task(self._ping_loop(ws))
@@ -821,13 +803,13 @@ class ChainlinkPriceClient:
                 self._ws = None
                 self.state.btc_connected = False
                 if self.running:
-                    logger.warning("RTDS Chainlink disconnected, reconnecting in 2s...")
+                    logger.warning("BTC feed disconnected, reconnecting in 2s...")
                     await asyncio.sleep(2)
             except Exception as e:
                 self._ws = None
                 self.state.btc_connected = False
                 if self.running:
-                    logger.warning(f"RTDS Chainlink error: {e}, reconnecting in 5s...")
+                    logger.warning(f"BTC feed error: {e}, reconnecting in 5s...")
                     await asyncio.sleep(5)
             finally:
                 if self._ping_task and not self._ping_task.done():
@@ -855,31 +837,40 @@ class ChainlinkPriceClient:
             pass
     
     def _handle_message(self, message: str):
-        """Parse incoming Chainlink price message and auto-detect market boundaries."""
+        """Parse incoming BTC price message and auto-detect market boundaries."""
         try:
             if not isinstance(message, str) or not message.strip():
                 return
             
             data = json.loads(message)
-            topic = data.get("topic", "")
 
-            if topic not in {"crypto_prices_chainlink", "crypto_prices"}:
-                return
-            
-            payload = data.get("payload", {})
-            symbol = payload.get("symbol", "")
-
+            # Binance trade stream payload: {"e":"trade","s":"BTCUSDT","p":"...","T":...}
+            # Binance bookTicker payload: {"s":"BTCUSDT","b":"...","a":"...","E":...}
+            symbol = str(data.get("s", "") or data.get("symbol", ""))
             if not self._is_btc_symbol(symbol):
                 return
-            
-            price = float(payload.get("value", 0))
+
+            if "p" in data:
+                price = float(data.get("p", 0))
+            elif "value" in data:
+                # Backward compatibility with old RTDS payload shape.
+                price = float(data.get("value", 0))
+            else:
+                bid = float(data.get("b", 0) or 0)
+                ask = float(data.get("a", 0) or 0)
+                if bid > 0 and ask > 0:
+                    price = (bid + ask) / 2.0
+                else:
+                    price = bid or ask
+
             if price <= 0:
                 return
             
-            # Use Chainlink's own timestamp (ms) for precise boundary detection
-            chainlink_ts_ms = payload.get("timestamp", 0)
-            if chainlink_ts_ms:
-                price_ts = chainlink_ts_ms / 1000.0
+            # Use feed timestamp (ms) for precise boundary detection.
+            # Binance uses T (trade time) or E (event time).
+            ts_ms = data.get("T") or data.get("E") or data.get("timestamp") or 0
+            if ts_ms:
+                price_ts = float(ts_ms) / 1000.0
             else:
                 price_ts = time.time()
             
@@ -914,7 +905,7 @@ class ChainlinkPriceClient:
                 self._current_window = price_window
                 self.state.btc_anchor_price = price
                 logger.info(
-                    f"BTC Chainlink init: ${price:,.2f} "
+                    f"BTC feed init: ${price:,.2f} "
                     f"(window {self._current_window}, "
                     f"ts={datetime.fromtimestamp(price_ts, tz=timezone.utc).strftime('%H:%M:%S.%f')[:-3]})"
                 )
@@ -966,7 +957,7 @@ class ChainlinkPriceClient:
             pass
     
     async def disconnect(self):
-        """Gracefully close RTDS WebSocket connection."""
+        """Gracefully close BTC price WebSocket connection."""
         self.running = False
         
         if self._ping_task and not self._ping_task.done():
@@ -979,27 +970,10 @@ class ChainlinkPriceClient:
         
         if self._ws:
             try:
-                # Unsubscribe before closing
-                unsub_msg = json.dumps({
-                    "action": "unsubscribe",
-                    "subscriptions": [
-                        {
-                            "topic": "crypto_prices_chainlink",
-                            "type": "*",
-                            "filters": ""
-                        },
-                        {
-                            "topic": "crypto_prices",
-                            "type": "*",
-                            "filters": ""
-                        },
-                    ]
-                })
-                await self._ws.send(unsub_msg)
                 await self._ws.close(code=1000, reason="Normal shutdown")
-                logger.info("RTDS Chainlink closed gracefully")
+                logger.info("BTC feed closed gracefully")
             except Exception as e:
-                logger.warning(f"RTDS close error: {e}")
+                logger.warning(f"BTC feed close error: {e}")
             finally:
                 self._ws = None
         
@@ -1687,7 +1661,7 @@ class Dashboard:
         return Panel("\n".join(lines), title=f"[bold]💰 REAL Trading (${bet:.0f}/trade)[/bold]", border_style=border)
     
     def create_btc_price_panel(self) -> Panel:
-        """Panel showing Chainlink BTC/USD price and deviation from market start."""
+        """Panel showing BTC price and deviation from market start."""
         s = self.state
         buffer_stats = self._get_recent_btc_buffer()
         buffer_label = self._format_recent_btc_buffer()
@@ -1698,8 +1672,8 @@ class Dashboard:
             if buffer_label:
                 buffer_line = f"\n{buffer_label}"
             return Panel(
-                f"Chainlink {status}\nWaiting for price...{buffer_line}",
-                title="[bold]₿ BTC/USD (Chainlink)[/bold]",
+                f"Binance {status}\nWaiting for price...{buffer_line}",
+                title="[bold]₿ BTC/USDT (Binance)[/bold]",
                 border_style="dim"
             )
         
@@ -1744,7 +1718,7 @@ class Dashboard:
         
         return Panel(
             "\n".join(lines),
-            title="[bold]₿ BTC/USD (Chainlink)[/bold]",
+            title="[bold]₿ BTC/USDT (Binance)[/bold]",
             border_style="yellow"
         )
     
