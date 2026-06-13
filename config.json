@@ -9,15 +9,16 @@
   "strategy": {
     "min_price": 0.9,
     "max_price": 0.99,
+    "dangerous": true,
     "_comment_5m": "Below min_elapsed / no_entry_cutoff are scaled for 5m (300s). For 15m, raise e.g. min_elapsed_sec 530, no_entry_before_end_sec 335.",
     "min_elapsed_sec": 270,
-    "min_deviation_pct": 0.5,
+    "min_deviation_pct": -100,
     "max_deviation_pct": 100,
     "no_entry_before_end_sec": 0,
     "momentum_window_sec": 60,
     "vwap_window_sec": 30,
     "win_rate_csv": "data/win_rate.csv",
-    "momentum_min_pct": 0
+    "momentum_min_pct": -10
   },
 
   "entry": {
@@ -49,7 +50,7 @@
 
   "simulation": {
     "_comment": "Paper trading: live market data, no CLOB orders or redeemer. API keys optional when enabled.",
-    "enabled": true,
+    "enabled": false,
     "separate_trading_log": true,
     "trading_log_path": "logs/trading_log_sim.json",
     "history_csv_path": "logs/simulation_trades.csv",
@@ -79,15 +80,9 @@
     "chain_id": "",
     "signature_type": ""
   },
-  "buffer": 25.0,
-  "buffer_decay": {
-    "enabled": true,
-    "half_life_windows": 2.5,
-    "min_periods": 2
+  "btc_price_feed": {
+    "provider": "chainlink",
+    "ws_url": ""
   },
-  "in_window_buffer_decay": {
-    "enabled": true,
-    "start_before_end_sec": 60,
-    "min_multiplier": 0.6
-  }
+  "buffer": 25.0
 }
