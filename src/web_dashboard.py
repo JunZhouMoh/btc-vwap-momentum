@@ -144,7 +144,7 @@ _HTML = """<!DOCTYPE html>
           book(d.down, "down");
           var b = d.btc || {};
           var btcEl = document.getElementById("btc");
-          if (b.btc_current_price > 0) {
+          if (b.btc_connected && b.btc_current_price > 0) {
             var btcBits = [
               "$" + esc(numFmt(b.btc_current_price, 2)),
               "Anchor $" + (b.btc_anchor_price > 0 ? esc(numFmt(b.btc_anchor_price, 2)) : "\u2014"),
