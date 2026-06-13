@@ -96,7 +96,8 @@ from src.btc_volume_feed import BTCVolumeFeed
 # Constants
 GAMMA_API = "https://gamma-api.polymarket.com"
 WSS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-RTDS_URL = os.getenv("BTC_PRICE_WSS_URL", "wss://stream.binance.com:9443/ws/btcusdt@trade")
+CHAINLINK_RTDS_URL = "wss://ws-live-data.polymarket.com"
+BINANCE_BTC_WSS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
 
 console = Console()
 
@@ -173,6 +174,7 @@ class MarketState:
     btc_current_price: float = 0.0   # Latest Chainlink price
     btc_last_update: float = 0.0     # Timestamp of last price update
     btc_connected: bool = False      # RTDS connection status
+    btc_feed_source: str = "chainlink"  # chainlink | binance
     btc_window_moves: deque = field(default_factory=lambda: deque(maxlen=50))  # Completed window abs moves
 
 
@@ -725,11 +727,7 @@ class WebSocketClient:
 
 class ChainlinkPriceClient:
     """
-    Always-on BTC price stream.
-
-    Defaults to Binance BTCUSDT trade stream:
-    wss://stream.binance.com:9443/ws/btcusdt@trade
-    Override with BTC_PRICE_WSS_URL env variable.
+    Always-on BTC price stream with source switch (chainlink | binance).
     
     Autonomously tracks market boundaries (epoch-aligned to interval length)
     and snapshots the anchor price at the exact boundary crossing, independent
@@ -737,11 +735,22 @@ class ChainlinkPriceClient:
     within ~1 second of the real boundary, not 5-15s later.
     """
     
-    def __init__(self, state: 'MarketState', market_duration_sec: int):
+    def __init__(
+        self,
+        state: 'MarketState',
+        market_duration_sec: int,
+        feed_source: str = "chainlink",
+        feed_url: Optional[str] = None,
+    ):
         self.state = state
         self._market_duration = int(market_duration_sec)
         if self._market_duration <= 0:
             self._market_duration = 900
+        source = (feed_source or "chainlink").strip().lower()
+        self._feed_source = source if source in {"chainlink", "binance"} else "chainlink"
+        self._feed_url = feed_url or (
+            CHAINLINK_RTDS_URL if self._feed_source == "chainlink" else BINANCE_BTC_WSS_URL
+        )
         self.running = False
         self._ws = None
         self._ping_task: Optional[asyncio.Task] = None
@@ -774,11 +783,24 @@ class ChainlinkPriceClient:
         
         while self.running:
             try:
-                async with websockets.connect(RTDS_URL) as ws:
+                async with websockets.connect(self._feed_url) as ws:
                     self._ws = ws
                     self.state.btc_connected = True
                     self._last_msg_time = time.time()
-                    logger.info(f"BTC feed connected: {RTDS_URL}")
+                    logger.info(f"BTC feed connected ({self._feed_source}): {self._feed_url}")
+
+                    if self._feed_source == "chainlink":
+                        subscribe_msg = json.dumps({
+                            "action": "subscribe",
+                            "subscriptions": [
+                                {
+                                    "topic": "crypto_prices_chainlink",
+                                    "type": "*",
+                                    "filters": ""
+                                }
+                            ]
+                        })
+                        await ws.send(subscribe_msg)
                     
                     # Start ping task and watchdog
                     self._ping_task = asyncio.create_task(self._ping_loop(ws))
@@ -844,31 +866,41 @@ class ChainlinkPriceClient:
             
             data = json.loads(message)
 
-            # Binance trade stream payload: {"e":"trade","s":"BTCUSDT","p":"...","T":...}
-            # Binance bookTicker payload: {"s":"BTCUSDT","b":"...","a":"...","E":...}
-            symbol = str(data.get("s", "") or data.get("symbol", ""))
-            if not self._is_btc_symbol(symbol):
-                return
+            if self._feed_source == "chainlink":
+                topic = data.get("topic", "")
+                if topic != "crypto_prices_chainlink":
+                    return
 
-            if "p" in data:
-                price = float(data.get("p", 0))
-            elif "value" in data:
-                # Backward compatibility with old RTDS payload shape.
-                price = float(data.get("value", 0))
+                payload = data.get("payload", {}) if isinstance(data, dict) else {}
+                symbol = str(payload.get("symbol", ""))
+                if not self._is_btc_symbol(symbol):
+                    return
+
+                price = float(payload.get("value", 0))
+                ts_ms = payload.get("timestamp") or 0
             else:
-                bid = float(data.get("b", 0) or 0)
-                ask = float(data.get("a", 0) or 0)
-                if bid > 0 and ask > 0:
-                    price = (bid + ask) / 2.0
+                # Binance trade stream payload: {"e":"trade","s":"BTCUSDT","p":"...","T":...}
+                # Binance bookTicker payload: {"s":"BTCUSDT","b":"...","a":"...","E":...}
+                symbol = str(data.get("s", "") or data.get("symbol", ""))
+                if not self._is_btc_symbol(symbol):
+                    return
+
+                if "p" in data:
+                    price = float(data.get("p", 0))
                 else:
-                    price = bid or ask
+                    bid = float(data.get("b", 0) or 0)
+                    ask = float(data.get("a", 0) or 0)
+                    if bid > 0 and ask > 0:
+                        price = (bid + ask) / 2.0
+                    else:
+                        price = bid or ask
+                ts_ms = data.get("T") or data.get("E") or 0
 
             if price <= 0:
                 return
             
             # Use feed timestamp (ms) for precise boundary detection.
-            # Binance uses T (trade time) or E (event time).
-            ts_ms = data.get("T") or data.get("E") or data.get("timestamp") or 0
+            # Chainlink uses payload timestamp; Binance uses T (trade time) or E (event time).
             if ts_ms:
                 price_ts = float(ts_ms) / 1000.0
             else:
@@ -970,6 +1002,18 @@ class ChainlinkPriceClient:
         
         if self._ws:
             try:
+                if self._feed_source == "chainlink":
+                    unsub_msg = json.dumps({
+                        "action": "unsubscribe",
+                        "subscriptions": [
+                            {
+                                "topic": "crypto_prices_chainlink",
+                                "type": "*",
+                                "filters": ""
+                            }
+                        ]
+                    })
+                    await self._ws.send(unsub_msg)
                 await self._ws.close(code=1000, reason="Normal shutdown")
                 logger.info("BTC feed closed gracefully")
             except Exception as e:
@@ -1542,8 +1586,17 @@ class Dashboard:
         
         signal = "⏳ WAIT"
         signal_color = "yellow"
+        last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
         
-        if not time_cutoff_ok:
+        if last_20s_price_only:
+            if price_ok:
+                signal = f"✅ BUY {fav_name} (last 20s: price only)"
+                signal_color = "bold green"
+                self.last_signal = f"BUY_{fav_name}"
+            else:
+                signal = "⏳ WAIT (last 20s: P not in range)"
+                self.last_signal = ""
+        elif not time_cutoff_ok:
             signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
             signal_color = "red"
             self.last_signal = ""
@@ -1598,6 +1651,8 @@ class Dashboard:
                 f"BTC Buffer:  ${btc_buffer['current_abs_usd']:,.2f} vs ${btc_buffer['buffer_abs_usd']:,.2f} "
                 f"({'OK' if btc_buffer_ok else 'WAIT'})"
             )
+        if last_20s_price_only:
+            lines.insert(7, "Last 20s:   DANGEROUS mode price-only entry (other checks bypassed)")
         
         title = f"[bold]Strategy: P {min_price}-{max_price}, T≥{min_elapsed}s, Dev {min_dev}%-{max_dev}%[/bold]"
         border = "green" if signal_color == "bold green" else "magenta"
@@ -1663,6 +1718,8 @@ class Dashboard:
     def create_btc_price_panel(self) -> Panel:
         """Panel showing BTC price and deviation from market start."""
         s = self.state
+        feed_label = "Chainlink" if (s.btc_feed_source or "").lower() == "chainlink" else "Binance"
+        pair_label = "BTC/USD" if feed_label == "Chainlink" else "BTC/USDT"
         buffer_stats = self._get_recent_btc_buffer()
         buffer_label = self._format_recent_btc_buffer()
         
@@ -1672,8 +1729,8 @@ class Dashboard:
             if buffer_label:
                 buffer_line = f"\n{buffer_label}"
             return Panel(
-                f"Binance {status}\nWaiting for price...{buffer_line}",
-                title="[bold]₿ BTC/USDT (Binance)[/bold]",
+                f"{feed_label} {status}\nWaiting for price...{buffer_line}",
+                title=f"[bold]₿ {pair_label} ({feed_label})[/bold]",
                 border_style="dim"
             )
         
@@ -1718,7 +1775,7 @@ class Dashboard:
         
         return Panel(
             "\n".join(lines),
-            title="[bold]₿ BTC/USDT (Binance)[/bold]",
+            title=f"[bold]₿ {pair_label} ({feed_label})[/bold]",
             border_style="yellow"
         )
     
@@ -1862,7 +1919,14 @@ class Dashboard:
             time_cutoff_ok = time_left > no_entry_cutoff
             btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
 
-            if not time_cutoff_ok:
+            last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
+
+            if last_20s_price_only:
+                if price_ok:
+                    signal = f"✅ BUY {fav_name} (last 20s: price only)"
+                else:
+                    signal = "⏳ WAIT (last 20s: P not in range)"
+            elif not time_cutoff_ok:
                 signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
             elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok:
                 signal = f"✅ BUY {fav_name}"
@@ -1904,6 +1968,7 @@ class Dashboard:
                     "mom": mom_ok,
                     "btc_buffer": btc_buffer_ok,
                     "time_cutoff": time_cutoff_ok,
+                    "last_20s_price_only": last_20s_price_only,
                 },
                 "btc_buffer_line": (
                     f"${btc_buffer['current_abs_usd']:,.2f} vs ${btc_buffer['buffer_abs_usd']:,.2f}"
@@ -2180,12 +2245,21 @@ class LiveTradingBot:
         else:
             self._sim_history = None
         
-        # Chainlink BTC price client
+        # BTC price client (chainlink or binance)
+        feed_cfg = getattr(self.config, "btc_price_feed", None)
+        feed_source = getattr(feed_cfg, "provider", "chainlink") if feed_cfg else "chainlink"
+        feed_url_cfg = getattr(feed_cfg, "ws_url", "") if feed_cfg else ""
+        feed_url_override = os.getenv("BTC_PRICE_WSS_URL") or feed_url_cfg
+        self.state.btc_feed_source = str(feed_source or "chainlink").strip().lower()
         self.chainlink_client = ChainlinkPriceClient(
-            self.state, self.config.market.duration_sec
+            self.state,
+            self.config.market.duration_sec,
+            feed_source=feed_source,
+            feed_url=(feed_url_override or None),
         )
         self._chainlink_task = asyncio.create_task(self.chainlink_client.connect())
-        console.print("[green]✓ Chainlink BTC/USD price feed starting...[/green]")
+        source_name = "Chainlink" if self.state.btc_feed_source == "chainlink" else "Binance"
+        console.print(f"[green]✓ {source_name} BTC price feed starting...[/green]")
         
         # BTC volume feed (Binance)
         self.btc_volume_feed = BTCVolumeFeed()
@@ -2404,30 +2478,7 @@ class LiveTradingBot:
         if not self.stats.can_enter():
             signal_logger.info(f"SIGNAL IGNORED: {side} - cannot enter (already in position)")
             return
-        
-        # Defensive time cutoff check (race condition guard)
-        time_left = max(0, self.state.end_time - time.time())
-        no_entry_cutoff = self.config.strategy.no_entry_before_end_sec
-        if time_left < no_entry_cutoff:
-            signal_logger.info(
-                f"SIGNAL BLOCKED: {side} - too close to market end "
-                f"({time_left:.0f}s left < {no_entry_cutoff}s cutoff)"
-            )
-            logger.warning(f"Entry blocked: {time_left:.0f}s left < {no_entry_cutoff}s cutoff")
-            return
 
-        btc_buffer = self.dashboard._get_btc_buffer_status()
-        if btc_buffer and not btc_buffer["ok"]:
-            signal_logger.info(
-                f"SIGNAL BLOCKED: {side} - BTC absolute move ${btc_buffer['current_abs_usd']:,.2f} "
-                f"< buffer ${btc_buffer['buffer_abs_usd']:,.2f}"
-            )
-            logger.warning(
-                f"Entry blocked by BTC buffer: ${btc_buffer['current_abs_usd']:,.2f} "
-                f"< ${btc_buffer['buffer_abs_usd']:,.2f}"
-            )
-            return
-        
         if side == "BUY_UP":
             token = self.state.up_token
             token_name = "UP"
@@ -2436,9 +2487,44 @@ class LiveTradingBot:
             token = self.state.down_token
             token_name = "DOWN"
             opposite_token = self.state.up_token
-        
+
         if not token or not opposite_token:
             signal_logger.warning(f"SIGNAL IGNORED: {side} - token data missing")
+            return
+
+        min_price = self.config.strategy.min_price
+        max_price = self.config.strategy.max_price
+        price_ok = min_price <= token.last_price <= max_price
+        
+        # Defensive time cutoff check (race condition guard)
+        time_left = max(0, self.state.end_time - time.time())
+        no_entry_cutoff = self.config.strategy.no_entry_before_end_sec
+        last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
+        if last_20s_price_only:
+            if not price_ok:
+                signal_logger.info(
+                    f"SIGNAL BLOCKED: {side} - last 20s price-only gate failed "
+                    f"({token.last_price:.4f} not in [{min_price}, {max_price}])"
+                )
+                return
+        elif time_left < no_entry_cutoff:
+            signal_logger.info(
+                f"SIGNAL BLOCKED: {side} - too close to market end "
+                f"({time_left:.0f}s left < {no_entry_cutoff}s cutoff)"
+            )
+            logger.warning(f"Entry blocked: {time_left:.0f}s left < {no_entry_cutoff}s cutoff")
+            return
+
+        btc_buffer = self.dashboard._get_btc_buffer_status()
+        if not last_20s_price_only and btc_buffer and not btc_buffer["ok"]:
+            signal_logger.info(
+                f"SIGNAL BLOCKED: {side} - BTC absolute move ${btc_buffer['current_abs_usd']:,.2f} "
+                f"< buffer ${btc_buffer['buffer_abs_usd']:,.2f}"
+            )
+            logger.warning(
+                f"Entry blocked by BTC buffer: ${btc_buffer['current_abs_usd']:,.2f} "
+                f"< ${btc_buffer['buffer_abs_usd']:,.2f}"
+            )
             return
         
         # Log full signal snapshot
@@ -2495,6 +2581,7 @@ class LiveTradingBot:
         # Strategy conditions snapshot
         signal_logger.info(f"  Config: min_price={self.config.strategy.min_price}, "
                           f"max_price={self.config.strategy.max_price}, "
+                          f"dangerous={self.config.strategy.dangerous}, "
                           f"min_elapsed={self.config.strategy.min_elapsed_sec}s, "
                           f"dev_range={self.config.strategy.min_deviation_pct}%-{self.config.strategy.max_deviation_pct}%, "
                           f"no_entry_cutoff={self.config.strategy.no_entry_before_end_sec}s")
