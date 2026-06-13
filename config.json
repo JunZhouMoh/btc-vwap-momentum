@@ -22,7 +22,7 @@
   },
 
   "entry": {
-    "bet_amount_usd": 2,
+    "bet_amount_usd": 5,
     "price_offset": 0.02,
     "order_type": "FAK",
     "max_retries": 3,
