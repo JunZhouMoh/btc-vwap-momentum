@@ -49,6 +49,7 @@ class StrategyConfig:
     """Strategy parameters."""
     min_price: float = 0.65
     max_price: float = 0.91
+    dangerous: bool = False
     min_elapsed_sec: int = 480
     min_deviation_pct: float = 5.0
     max_deviation_pct: float = 100.0
@@ -57,22 +58,6 @@ class StrategyConfig:
     momentum_min_pct: float = 0.0
     vwap_window_sec: int = 30
     win_rate_csv: str = "data/win_rate.csv"
-
-
-@dataclass
-class BufferDecayConfig:
-    """Optional exponential decay for BTC buffer threshold estimation."""
-    enabled: bool = False
-    half_life_windows: float = 2.5
-    min_periods: int = 2
-
-
-@dataclass
-class InWindowBufferDecayConfig:
-    """Optional in-window decay that lowers BTC buffer threshold near market end."""
-    enabled: bool = False
-    start_before_end_sec: int = 60
-    min_multiplier: float = 0.6
 
 
 @dataclass
@@ -141,6 +126,13 @@ class WebDashboardConfig:
 
 
 @dataclass
+class BTCPriceFeedConfig:
+    """BTC price feed source configuration."""
+    provider: str = "chainlink"  # chainlink | binance
+    ws_url: str = ""
+
+
+@dataclass
 class PolymarketConfig:
     """Polymarket API credentials."""
     private_key: str = ""
@@ -161,13 +153,12 @@ class Config:
     simulation: SimulationConfig
     strategy: StrategyConfig
     buffer: float
-    buffer_decay: BufferDecayConfig
-    in_window_buffer_decay: InWindowBufferDecayConfig
     entry: EntryConfig
     hedge: HedgeConfig
     redeem: RedeemConfig
     telegram: TelegramConfig
     web_dashboard: WebDashboardConfig
+    btc_price_feed: BTCPriceFeedConfig
     polymarket: PolymarketConfig
 
 
@@ -209,6 +200,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
     strategy = StrategyConfig(
         min_price=strategy_data.get("min_price", 0.65),
         max_price=strategy_data.get("max_price", 0.91),
+        dangerous=bool(strategy_data.get("dangerous", False)),
         min_elapsed_sec=strategy_data.get("min_elapsed_sec", 480),
         min_deviation_pct=strategy_data.get("min_deviation_pct", 5.0),
         max_deviation_pct=strategy_data.get("max_deviation_pct", 100.0),
@@ -219,20 +211,6 @@ def load_config(config_path: Optional[str] = None) -> Config:
         win_rate_csv=strategy_data.get("win_rate_csv", "data/win_rate.csv"),
     )
 
-    buffer_decay_data = data.get("buffer_decay", {})
-    buffer_decay = BufferDecayConfig(
-        enabled=bool(buffer_decay_data.get("enabled", False)),
-        half_life_windows=float(buffer_decay_data.get("half_life_windows", 2.5)),
-        min_periods=int(buffer_decay_data.get("min_periods", 2)),
-    )
-
-    in_window_buffer_decay_data = data.get("in_window_buffer_decay", {})
-    in_window_buffer_decay = InWindowBufferDecayConfig(
-        enabled=bool(in_window_buffer_decay_data.get("enabled", False)),
-        start_before_end_sec=int(in_window_buffer_decay_data.get("start_before_end_sec", 60)),
-        min_multiplier=float(in_window_buffer_decay_data.get("min_multiplier", 0.6)),
-    )
-    
     # Entry
     entry_data = data.get("entry", {})
     entry = EntryConfig(
@@ -281,6 +259,12 @@ def load_config(config_path: Optional[str] = None) -> Config:
         host=str(web_data.get("host", "127.0.0.1")),
         port=int(web_data.get("port", 8765)),
     )
+
+    btc_feed_data = data.get("btc_price_feed", {})
+    btc_price_feed = BTCPriceFeedConfig(
+        provider=str(btc_feed_data.get("provider", "chainlink")).strip().lower(),
+        ws_url=str(btc_feed_data.get("ws_url", "")).strip(),
+    )
     
     # Polymarket (from env only - secrets)
     polymarket = PolymarketConfig(
@@ -300,13 +284,12 @@ def load_config(config_path: Optional[str] = None) -> Config:
         simulation=simulation,
         strategy=strategy,
         buffer=float(data.get("buffer", 25.0)),
-        buffer_decay=buffer_decay,
-        in_window_buffer_decay=in_window_buffer_decay,
         entry=entry,
         hedge=hedge,
         redeem=redeem,
         telegram=telegram,
         web_dashboard=web_dashboard,
+        btc_price_feed=btc_price_feed,
         polymarket=polymarket,
     )
 
@@ -375,17 +358,8 @@ def validate_config(config: Config) -> list:
     if config.buffer < 0:
         errors.append("buffer must be >= 0")
 
-    if config.buffer_decay.half_life_windows <= 0:
-        errors.append("buffer_decay.half_life_windows must be > 0")
-
-    if config.buffer_decay.min_periods < 1:
-        errors.append("buffer_decay.min_periods must be >= 1")
-
-    if config.in_window_buffer_decay.start_before_end_sec < 1:
-        errors.append("in_window_buffer_decay.start_before_end_sec must be >= 1")
-
-    if not (0 < config.in_window_buffer_decay.min_multiplier <= 1):
-        errors.append("in_window_buffer_decay.min_multiplier must be in (0, 1]")
+    if config.btc_price_feed.provider not in {"chainlink", "binance"}:
+        errors.append("btc_price_feed.provider must be 'chainlink' or 'binance'")
 
     if config.web_dashboard.enabled:
         if not (1 <= config.web_dashboard.port <= 65535):
