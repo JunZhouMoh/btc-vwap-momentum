@@ -60,6 +60,22 @@ class StrategyConfig:
 
 
 @dataclass
+class BufferDecayConfig:
+    """Optional exponential decay for BTC buffer threshold estimation."""
+    enabled: bool = False
+    half_life_windows: float = 2.5
+    min_periods: int = 2
+
+
+@dataclass
+class InWindowBufferDecayConfig:
+    """Optional in-window decay that lowers BTC buffer threshold near market end."""
+    enabled: bool = False
+    start_before_end_sec: int = 60
+    min_multiplier: float = 0.6
+
+
+@dataclass
 class EntryConfig:
     """Entry execution parameters."""
     bet_amount_usd: float = 10.0
@@ -145,6 +161,8 @@ class Config:
     simulation: SimulationConfig
     strategy: StrategyConfig
     buffer: float
+    buffer_decay: BufferDecayConfig
+    in_window_buffer_decay: InWindowBufferDecayConfig
     entry: EntryConfig
     hedge: HedgeConfig
     redeem: RedeemConfig
@@ -201,6 +219,20 @@ def load_config(config_path: Optional[str] = None) -> Config:
         win_rate_csv=strategy_data.get("win_rate_csv", "data/win_rate.csv"),
     )
 
+    buffer_decay_data = data.get("buffer_decay", {})
+    buffer_decay = BufferDecayConfig(
+        enabled=bool(buffer_decay_data.get("enabled", False)),
+        half_life_windows=float(buffer_decay_data.get("half_life_windows", 2.5)),
+        min_periods=int(buffer_decay_data.get("min_periods", 2)),
+    )
+
+    in_window_buffer_decay_data = data.get("in_window_buffer_decay", {})
+    in_window_buffer_decay = InWindowBufferDecayConfig(
+        enabled=bool(in_window_buffer_decay_data.get("enabled", False)),
+        start_before_end_sec=int(in_window_buffer_decay_data.get("start_before_end_sec", 60)),
+        min_multiplier=float(in_window_buffer_decay_data.get("min_multiplier", 0.6)),
+    )
+    
     # Entry
     entry_data = data.get("entry", {})
     entry = EntryConfig(
@@ -268,6 +300,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
         simulation=simulation,
         strategy=strategy,
         buffer=float(data.get("buffer", 25.0)),
+        buffer_decay=buffer_decay,
+        in_window_buffer_decay=in_window_buffer_decay,
         entry=entry,
         hedge=hedge,
         redeem=redeem,
@@ -340,6 +374,18 @@ def validate_config(config: Config) -> list:
 
     if config.buffer < 0:
         errors.append("buffer must be >= 0")
+
+    if config.buffer_decay.half_life_windows <= 0:
+        errors.append("buffer_decay.half_life_windows must be > 0")
+
+    if config.buffer_decay.min_periods < 1:
+        errors.append("buffer_decay.min_periods must be >= 1")
+
+    if config.in_window_buffer_decay.start_before_end_sec < 1:
+        errors.append("in_window_buffer_decay.start_before_end_sec must be >= 1")
+
+    if not (0 < config.in_window_buffer_decay.min_multiplier <= 1):
+        errors.append("in_window_buffer_decay.min_multiplier must be in (0, 1]")
 
     if config.web_dashboard.enabled:
         if not (1 <= config.web_dashboard.port <= 65535):
