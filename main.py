@@ -1375,6 +1375,10 @@ class Dashboard:
         base_buffer_abs_usd = max(self.config.buffer, stats_abs_usd)
 
         buffer_abs_usd = base_buffer_abs_usd
+        # In dangerous mode, use a fixed BTC buffer threshold for the final 20 seconds.
+        time_left = max(0, self.state.end_time - time.time())
+        if self.config.strategy.dangerous and time_left <= 20:
+            buffer_abs_usd = 10.0
         
         return {
             "current_abs_usd": current_abs_usd,
@@ -1589,10 +1593,13 @@ class Dashboard:
         last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
         
         if last_20s_price_only:
-            if price_ok:
-                signal = f"✅ BUY {fav_name} (last 20s: price only)"
+            if price_ok and btc_buffer_ok:
+                signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
                 signal_color = "bold green"
                 self.last_signal = f"BUY_{fav_name}"
+            elif not btc_buffer_ok and btc_buffer:
+                signal = f"⏳ WAIT (last 20s: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
+                self.last_signal = ""
             else:
                 signal = "⏳ WAIT (last 20s: P not in range)"
                 self.last_signal = ""
@@ -1652,7 +1659,7 @@ class Dashboard:
                 f"({'OK' if btc_buffer_ok else 'WAIT'})"
             )
         if last_20s_price_only:
-            lines.insert(7, "Last 20s:   DANGEROUS mode price-only entry (other checks bypassed)")
+            lines.insert(7, "Last 20s:   DANGEROUS mode uses fixed BTC buffer = $10.00")
         
         title = f"[bold]Strategy: P {min_price}-{max_price}, T≥{min_elapsed}s, Dev {min_dev}%-{max_dev}%[/bold]"
         border = "green" if signal_color == "bold green" else "magenta"
@@ -1922,8 +1929,10 @@ class Dashboard:
             last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
 
             if last_20s_price_only:
-                if price_ok:
-                    signal = f"✅ BUY {fav_name} (last 20s: price only)"
+                if price_ok and btc_buffer_ok:
+                    signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
+                elif not btc_buffer_ok and btc_buffer:
+                    signal = f"⏳ WAIT (last 20s: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
                 else:
                     signal = "⏳ WAIT (last 20s: P not in range)"
             elif not time_cutoff_ok:
@@ -2516,7 +2525,7 @@ class LiveTradingBot:
             return
 
         btc_buffer = self.dashboard._get_btc_buffer_status()
-        if not last_20s_price_only and btc_buffer and not btc_buffer["ok"]:
+        if btc_buffer and not btc_buffer["ok"]:
             signal_logger.info(
                 f"SIGNAL BLOCKED: {side} - BTC absolute move ${btc_buffer['current_abs_usd']:,.2f} "
                 f"< buffer ${btc_buffer['buffer_abs_usd']:,.2f}"
