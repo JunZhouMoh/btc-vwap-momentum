@@ -24,6 +24,7 @@ import logging
 import re
 import signal
 import sys
+import threading
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from dataclasses import dataclass, field
@@ -40,47 +41,28 @@ from rich.layout import Layout
 # Setup logging
 Path("logs").mkdir(exist_ok=True)
 
-# Main logger
+# Main logger - stderr only (no file output)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
-        logging.FileHandler('logs/bot.log'),
         logging.StreamHandler(sys.stderr),
     ]
 )
 logger = logging.getLogger("btc_live")
 
-# Detailed order execution logger
+# Detailed order execution logger - no file handler
 order_logger = logging.getLogger("btc_live.orders")
-order_handler = logging.FileHandler('logs/orders.log')
-order_handler.setFormatter(logging.Formatter(
-    '%(asctime)s %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-))
-order_logger.addHandler(order_handler)
 order_logger.setLevel(logging.DEBUG)
 
-# Detailed hedge logger
+# Detailed hedge logger - no file handler
 hedge_logger = logging.getLogger("btc_live.hedges")
-hedge_handler = logging.FileHandler('logs/hedges.log')
-hedge_handler.setFormatter(logging.Formatter(
-    '%(asctime)s %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-))
-hedge_logger.addHandler(hedge_handler)
 hedge_logger.setLevel(logging.DEBUG)
 
-# Signals logger
-signal_logger = logging.getLogger("btc_live.signals")
-signal_handler = logging.FileHandler('logs/signals.log')
-signal_handler.setFormatter(logging.Formatter(
-    '%(asctime)s %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-))
-signal_logger.addHandler(signal_handler)
-signal_logger.setLevel(logging.DEBUG)
+# Signals logger - no file handler
+#signal_logger = logging.getLogger("btc_live.signals")
+#signal_logger.setLevel(logging.DEBUG)
 
 # Project imports
 from src.config_loader import load_config, validate_config
@@ -176,6 +158,11 @@ class MarketState:
     btc_connected: bool = False      # RTDS connection status
     btc_feed_source: str = "chainlink"  # chainlink | binance
     btc_window_moves: deque = field(default_factory=lambda: deque(maxlen=50))  # Completed window abs moves
+    
+    # Binance BTC/USD price tracking (parallel to Chainlink)
+    binance_current_price: float = 0.0   # Latest Binance price
+    binance_last_update: float = 0.0     # Timestamp of last Binance price update
+    binance_connected: bool = False      # Binance feed connection status
 
 
 @dataclass
@@ -1022,6 +1009,308 @@ class ChainlinkPriceClient:
                 self._ws = None
         
         self.state.btc_connected = False
+
+
+# =============================================================================
+# BTC PRICE MOVEMENT LOGGER (tracks BTC price after each buy)
+# =============================================================================
+
+class BTCPriceMovementLogger:
+    """
+    Tracks BTC price movements after each buy order.
+    Records BTC price at buy time and periodically updates throughout the session.
+    """
+    
+    def __init__(self, log_file: str = "logs/btc_price_movements.jsonl"):
+        self.log_file = Path(log_file)
+        self.buy_events: List[Dict[str, Any]] = []  # Each buy with its BTC price snapshots
+        self._lock = threading.Lock()
+    
+    def record_buy(self, market_slug: str, token_name: str, entry_price: float,
+                   contracts: int, btc_price: float, timestamp: float):
+        """Record a new buy with initial BTC price."""
+        with self._lock:
+            self.buy_events.append({
+                "buy_id": len(self.buy_events),
+                "market_slug": market_slug,
+                "token_name": token_name,
+                "entry_price": entry_price,
+                "contracts": contracts,
+                "buy_timestamp": timestamp,
+                "buy_time_readable": datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                "btc_price_at_buy": btc_price,
+                "btc_price_snapshots": [
+                    {
+                        "timestamp": timestamp,
+                        "btc_price": btc_price,
+                        "btc_change_usd": 0.0,
+                        "btc_change_pct": 0.0,
+                        "time_elapsed_sec": 0,
+                    }
+                ]
+            })
+    
+    def update_btc_prices(self, btc_price: float, current_timestamp: float):
+        """Update BTC price snapshots for all active buys."""
+        if btc_price <= 0:
+            return
+        
+        with self._lock:
+            for buy_event in self.buy_events:
+                buy_timestamp = buy_event["buy_timestamp"]
+                btc_at_buy = buy_event["btc_price_at_buy"]
+                
+                # Calculate change
+                change_usd = btc_price - btc_at_buy
+                change_pct = (change_usd / btc_at_buy * 100) if btc_at_buy > 0 else 0.0
+                time_elapsed = int(current_timestamp - buy_timestamp)
+                
+                # Add new snapshot
+                buy_event["btc_price_snapshots"].append({
+                    "timestamp": current_timestamp,
+                    "btc_price": btc_price,
+                    "btc_change_usd": round(change_usd, 2),
+                    "btc_change_pct": round(change_pct, 4),
+                    "time_elapsed_sec": time_elapsed,
+                })
+                
+                # Keep only snapshots (every ~5 seconds to avoid too much data)
+                # Keep at least the first, last, and ones every 5 seconds
+                if len(buy_event["btc_price_snapshots"]) > 2:
+                    snapshots = buy_event["btc_price_snapshots"]
+                    first = snapshots[0]
+                    last = snapshots[-1]
+                    # Thin out middle snapshots to every ~5 seconds
+                    filtered = [first]
+                    last_kept_ts = first["timestamp"]
+                    for snap in snapshots[1:-1]:
+                        if snap["timestamp"] - last_kept_ts >= 5.0:
+                            filtered.append(snap)
+                            last_kept_ts = snap["timestamp"]
+                    filtered.append(last)
+                    buy_event["btc_price_snapshots"] = filtered
+    
+    def finalize_session(self, session_end_timestamp: float):
+        """Write final BTC price movement data for the session."""
+        with self._lock:
+            for buy_event in self.buy_events:
+                # Add session end timestamp marker
+                if buy_event["btc_price_snapshots"]:
+                    buy_event["session_end_timestamp"] = session_end_timestamp
+                    last_snap = buy_event["btc_price_snapshots"][-1]
+                    buy_event["final_btc_change_usd"] = last_snap["btc_change_usd"]
+                    buy_event["final_btc_change_pct"] = last_snap["btc_change_pct"]
+                    buy_event["total_time_held_sec"] = last_snap["time_elapsed_sec"]
+            
+            # Write to JSONL file (one entry per line for easy streaming)
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with open(self.log_file, 'a') as f:
+                    for buy_event in self.buy_events:
+                        f.write(json.dumps(buy_event) + '\n')
+                logger.info(f"BTC price movements logged to {self.log_file} ({len(self.buy_events)} buys)")
+            except Exception as e:
+                logger.error(f"Failed to write BTC price movements: {e}")
+    
+    def get_summary_stats(self) -> Dict[str, Any]:
+        """Get summary statistics across all buys."""
+        with self._lock:
+            if not self.buy_events:
+                return {}
+            
+            btc_changes = []
+            btc_changes_pct = []
+            
+            for buy_event in self.buy_events:
+                if buy_event["btc_price_snapshots"]:
+                    last_snap = buy_event["btc_price_snapshots"][-1]
+                    btc_changes.append(last_snap["btc_change_usd"])
+                    btc_changes_pct.append(last_snap["btc_change_pct"])
+            
+            if not btc_changes:
+                return {}
+            
+            return {
+                "total_buys": len(self.buy_events),
+                "avg_btc_change_usd": round(sum(btc_changes) / len(btc_changes), 2),
+                "avg_btc_change_pct": round(sum(btc_changes_pct) / len(btc_changes_pct), 4),
+                "max_btc_change_usd": round(max(btc_changes), 2),
+                "min_btc_change_usd": round(min(btc_changes), 2),
+                "buys_with_positive_movement": sum(1 for x in btc_changes if x > 0),
+                "buys_with_negative_movement": sum(1 for x in btc_changes if x < 0),
+            }
+
+
+# =============================================================================
+# BINANCE BTC PRICE CLIENT (parallel feed for price comparison)
+# =============================================================================
+
+class BinancePriceClient:
+    """
+    Parallel BTC price stream from Binance for price comparison.
+    Runs independently to get real-time Binance price alongside Chainlink.
+    """
+    
+    def __init__(self, state: 'MarketState'):
+        self.state = state
+        self.running = False
+        self._ws = None
+        self._ping_task: Optional[asyncio.Task] = None
+        self._feed_url = BINANCE_BTC_WSS_URL
+    
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        return (symbol or "").strip().lower().replace("/", "").replace("-", "").replace("_", "")
+
+    @classmethod
+    def _is_btc_symbol(cls, symbol: str) -> bool:
+        s = cls._normalize_symbol(symbol)
+        return s in {"btcusd", "btcusdt"}
+    
+    DATA_TIMEOUT = 30  # seconds without any message → force reconnect
+
+    async def connect(self):
+        """Connect to Binance BTC price stream."""
+        self.running = True
+        self._last_msg_time = time.time()
+        
+        while self.running:
+            try:
+                async with websockets.connect(self._feed_url) as ws:
+                    self._ws = ws
+                    self.state.binance_connected = True
+                    self._last_msg_time = time.time()
+                    logger.info(f"Binance BTC feed connected: {self._feed_url}")
+                    
+                    # Start ping task and watchdog
+                    self._ping_task = asyncio.create_task(self._ping_loop(ws))
+                    watchdog_task = asyncio.create_task(self._watchdog(ws))
+                    
+                    try:
+                        async for message in ws:
+                            if not self.running:
+                                break
+                            self._last_msg_time = time.time()
+                            self._handle_message(message)
+                    finally:
+                        watchdog_task.cancel()
+                        try:
+                            await watchdog_task
+                        except asyncio.CancelledError:
+                            pass
+                    
+                    self._ws = None
+                    
+            except websockets.ConnectionClosed:
+                self._ws = None
+                self.state.binance_connected = False
+                if self.running:
+                    logger.warning("Binance BTC feed disconnected, reconnecting in 2s...")
+                    await asyncio.sleep(2)
+            except Exception as e:
+                self._ws = None
+                self.state.binance_connected = False
+                if self.running:
+                    logger.warning(f"Binance BTC feed error: {e}, reconnecting in 5s...")
+                    await asyncio.sleep(5)
+            finally:
+                if self._ping_task and not self._ping_task.done():
+                    self._ping_task.cancel()
+                    try:
+                        await self._ping_task
+                    except:
+                        pass
+                    self._ping_task = None
+
+    async def _watchdog(self, ws):
+        """Force-close WebSocket if no messages received for DATA_TIMEOUT seconds."""
+        try:
+            while self.running:
+                await asyncio.sleep(5)
+                silence = time.time() - self._last_msg_time
+                if silence > self.DATA_TIMEOUT:
+                    logger.warning(
+                        f"Binance watchdog: no data for {silence:.0f}s, forcing reconnect"
+                    )
+                    self.state.binance_connected = False
+                    await ws.close()
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    def _handle_message(self, message: str):
+        """Parse Binance trade/bookTicker message."""
+        try:
+            if not isinstance(message, str) or not message.strip():
+                return
+            
+            data = json.loads(message)
+            
+            # Handle both trade stream and bookTicker stream
+            symbol = str(data.get("s", "") or data.get("symbol", ""))
+            if not self._is_btc_symbol(symbol):
+                return
+            
+            # Trade stream: {"e":"trade","s":"BTCUSDT","p":"...","T":...}
+            if "p" in data:
+                price = float(data.get("p", 0))
+            # BookTicker stream: {"s":"BTCUSDT","b":"...","a":"...","E":...}
+            else:
+                bid = float(data.get("b", 0) or 0)
+                ask = float(data.get("a", 0) or 0)
+                if bid > 0 and ask > 0:
+                    price = (bid + ask) / 2.0
+                else:
+                    price = bid or ask
+            
+            if price <= 0:
+                return
+            
+            ts_ms = data.get("T") or data.get("E") or 0
+            
+            # Update Binance price
+            self.state.binance_current_price = price
+            self.state.binance_last_update = time.time()
+            
+            logger.debug(f"Binance BTC: ${price:,.2f}")
+            
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+            pass
+
+    async def _ping_loop(self, ws):
+        """Send ping every 5 seconds to keep connection alive."""
+        try:
+            while self.running:
+                await asyncio.sleep(5)
+                try:
+                    await ws.ping()
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    async def disconnect(self):
+        """Gracefully close Binance price WebSocket connection."""
+        self.running = False
+        
+        if self._ping_task and not self._ping_task.done():
+            self._ping_task.cancel()
+            try:
+                await self._ping_task
+            except:
+                pass
+            self._ping_task = None
+        
+        if self._ws:
+            try:
+                await self._ws.close(code=1000, reason="Normal shutdown")
+                logger.info("Binance BTC feed closed gracefully")
+            except Exception as e:
+                logger.warning(f"Binance BTC feed close error: {e}")
+            finally:
+                self._ws = None
+        
+        self.state.binance_connected = False
 
 
 # =============================================================================
@@ -1989,6 +2278,22 @@ class Dashboard:
 
         s = self.state
         btc_age = time.time() - s.btc_last_update if s.btc_last_update > 0 else None
+        binance_age = time.time() - s.binance_last_update if s.binance_last_update > 0 else None
+        
+        # Calculate price match status and difference
+        price_match_status = "—"
+        price_diff_usd = None
+        price_diff_pct = None
+        if s.btc_current_price > 0 and s.binance_current_price > 0:
+            price_diff_usd = abs(s.btc_current_price - s.binance_current_price)
+            price_diff_pct = (price_diff_usd / s.btc_current_price * 100) if s.btc_current_price > 0 else 0.0
+            if price_diff_pct <= 0.1:
+                price_match_status = "✅ MATCH"
+            elif price_diff_pct <= 0.5:
+                price_match_status = "⚠️ CLOSE"
+            else:
+                price_match_status = "❌ DIFF"
+        
         btc_block: dict = {
             "btc_current_price": s.btc_current_price,
             "btc_anchor_price": s.btc_anchor_price,
@@ -1997,6 +2302,12 @@ class Dashboard:
             "deviation_line": "",
             "buffer_avg_abs_usd": None,
             "buffer_avg_abs_pct": None,
+            "binance_current_price": s.binance_current_price,
+            "binance_connected": s.binance_connected,
+            "binance_fresh_sec": binance_age,
+            "price_match_status": price_match_status,
+            "price_diff_usd": price_diff_usd,
+            "price_diff_pct": price_diff_pct,
         }
         if s.btc_current_price > 0 and s.btc_anchor_price > 0:
             dev_abs = s.btc_current_price - s.btc_anchor_price
@@ -2098,9 +2409,16 @@ class LiveTradingBot:
         self.chainlink_client: ChainlinkPriceClient = None
         self._chainlink_task: Optional[asyncio.Task] = None
         
+        # Binance BTC price (parallel feed for price comparison)
+        self.binance_client: BinancePriceClient = None
+        self._binance_task: Optional[asyncio.Task] = None
+        
         # BTC volume feed (Binance)
         self.btc_volume_feed: BTCVolumeFeed = None
         self._btc_volume_task: Optional[asyncio.Task] = None
+        
+        # BTC price movement logger (tracks price after each buy)
+        self.btc_price_movement_logger: Optional[BTCPriceMovementLogger] = None
         
         # Control
         self.running = False
@@ -2270,10 +2588,19 @@ class LiveTradingBot:
         source_name = "Chainlink" if self.state.btc_feed_source == "chainlink" else "Binance"
         console.print(f"[green]✓ {source_name} BTC price feed starting...[/green]")
         
+        # Binance BTC price feed (parallel - always runs for price comparison)
+        self.binance_client = BinancePriceClient(self.state)
+        self._binance_task = asyncio.create_task(self.binance_client.connect())
+        console.print("[green]✓ Binance BTC price feed (comparison) starting...[/green]")
+        
         # BTC volume feed (Binance)
         self.btc_volume_feed = BTCVolumeFeed()
         self._btc_volume_task = asyncio.create_task(self.btc_volume_feed.start())
         console.print("[green]✓ Binance BTC volume feed starting...[/green]")
+        
+        # BTC price movement logger
+        self.btc_price_movement_logger = BTCPriceMovementLogger()
+        console.print("[green]✓ BTC price movement logger initialized[/green]")
         
         # Dashboard
         self.dashboard = Dashboard(self.state, self.stats, self.config)
@@ -2644,6 +2971,18 @@ class LiveTradingBot:
                 btc_price_at_entry=btc_price_at_entry,
                 btc_anchor_at_entry=btc_anchor_at_entry,
             )
+            
+            # Log BTC price movement for this buy
+            if self.btc_price_movement_logger:
+                self.btc_price_movement_logger.record_buy(
+                    market_slug=self.state.slug,
+                    token_name=token_name,
+                    entry_price=result.avg_price,
+                    contracts=result.contracts_filled,
+                    btc_price=btc_price_at_entry,
+                    timestamp=time.time(),
+                )
+            
             self._simulation_log_entry(
                 token_name, result.avg_price, result.contracts_filled, result.total_cost
             )
@@ -2983,6 +3322,13 @@ class LiveTradingBot:
                         elif pos.token_name == "DOWN" and self.state.down_token:
                             self.stats.update_drawdown(self.state.down_token.last_price)
                     
+                    # Update BTC price movements for all active buys
+                    if self.btc_price_movement_logger and self.state.btc_current_price > 0:
+                        self.btc_price_movement_logger.update_btc_prices(
+                            self.state.btc_current_price,
+                            time.time()
+                        )
+                    
                     # Check market end (быстрая операция - не выносим в task)
                     await self.check_market_end()
 
@@ -3006,6 +3352,13 @@ class LiveTradingBot:
                     
                     await asyncio.sleep(0.25)
         finally:
+            # Finalize BTC price movement logger at session end
+            if self.btc_price_movement_logger:
+                self.btc_price_movement_logger.finalize_session(time.time())
+                summary = self.btc_price_movement_logger.get_summary_stats()
+                if summary:
+                    logger.info(f"BTC Price Movement Summary: {summary}")
+            
             # Cancel any running order tasks
             for task in [order_task]:
                 if task and not task.done():
@@ -3099,6 +3452,16 @@ class LiveTradingBot:
                 try:
                     self._chainlink_task.cancel()
                     await self._chainlink_task
+                except:
+                    pass
+            
+            # Gracefully close Binance BTC price WebSocket
+            if self.binance_client:
+                await self.binance_client.disconnect()
+            if self._binance_task:
+                try:
+                    self._binance_task.cancel()
+                    await self._binance_task
                 except:
                     pass
             
