@@ -58,6 +58,8 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
     <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
+    <div class="card btc"><h2>BTC / USD (Binance)</h2><div id="binance" class="mono"></div></div>
+    <div class="card"><h2>Price Match</h2><div id="pricematch" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
@@ -174,6 +176,35 @@ _HTML = """<!DOCTYPE html>
           } else {
             btcEl.textContent = "Waiting for Chainlink\u2026";
           }
+          
+          // Render Binance price panel
+          var binanceEl = document.getElementById("binance");
+          if (b.binance_connected && b.binance_current_price > 0) {
+            var binanceBits = [
+              "$" + esc(numFmt(b.binance_current_price, 2)),
+              "Feed: " + (b.binance_connected ? "ok" : "off") +
+                (b.binance_fresh_sec != null ? " \u00b7 " + Math.floor(b.binance_fresh_sec) + "s" : "")
+            ];
+            binanceEl.innerHTML = binanceBits.join("<br/>");
+          } else {
+            binanceEl.textContent = "Waiting for Binance\u2026";
+          }
+          
+          // Render price match indicator
+          var matchEl = document.getElementById("pricematch");
+          if (b.btc_current_price > 0 && b.binance_current_price > 0) {
+            var statusStr = esc(b.price_match_status || "\u2014");
+            var diffUsd = b.price_diff_usd != null ? "$" + esc(numFmt(b.price_diff_usd, 2)) : "\u2014";
+            var diffPct = b.price_diff_pct != null ? esc(numFmt(b.price_diff_pct, 4)) + "%" : "\u2014";
+            matchEl.innerHTML = [
+              statusStr,
+              "Diff: " + diffUsd + " (" + diffPct + ")",
+              "CL: $" + esc(numFmt(b.btc_current_price, 2)) + " | BN: $" + esc(numFmt(b.binance_current_price, 2))
+            ].join("<br/>");
+          } else {
+            matchEl.textContent = "Waiting for both feeds\u2026";
+          }
+          
           var tr = d.trading || {};
           var tHtml = "Markets " + esc(tr.markets_seen) + " \u00b7 Trades " + esc(tr.trade_count) +
             " \u00b7 PnL $" + (tr.total_pnl != null ? numFmt(tr.total_pnl, 2) : "\u2014") + "<br/>";
