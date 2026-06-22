@@ -60,9 +60,14 @@ order_logger.setLevel(logging.DEBUG)
 hedge_logger = logging.getLogger("btc_live.hedges")
 hedge_logger.setLevel(logging.DEBUG)
 
-# Signals logger - no file handler
-#signal_logger = logging.getLogger("btc_live.signals")
-#signal_logger.setLevel(logging.DEBUG)
+# Signals logger - disabled (no-op)
+class NoOpLogger:
+    def info(self, *args, **kwargs): pass
+    def debug(self, *args, **kwargs): pass
+    def warning(self, *args, **kwargs): pass
+    def error(self, *args, **kwargs): pass
+
+signal_logger = NoOpLogger()
 
 # Project imports
 from src.config_loader import load_config, validate_config
@@ -153,6 +158,7 @@ class MarketState:
     
     # Chainlink BTC/USD price tracking
     btc_anchor_price: float = 0.0    # Price at market start
+    btc_market_anchor_price: float = 0.0  # Fixed anchor for current market (reset only on new market)
     btc_current_price: float = 0.0   # Latest Chainlink price
     btc_last_update: float = 0.0     # Timestamp of last price update
     btc_connected: bool = False      # RTDS connection status
@@ -198,7 +204,8 @@ class TradeRecord:
     max_drawdown_pct: float = 0.0   # Max percentage drawdown from entry
     btc_price_at_entry: float = 0.0        # Chainlink BTC/USD when order was submitted
     btc_anchor_price_at_entry: float = 0.0 # BTC anchor (market-open price) at submission
-    btc_diff_from_anchor: float = 0.0      # btc_price_at_entry - btc_anchor_price_at_entry
+    btc_price_at_close: float = 0.0        # Chainlink BTC/USD used at market close
+    btc_diff_from_anchor: float = 0.0      # btc_price_at_close - btc_anchor_price_at_entry
 
 
 # =============================================================================
@@ -472,7 +479,7 @@ class TradingStats:
             if current_price < self.position.min_price_seen:
                 self.position.min_price_seen = current_price
     
-    def close_position(self, final_price: float) -> Optional[TradeRecord]:
+    def close_position(self, final_price: float, btc_price_at_close: float = 0.0) -> Optional[TradeRecord]:
         if not self.position:
             return None
         
@@ -490,7 +497,8 @@ class TradingStats:
         
         btc_e = self.position.btc_price_at_entry
         btc_a = self.position.btc_anchor_at_entry
-        btc_diff = (btc_e - btc_a) if (btc_e > 0 and btc_a > 0) else 0.0
+        btc_c = btc_price_at_close if btc_price_at_close > 0 else 0.0
+        btc_diff = (btc_c - btc_a) if (btc_c > 0 and btc_a > 0) else 0.0
         
         record = TradeRecord(
             market_slug=self.position.market_slug,
@@ -505,6 +513,7 @@ class TradingStats:
             max_drawdown_pct=dd_pct,
             btc_price_at_entry=btc_e,
             btc_anchor_price_at_entry=btc_a,
+            btc_price_at_close=btc_c,
             btc_diff_from_anchor=btc_diff,
         )
         
@@ -898,6 +907,13 @@ class ChainlinkPriceClient:
             # Update current price (always)
             self.state.btc_current_price = price
             self.state.btc_last_update = now
+
+            # Capture fixed anchor once per market (settlement anchor).
+            if self.state.slug and self.state.btc_market_anchor_price <= 0:
+                self.state.btc_market_anchor_price = price
+                logger.info(
+                    f"BTC market anchor set: ${price:,.2f} (market {self.state.slug})"
+                )
             
             # === CALIBRATION LOG: every tick within [-15s..+5s] of any boundary ===
             price_window = self._get_window(price_ts)
@@ -1018,14 +1034,17 @@ class ChainlinkPriceClient:
 class BTCPriceMovementLogger:
     """
     Tracks BTC price movements after each buy order.
-    Records BTC price at buy time and periodically updates throughout the session.
+    Records BTC price at buy time and periodically updates until the 5-minute
+    window per buy expires, then flushes that buy immediately to the log file.
     """
-    
+
+    WINDOW_SEC = 300  # 5 minutes per buy
+
     def __init__(self, log_file: str = "logs/btc_price_movements.jsonl"):
         self.log_file = Path(log_file)
         self.buy_events: List[Dict[str, Any]] = []  # Each buy with its BTC price snapshots
         self._lock = threading.Lock()
-    
+
     def record_buy(self, market_slug: str, token_name: str, entry_price: float,
                    contracts: int, btc_price: float, timestamp: float):
         """Record a new buy with initial BTC price."""
@@ -1038,6 +1057,7 @@ class BTCPriceMovementLogger:
                 "contracts": contracts,
                 "buy_timestamp": timestamp,
                 "buy_time_readable": datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                "window_end_timestamp": timestamp + self.WINDOW_SEC,
                 "btc_price_at_buy": btc_price,
                 "btc_price_snapshots": [
                     {
@@ -1047,24 +1067,48 @@ class BTCPriceMovementLogger:
                         "btc_change_pct": 0.0,
                         "time_elapsed_sec": 0,
                     }
-                ]
+                ],
+                "_logged": False,
             })
-    
+
+    def _write_buy_event(self, buy_event: Dict[str, Any]):
+        """Flush a single buy event to the JSONL log (caller must NOT hold lock)."""
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self.log_file, 'a') as f:
+                f.write(json.dumps(buy_event) + '\n')
+            logger.info(
+                f"BTC price movement logged to {self.log_file} "
+                f"(buy_id={buy_event['buy_id']}, "
+                f"final_change={buy_event.get('final_btc_change_usd', 'n/a')} USD)"
+            )
+        except Exception as e:
+            logger.error(f"Failed to write BTC price movement: {e}")
+
     def update_btc_prices(self, btc_price: float, current_timestamp: float):
-        """Update BTC price snapshots for all active buys."""
+        """Update BTC price snapshots for all active buys.
+
+        When a buy's 5-minute window expires the snapshot is finalised and
+        immediately written to the log so we don't have to wait for session end.
+        """
         if btc_price <= 0:
             return
-        
+
+        to_flush = []  # collect events to write outside the lock
+
         with self._lock:
             for buy_event in self.buy_events:
+                if buy_event["_logged"]:
+                    continue  # already written, skip
+
                 buy_timestamp = buy_event["buy_timestamp"]
                 btc_at_buy = buy_event["btc_price_at_buy"]
-                
+
                 # Calculate change
                 change_usd = btc_price - btc_at_buy
                 change_pct = (change_usd / btc_at_buy * 100) if btc_at_buy > 0 else 0.0
                 time_elapsed = int(current_timestamp - buy_timestamp)
-                
+
                 # Add new snapshot
                 buy_event["btc_price_snapshots"].append({
                     "timestamp": current_timestamp,
@@ -1073,14 +1117,13 @@ class BTCPriceMovementLogger:
                     "btc_change_pct": round(change_pct, 4),
                     "time_elapsed_sec": time_elapsed,
                 })
-                
+
                 # Keep only snapshots (every ~5 seconds to avoid too much data)
                 # Keep at least the first, last, and ones every 5 seconds
                 if len(buy_event["btc_price_snapshots"]) > 2:
                     snapshots = buy_event["btc_price_snapshots"]
                     first = snapshots[0]
                     last = snapshots[-1]
-                    # Thin out middle snapshots to every ~5 seconds
                     filtered = [first]
                     last_kept_ts = first["timestamp"]
                     for snap in snapshots[1:-1]:
@@ -1089,28 +1132,50 @@ class BTCPriceMovementLogger:
                             last_kept_ts = snap["timestamp"]
                     filtered.append(last)
                     buy_event["btc_price_snapshots"] = filtered
-    
+
+                # Finalise and schedule flush once the 5-min window has passed
+                if current_timestamp >= buy_event["window_end_timestamp"]:
+                    last_snap = buy_event["btc_price_snapshots"][-1]
+                    buy_event["final_btc_change_usd"] = last_snap["btc_change_usd"]
+                    buy_event["final_btc_change_pct"] = last_snap["btc_change_pct"]
+                    buy_event["total_time_tracked_sec"] = last_snap["time_elapsed_sec"]
+                    buy_event["_logged"] = True
+                    to_flush.append(buy_event)
+
+        for buy_event in to_flush:
+            self._write_buy_event(buy_event)
+
     def finalize_session(self, session_end_timestamp: float):
-        """Write final BTC price movement data for the session."""
+        """Write any buys whose 5-min window did not finish before session end."""
+        to_flush = []
+
         with self._lock:
             for buy_event in self.buy_events:
-                # Add session end timestamp marker
+                if buy_event["_logged"]:
+                    continue
                 if buy_event["btc_price_snapshots"]:
                     buy_event["session_end_timestamp"] = session_end_timestamp
                     last_snap = buy_event["btc_price_snapshots"][-1]
                     buy_event["final_btc_change_usd"] = last_snap["btc_change_usd"]
                     buy_event["final_btc_change_pct"] = last_snap["btc_change_pct"]
-                    buy_event["total_time_held_sec"] = last_snap["time_elapsed_sec"]
-            
-            # Write to JSONL file (one entry per line for easy streaming)
+                    buy_event["total_time_tracked_sec"] = last_snap["time_elapsed_sec"]
+                    buy_event["_logged"] = True
+                    to_flush.append(buy_event)
+
+        if to_flush:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
             try:
                 with open(self.log_file, 'a') as f:
-                    for buy_event in self.buy_events:
+                    for buy_event in to_flush:
                         f.write(json.dumps(buy_event) + '\n')
-                logger.info(f"BTC price movements logged to {self.log_file} ({len(self.buy_events)} buys)")
+                logger.info(
+                    f"BTC price movements (session-end flush) logged to {self.log_file} "
+                    f"({len(to_flush)} buys)"
+                )
             except Exception as e:
                 logger.error(f"Failed to write BTC price movements: {e}")
+        else:
+            logger.info(f"BTC price movements: all {len(self.buy_events)} buys already logged within their 5-min windows")
     
     def get_summary_stats(self) -> Dict[str, Any]:
         """Get summary statistics across all buys."""
@@ -2079,7 +2144,6 @@ class Dashboard:
         layout = Layout()
         
         layout.split_column(
-            Layout(self.create_header(), name="header", size=3),
             Layout(name="body"),
             Layout(name="footer", size=16),
             Layout(self.create_btc_price_panel(), name="btc_price", size=6)
@@ -2745,6 +2809,10 @@ class LiveTradingBot:
         self.state.up_token = TokenData(token_id=up_token_id, name="Up")
         self.state.down_token = TokenData(token_id=down_token_id, name="Down")
         self.state.connected = False
+        # Reset fixed settlement anchor for the new market.
+        self.state.btc_market_anchor_price = 0.0
+        if self.state.btc_current_price > 0:
+            self.state.btc_market_anchor_price = self.state.btc_current_price
         
         # Log token assignments for debugging
         logger.info(f"Market tokens assigned:")
@@ -2952,7 +3020,11 @@ class LiveTradingBot:
         
         # Snapshot BTC prices at the moment of order submission
         btc_price_at_entry = self.state.btc_current_price
-        btc_anchor_at_entry = self.state.btc_anchor_price
+        btc_anchor_at_entry = (
+            self.state.btc_market_anchor_price
+            if self.state.btc_market_anchor_price > 0
+            else self.state.btc_anchor_price
+        )
         
         result = await self.executor.execute_entry(
             token_id=token.token_id,
@@ -3225,9 +3297,35 @@ class LiveTradingBot:
             return
         
         time_left = self.state.end_time - time.time()
-        if time_left <= 10:  # 10 seconds before end
+        if time_left <= 0:  # Close only at/after market expiry for clearer outcome
             hedged_was = pos.hedged
-            if pos.token_name == "UP" and self.state.up_token:
+            # Prefer oracle direction at expiry: this aligns with binary market outcome
+            # (UP wins if current BTC > anchor BTC, else DOWN). Fallback to token price
+            # only when BTC feed is unavailable.
+            s = self.state
+            settlement_anchor = (
+                s.btc_market_anchor_price
+                if s.btc_market_anchor_price > 0
+                else s.btc_anchor_price
+            )
+            if settlement_anchor > 0 and s.btc_current_price > 0:
+                if s.btc_current_price > settlement_anchor:
+                    winner = "UP"
+                elif s.btc_current_price < settlement_anchor:
+                    winner = "DOWN"
+                else:
+                    winner = "TIE"
+
+                if winner == "TIE":
+                    if pos.token_name == "UP" and self.state.up_token:
+                        final_price = self.state.up_token.last_price
+                    elif pos.token_name == "DOWN" and self.state.down_token:
+                        final_price = self.state.down_token.last_price
+                    else:
+                        final_price = 0.5
+                else:
+                    final_price = 1.0 if pos.token_name == winner else 0.0
+            elif pos.token_name == "UP" and self.state.up_token:
                 final_price = self.state.up_token.last_price
             elif pos.token_name == "DOWN" and self.state.down_token:
                 final_price = self.state.down_token.last_price
@@ -3254,7 +3352,8 @@ class LiveTradingBot:
             if buffer_label:
                 signal_logger.info(f"  {buffer_label}")
             
-            record = self.stats.close_position(final_price)
+            btc_close_for_log = s.btc_current_price if s.btc_current_price > 0 else 0.0
+            record = self.stats.close_position(final_price, btc_price_at_close=btc_close_for_log)
             if record:
                 self._simulation_log_close(record, hedged_was)
                 status = "✅ WIN" if record.won else "❌ LOSS"
