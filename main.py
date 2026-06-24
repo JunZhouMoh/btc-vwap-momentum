@@ -1732,7 +1732,7 @@ class Dashboard:
         # In dangerous mode, use a fixed BTC buffer threshold for the final 20 seconds.
         time_left = max(0, self.state.end_time - time.time())
         if self.config.strategy.dangerous and time_left <= 20:
-            buffer_abs_usd = 10.0
+            buffer_abs_usd = 15.0
         
         return {
             "current_abs_usd": current_abs_usd,
@@ -2013,7 +2013,7 @@ class Dashboard:
                 f"({'OK' if btc_buffer_ok else 'WAIT'})"
             )
         if last_20s_price_only:
-            lines.insert(7, "Last 20s:   DANGEROUS mode uses fixed BTC buffer = $10.00")
+            lines.insert(7, "Last 20s:   DANGEROUS mode uses fixed BTC buffer = $15.00")
         
         title = f"[bold]Strategy: P {min_price}-{max_price}, T≥{min_elapsed}s, Dev {min_dev}%-{max_dev}%[/bold]"
         border = "green" if signal_color == "bold green" else "magenta"
