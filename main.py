@@ -343,62 +343,6 @@ class IndicatorCalculator:
         
         # Return change: positive if rising, negative if falling
         return avg_recent - avg_early
-    
-    @staticmethod
-    def is_trend_reversing_fast(trades: deque, window: float = 10.0) -> bool:
-        """
-        Detect rapid reversal: compare short-term trend vs long-term trend.
-        Returns: True if trending direction contradicts itself (fast reversal detected).
-        
-        Checks if the most recent 3s trend contradicts the overall 10s trend.
-        """
-        if not trades or len(trades) < 2:
-            return False
-        
-        now = time.time()
-        
-        # Long trend: 10s window
-        long_trend = IndicatorCalculator.calc_price_trend(trades, window=window)
-        
-        # Short trend: 3s window (recent reversal check)
-        short_cutoff = now - 3.0
-        short_trades = [t for t in trades if t.timestamp > short_cutoff]
-        if len(short_trades) < 2:
-            return False
-        
-        short_prices = [t.price for t in short_trades]
-        if not short_prices or len(set(short_prices)) < 2:
-            return False
-        
-        # Simple short trend: first vs last 1.5s
-        mid_short = now - 1.5
-        early_short = [t.price for t in short_trades if t.timestamp <= mid_short]
-        recent_short = [t.price for t in short_trades if t.timestamp > mid_short]
-        
-        if not early_short or not recent_short:
-            return False
-        
-        short_trend = sum(recent_short) / len(recent_short) - sum(early_short) / len(early_short)
-        
-        # Reversal: opposite signs and both non-trivial
-        if long_trend is None:
-            return False
-        
-        # If long_trend is positive but short_trend is negative (falling now), flag as reversal
-        # If long_trend is negative but short_trend is positive (rising now), flag as reversal
-        long_magnitude = abs(long_trend)
-        short_magnitude = abs(short_trend)
-        
-        if long_magnitude < 0.0001:  # Long trend is flat, no reversal
-            return False
-        
-        # Reversal if they have opposite signs and short trend is significant
-        if long_trend > 0 and short_trend < -0.0001:
-            return True
-        if long_trend < 0 and short_trend > 0.0001:
-            return True
-        
-        return False
 
 
 class WinRateTable:
@@ -2031,14 +1975,9 @@ class Dashboard:
         up_trend = self.calc.calc_price_trend(up.trades, window=10.0) if up and up.trades else None
         down_trend = self.calc.calc_price_trend(down.trades, window=10.0) if down and down.trades else None
         
-        # Check for fast reversals (short-term trend contradicting long-term trend)
-        up_reversing = self.calc.is_trend_reversing_fast(up.trades, window=10.0) if up and up.trades else False
-        down_reversing = self.calc.is_trend_reversing_fast(down.trades, window=10.0) if down and down.trades else False
-        
-        # UP is OK if trending up (or no data) AND not reversing fast
-        # DOWN is OK if trending down (or no data) AND not reversing fast
-        up_trend_ok = (up_trend is None or up_trend >= 0) and not up_reversing
-        down_trend_ok = (down_trend is None or down_trend <= 0) and not down_reversing
+        # UP is OK if trending up (or no data), DOWN is OK if trending down (or no data)
+        up_trend_ok = up_trend is None or up_trend >= 0
+        down_trend_ok = down_trend is None or down_trend <= 0
         fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
         
         signal = "⏳ WAIT"
@@ -2066,12 +2005,7 @@ class Dashboard:
             self.last_signal = f"BUY_{fav_name}"
         elif fav_price >= 0.70 and time_ok:
             if not fav_trend_ok:
-                if fav_name == "UP" and up_reversing:
-                    signal = "🟡 ALMOST (UP reversing fast - wait for confirm)"
-                elif fav_name == "DOWN" and down_reversing:
-                    signal = "🟡 ALMOST (DOWN reversing fast - wait for confirm)"
-                else:
-                    signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
+                signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
             elif not mom_ok:
                 signal = "🟡 ALMOST (need Mom>0%)"
             elif not btc_buffer_ok:
@@ -2098,12 +2032,7 @@ class Dashboard:
             elif not mom_ok:
                 signal = f"⏳ WAIT (Mom≤0%)"
             elif not fav_trend_ok:
-                if fav_name == "UP" and up_reversing:
-                    signal = "⏳ WAIT (UP reversing fast)"
-                elif fav_name == "DOWN" and down_reversing:
-                    signal = "⏳ WAIT (DOWN reversing fast)"
-                else:
-                    signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
+                signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
             elif not btc_buffer_ok and btc_buffer:
                 signal = f"⏳ WAIT (BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
         
@@ -2396,28 +2325,16 @@ class Dashboard:
             up_trend = self.calc.calc_price_trend(up.trades, window=10.0) if up and up.trades else None
             down_trend = self.calc.calc_price_trend(down.trades, window=10.0) if down and down.trades else None
             
-            # Check for fast reversals
-            up_reversing = self.calc.is_trend_reversing_fast(up.trades, window=10.0) if up and up.trades else False
-            down_reversing = self.calc.is_trend_reversing_fast(down.trades, window=10.0) if down and down.trades else False
-            
-            # UP is OK if trending up (or no data) AND not reversing fast
-            # DOWN is OK if trending down (or no data) AND not reversing fast
-            up_trend_ok = (up_trend is None or up_trend >= 0) and not up_reversing
-            down_trend_ok = (down_trend is None or down_trend <= 0) and not down_reversing
+            # UP is OK if trending up (or no data), DOWN is OK if trending down (or no data)
+            up_trend_ok = up_trend is None or up_trend >= 0
+            down_trend_ok = down_trend is None or down_trend <= 0
             fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
 
             last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
 
             if last_20s_price_only:
-                if price_ok and btc_buffer_ok and fav_trend_ok:
-                    signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer + trend)"
-                elif not fav_trend_ok:
-                    if fav_name == "UP" and up_reversing:
-                        signal = "⏳ WAIT (last 20s: UP reversing fast)"
-                    elif fav_name == "DOWN" and down_reversing:
-                        signal = "⏳ WAIT (last 20s: DOWN reversing fast)"
-                    else:
-                        signal = f"⏳ WAIT (last 20s: {fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
+                if price_ok and btc_buffer_ok:
+                    signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
                 elif not btc_buffer_ok and btc_buffer:
                     signal = f"⏳ WAIT (last 20s: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
                 else:
@@ -2428,12 +2345,7 @@ class Dashboard:
                 signal = f"✅ BUY {fav_name}"
             elif fav_price >= 0.70 and time_ok:
                 if not fav_trend_ok:
-                    if fav_name == "UP" and up_reversing:
-                        signal = "🟡 ALMOST (UP reversing fast - wait for confirm)"
-                    elif fav_name == "DOWN" and down_reversing:
-                        signal = "🟡 ALMOST (DOWN reversing fast - wait for confirm)"
-                    else:
-                        signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
+                    signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
                 elif not mom_ok:
                     signal = "🟡 ALMOST (need Mom>0%)"
                 elif not btc_buffer_ok and btc_buffer:
@@ -2455,12 +2367,7 @@ class Dashboard:
             elif not mom_ok:
                 signal = "⏳ WAIT (Mom≤0%)"
             elif not fav_trend_ok:
-                if fav_name == "UP" and up_reversing:
-                    signal = "⏳ WAIT (UP reversing fast)"
-                elif fav_name == "DOWN" and down_reversing:
-                    signal = "⏳ WAIT (DOWN reversing fast)"
-                else:
-                    signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
+                signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
             elif not btc_buffer_ok and btc_buffer:
                 signal = f"⏳ WAIT (BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
             else:
@@ -3029,12 +2936,10 @@ class LiveTradingBot:
         
         # Check price trend over last 10 seconds (UP should be trending up, DOWN should be trending down)
         token_trend = self.dashboard.calc.calc_price_trend(token.trades, window=10.0) if token and token.trades else None
-        token_reversing = self.dashboard.calc.is_trend_reversing_fast(token.trades, window=10.0) if token and token.trades else False
-        
-        trend_ok = (token_trend is None or (
+        trend_ok = token_trend is None or (
             (side == "BUY_UP" and token_trend >= 0) or
             (side == "BUY_DOWN" and token_trend <= 0)
-        )) and not token_reversing
+        )
         
         # Defensive time cutoff check (race condition guard)
         time_left = max(0, self.state.end_time - time.time())
@@ -3048,16 +2953,10 @@ class LiveTradingBot:
                 )
                 return
             if not trend_ok:
-                if token_reversing:
-                    signal_logger.info(
-                        f"SIGNAL BLOCKED: {side} - price reversing fast "
-                        f"(requires confirmation before entry)"
-                    )
-                else:
-                    signal_logger.info(
-                        f"SIGNAL BLOCKED: {side} - not trending in desired direction "
-                        f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
-                    )
+                signal_logger.info(
+                    f"SIGNAL BLOCKED: {side} - not trending in desired direction "
+                    f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
+                )
                 return
         elif time_left < no_entry_cutoff:
             signal_logger.info(
@@ -3068,16 +2967,10 @@ class LiveTradingBot:
             return
 
         if not trend_ok:
-            if token_reversing:
-                signal_logger.info(
-                    f"SIGNAL BLOCKED: {side} - price reversing fast "
-                    f"(requires confirmation before entry)"
-                )
-            else:
-                signal_logger.info(
-                    f"SIGNAL BLOCKED: {side} - not trending in desired direction "
-                    f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
-                )
+            signal_logger.info(
+                f"SIGNAL BLOCKED: {side} - not trending in desired direction "
+                f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
+            )
             return
 
         btc_buffer = self.dashboard._get_btc_buffer_status()
