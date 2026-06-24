@@ -3364,6 +3364,8 @@ class LiveTradingBot:
                     pnl=record.pnl,
                     total_pnl=self.stats.total_pnl,
                     win_rate=self.stats.win_rate,
+                    btc_close_price=btc_close_for_log,
+                    btc_anchor_price=settlement_anchor,
                 )
                 
                 signal_logger.info(f"  Result: {'WIN' if record.won else 'LOSS'}")
