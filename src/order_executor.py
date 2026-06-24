@@ -38,7 +38,7 @@ order_logger.setLevel(logging.DEBUG)
 
 # Polymarket minimums
 MIN_ORDER_USD = 1.0
-MIN_CONTRACTS =50
+MIN_CONTRACTS =30
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -103,7 +103,7 @@ class ExecutionConfig:
     max_retries: int = 5
     retry_delay_ms: int = 300
     fill_timeout_ms: int = 2000
-    min_contracts: int = 50
+    min_contracts: int = 30
     min_order_usd: float = 1.0
     max_entry_price: float = 0.91
 
