@@ -209,18 +209,26 @@ class TelegramNotifier:
         winner: str,
         pnl: float,
         total_pnl: float,
-        win_rate: float
+        win_rate: float,
+        btc_close_price: float = 0.0,
+        btc_anchor_price: float = 0.0,
     ):
         """Send market end notification."""
         emoji = "🎯" if pnl > 0 else "❌"
         pnl_sign = "+" if pnl > 0 else ""
+        btc_line = ""
+        if btc_close_price > 0 and btc_anchor_price > 0:
+            btc_line = (
+                f"\n₿ Close: ${btc_close_price:,.2f} | Anchor: ${btc_anchor_price:,.2f}"
+            )
         
         text = (
             f"🏁 <b>MARKET RESOLVED</b>\n"
             f"{emoji} Winner: <b>{winner}</b>\n"
             f"💵 P&L: {pnl_sign}${pnl:.2f}\n"
             f"📈 Total: ${total_pnl:.2f}\n"
-            f"📊 Win rate: {win_rate:.1%}"
+            f"📊 Win rate: {win_rate:.1f}%"
+            f"{btc_line}"
         )
         await self.send_message(text)
     
