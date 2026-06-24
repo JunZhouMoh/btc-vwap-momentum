@@ -1758,10 +1758,10 @@ class Dashboard:
         base_buffer_abs_usd = max(self.config.buffer, stats_abs_usd)
 
         buffer_abs_usd = base_buffer_abs_usd
-        # In dangerous mode, require at least $15 and at least 50% of average buffer.
+        # In dangerous mode, require at least $25 and at least 50% of average buffer.
         time_left = max(0, self.state.end_time - time.time())
         if self.config.strategy.dangerous and time_left <= 20:
-            buffer_abs_usd = max(15.0, stats_abs_usd * 0.5)
+            buffer_abs_usd = max(20.0, stats_abs_usd * 0.5)
         
         return {
             "current_abs_usd": current_abs_usd,
