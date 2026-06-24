@@ -314,6 +314,91 @@ class IndicatorCalculator:
     def calc_ema_21(trades: deque, window: float = 3600) -> Optional[float]:
         """Calculate 21-period EMA."""
         return IndicatorCalculator.calc_ema(trades, period=21, window=window)
+    
+    @staticmethod
+    def calc_price_trend(trades: deque, window: float = 10.0) -> Optional[float]:
+        """
+        Calculate price trend over recent window.
+        Returns: positive if price rising, negative if falling, None if insufficient data.
+        
+        Compares average price from [now-window, now-window/2] to [now-window/2, now].
+        """
+        if not trades or len(trades) < 2:
+            return None
+        
+        now = time.time()
+        mid_point = now - window / 2.0
+        old_point = now - window
+        
+        # Trades in first half [now-window, now-window/2]
+        early = [t.price for t in trades if old_point <= t.timestamp <= mid_point]
+        # Trades in second half [now-window/2, now]
+        recent = [t.price for t in trades if mid_point < t.timestamp <= now]
+        
+        if not early or not recent:
+            return None
+        
+        avg_early = sum(early) / len(early)
+        avg_recent = sum(recent) / len(recent)
+        
+        # Return change: positive if rising, negative if falling
+        return avg_recent - avg_early
+    
+    @staticmethod
+    def is_trend_reversing_fast(trades: deque, window: float = 10.0) -> bool:
+        """
+        Detect rapid reversal: compare short-term trend vs long-term trend.
+        Returns: True if trending direction contradicts itself (fast reversal detected).
+        
+        Checks if the most recent 3s trend contradicts the overall 10s trend.
+        """
+        if not trades or len(trades) < 2:
+            return False
+        
+        now = time.time()
+        
+        # Long trend: 10s window
+        long_trend = IndicatorCalculator.calc_price_trend(trades, window=window)
+        
+        # Short trend: 3s window (recent reversal check)
+        short_cutoff = now - 3.0
+        short_trades = [t for t in trades if t.timestamp > short_cutoff]
+        if len(short_trades) < 2:
+            return False
+        
+        short_prices = [t.price for t in short_trades]
+        if not short_prices or len(set(short_prices)) < 2:
+            return False
+        
+        # Simple short trend: first vs last 1.5s
+        mid_short = now - 1.5
+        early_short = [t.price for t in short_trades if t.timestamp <= mid_short]
+        recent_short = [t.price for t in short_trades if t.timestamp > mid_short]
+        
+        if not early_short or not recent_short:
+            return False
+        
+        short_trend = sum(recent_short) / len(recent_short) - sum(early_short) / len(early_short)
+        
+        # Reversal: opposite signs and both non-trivial
+        if long_trend is None:
+            return False
+        
+        # If long_trend is positive but short_trend is negative (falling now), flag as reversal
+        # If long_trend is negative but short_trend is positive (rising now), flag as reversal
+        long_magnitude = abs(long_trend)
+        short_magnitude = abs(short_trend)
+        
+        if long_magnitude < 0.0001:  # Long trend is flat, no reversal
+            return False
+        
+        # Reversal if they have opposite signs and short trend is significant
+        if long_trend > 0 and short_trend < -0.0001:
+            return True
+        if long_trend < 0 and short_trend > 0.0001:
+            return True
+        
+        return False
 
 
 class WinRateTable:
@@ -1729,10 +1814,10 @@ class Dashboard:
         base_buffer_abs_usd = max(self.config.buffer, stats_abs_usd)
 
         buffer_abs_usd = base_buffer_abs_usd
-        # In dangerous mode, use a fixed BTC buffer threshold for the final 20 seconds.
+        # In dangerous mode, require at least $15 and at least 50% of average buffer.
         time_left = max(0, self.state.end_time - time.time())
         if self.config.strategy.dangerous and time_left <= 20:
-            buffer_abs_usd = 15.0
+            buffer_abs_usd = max(15.0, stats_abs_usd * 0.5)
         
         return {
             "current_abs_usd": current_abs_usd,
@@ -1942,6 +2027,20 @@ class Dashboard:
         time_cutoff_ok = time_left > no_entry_cutoff
         btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
         
+        # Check price trend over last 10 seconds
+        up_trend = self.calc.calc_price_trend(up.trades, window=10.0) if up and up.trades else None
+        down_trend = self.calc.calc_price_trend(down.trades, window=10.0) if down and down.trades else None
+        
+        # Check for fast reversals (short-term trend contradicting long-term trend)
+        up_reversing = self.calc.is_trend_reversing_fast(up.trades, window=10.0) if up and up.trades else False
+        down_reversing = self.calc.is_trend_reversing_fast(down.trades, window=10.0) if down and down.trades else False
+        
+        # UP is OK if trending up (or no data) AND not reversing fast
+        # DOWN is OK if trending down (or no data) AND not reversing fast
+        up_trend_ok = (up_trend is None or up_trend >= 0) and not up_reversing
+        down_trend_ok = (down_trend is None or down_trend <= 0) and not down_reversing
+        fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
+        
         signal = "⏳ WAIT"
         signal_color = "yellow"
         last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
@@ -1961,12 +2060,19 @@ class Dashboard:
             signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
             signal_color = "red"
             self.last_signal = ""
-        elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok:
+        elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok:
             signal = f"✅ BUY {fav_name}"
             signal_color = "bold green"
             self.last_signal = f"BUY_{fav_name}"
         elif fav_price >= 0.70 and time_ok:
-            if not mom_ok:
+            if not fav_trend_ok:
+                if fav_name == "UP" and up_reversing:
+                    signal = "🟡 ALMOST (UP reversing fast - wait for confirm)"
+                elif fav_name == "DOWN" and down_reversing:
+                    signal = "🟡 ALMOST (DOWN reversing fast - wait for confirm)"
+                else:
+                    signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
+            elif not mom_ok:
                 signal = "🟡 ALMOST (need Mom>0%)"
             elif not btc_buffer_ok:
                 if btc_buffer:
@@ -1991,6 +2097,13 @@ class Dashboard:
                     signal = f"⏳ WAIT (Dev<{min_dev}%)"
             elif not mom_ok:
                 signal = f"⏳ WAIT (Mom≤0%)"
+            elif not fav_trend_ok:
+                if fav_name == "UP" and up_reversing:
+                    signal = "⏳ WAIT (UP reversing fast)"
+                elif fav_name == "DOWN" and down_reversing:
+                    signal = "⏳ WAIT (DOWN reversing fast)"
+                else:
+                    signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
             elif not btc_buffer_ok and btc_buffer:
                 signal = f"⏳ WAIT (BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
         
@@ -2013,7 +2126,7 @@ class Dashboard:
                 f"({'OK' if btc_buffer_ok else 'WAIT'})"
             )
         if last_20s_price_only:
-            lines.insert(7, "Last 20s:   DANGEROUS mode uses fixed BTC buffer = $15.00")
+            lines.insert(7, "Last 20s:   DANGEROUS BTC buffer = max($15.00, 50% of avg buffer)")
         
         title = f"[bold]Strategy: P {min_price}-{max_price}, T≥{min_elapsed}s, Dev {min_dev}%-{max_dev}%[/bold]"
         border = "green" if signal_color == "bold green" else "magenta"
@@ -2279,21 +2392,49 @@ class Dashboard:
             time_cutoff_ok = time_left > no_entry_cutoff
             btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
 
+            # Check price trend over last 10 seconds
+            up_trend = self.calc.calc_price_trend(up.trades, window=10.0) if up and up.trades else None
+            down_trend = self.calc.calc_price_trend(down.trades, window=10.0) if down and down.trades else None
+            
+            # Check for fast reversals
+            up_reversing = self.calc.is_trend_reversing_fast(up.trades, window=10.0) if up and up.trades else False
+            down_reversing = self.calc.is_trend_reversing_fast(down.trades, window=10.0) if down and down.trades else False
+            
+            # UP is OK if trending up (or no data) AND not reversing fast
+            # DOWN is OK if trending down (or no data) AND not reversing fast
+            up_trend_ok = (up_trend is None or up_trend >= 0) and not up_reversing
+            down_trend_ok = (down_trend is None or down_trend <= 0) and not down_reversing
+            fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
+
             last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
 
             if last_20s_price_only:
-                if price_ok and btc_buffer_ok:
-                    signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
+                if price_ok and btc_buffer_ok and fav_trend_ok:
+                    signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer + trend)"
+                elif not fav_trend_ok:
+                    if fav_name == "UP" and up_reversing:
+                        signal = "⏳ WAIT (last 20s: UP reversing fast)"
+                    elif fav_name == "DOWN" and down_reversing:
+                        signal = "⏳ WAIT (last 20s: DOWN reversing fast)"
+                    else:
+                        signal = f"⏳ WAIT (last 20s: {fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
                 elif not btc_buffer_ok and btc_buffer:
                     signal = f"⏳ WAIT (last 20s: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
                 else:
                     signal = "⏳ WAIT (last 20s: P not in range)"
             elif not time_cutoff_ok:
                 signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
-            elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok:
+            elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok:
                 signal = f"✅ BUY {fav_name}"
             elif fav_price >= 0.70 and time_ok:
-                if not mom_ok:
+                if not fav_trend_ok:
+                    if fav_name == "UP" and up_reversing:
+                        signal = "🟡 ALMOST (UP reversing fast - wait for confirm)"
+                    elif fav_name == "DOWN" and down_reversing:
+                        signal = "🟡 ALMOST (DOWN reversing fast - wait for confirm)"
+                    else:
+                        signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
+                elif not mom_ok:
                     signal = "🟡 ALMOST (need Mom>0%)"
                 elif not btc_buffer_ok and btc_buffer:
                     signal = f"🟡 ALMOST (need BTC buffer >= ${btc_buffer['buffer_abs_usd']:.2f})"
@@ -2313,6 +2454,13 @@ class Dashboard:
                 )
             elif not mom_ok:
                 signal = "⏳ WAIT (Mom≤0%)"
+            elif not fav_trend_ok:
+                if fav_name == "UP" and up_reversing:
+                    signal = "⏳ WAIT (UP reversing fast)"
+                elif fav_name == "DOWN" and down_reversing:
+                    signal = "⏳ WAIT (DOWN reversing fast)"
+                else:
+                    signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
             elif not btc_buffer_ok and btc_buffer:
                 signal = f"⏳ WAIT (BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
             else:
@@ -2328,6 +2476,7 @@ class Dashboard:
                     "time": time_ok,
                     "dev": dev_ok,
                     "mom": mom_ok,
+                    "trend": fav_trend_ok,
                     "btc_buffer": btc_buffer_ok,
                     "time_cutoff": time_cutoff_ok,
                     "last_20s_price_only": last_20s_price_only,
@@ -2336,27 +2485,20 @@ class Dashboard:
                     f"${btc_buffer['current_abs_usd']:,.2f} vs ${btc_buffer['buffer_abs_usd']:,.2f}"
                     if btc_buffer else None
                 ),
-                "up_line": f"{up.last_price:.3f} | Dev {up_dev:+.1f}% | Mom {up_mom if up_mom is not None else 0:.2f}%",
-                "down_line": f"{down.last_price:.3f} | Dev {down_dev:+.1f}% | Mom {down_mom if down_mom is not None else 0:.2f}%",
+                "trend": {
+                    "window_sec": 10.0,
+                    "up_delta": up_trend,
+                    "down_delta": down_trend,
+                    "up_ok": up_trend_ok,
+                    "down_ok": down_trend_ok,
+                    "favorite_ok": fav_trend_ok,
+                },
+                "up_line": f"{up.last_price:.3f} | Dev {up_dev:+.1f}% | Mom {up_mom if up_mom is not None else 0:.2f}% | Trend {up_trend if up_trend is not None else 0:+.4f}",
+                "down_line": f"{down.last_price:.3f} | Dev {down_dev:+.1f}% | Mom {down_mom if down_mom is not None else 0:.2f}% | Trend {down_trend if down_trend is not None else 0:+.4f}",
             }
 
         s = self.state
         btc_age = time.time() - s.btc_last_update if s.btc_last_update > 0 else None
-        binance_age = time.time() - s.binance_last_update if s.binance_last_update > 0 else None
-        
-        # Calculate price match status and difference
-        price_match_status = "—"
-        price_diff_usd = None
-        price_diff_pct = None
-        if s.btc_current_price > 0 and s.binance_current_price > 0:
-            price_diff_usd = abs(s.btc_current_price - s.binance_current_price)
-            price_diff_pct = (price_diff_usd / s.btc_current_price * 100) if s.btc_current_price > 0 else 0.0
-            if price_diff_pct <= 0.1:
-                price_match_status = "✅ MATCH"
-            elif price_diff_pct <= 0.5:
-                price_match_status = "⚠️ CLOSE"
-            else:
-                price_match_status = "❌ DIFF"
         
         btc_block: dict = {
             "btc_current_price": s.btc_current_price,
@@ -2366,12 +2508,6 @@ class Dashboard:
             "deviation_line": "",
             "buffer_avg_abs_usd": None,
             "buffer_avg_abs_pct": None,
-            "binance_current_price": s.binance_current_price,
-            "binance_connected": s.binance_connected,
-            "binance_fresh_sec": binance_age,
-            "price_match_status": price_match_status,
-            "price_diff_usd": price_diff_usd,
-            "price_diff_pct": price_diff_pct,
         }
         if s.btc_current_price > 0 and s.btc_anchor_price > 0:
             dev_abs = s.btc_current_price - s.btc_anchor_price
@@ -2472,10 +2608,6 @@ class LiveTradingBot:
         # Chainlink BTC price
         self.chainlink_client: ChainlinkPriceClient = None
         self._chainlink_task: Optional[asyncio.Task] = None
-        
-        # Binance BTC price (parallel feed for price comparison)
-        self.binance_client: BinancePriceClient = None
-        self._binance_task: Optional[asyncio.Task] = None
         
         # BTC volume feed (Binance)
         self.btc_volume_feed: BTCVolumeFeed = None
@@ -2651,11 +2783,6 @@ class LiveTradingBot:
         self._chainlink_task = asyncio.create_task(self.chainlink_client.connect())
         source_name = "Chainlink" if self.state.btc_feed_source == "chainlink" else "Binance"
         console.print(f"[green]✓ {source_name} BTC price feed starting...[/green]")
-        
-        # Binance BTC price feed (parallel - always runs for price comparison)
-        self.binance_client = BinancePriceClient(self.state)
-        self._binance_task = asyncio.create_task(self.binance_client.connect())
-        console.print("[green]✓ Binance BTC price feed (comparison) starting...[/green]")
         
         # BTC volume feed (Binance)
         self.btc_volume_feed = BTCVolumeFeed()
@@ -2900,6 +3027,15 @@ class LiveTradingBot:
         max_price = self.config.strategy.max_price
         price_ok = min_price <= token.last_price <= max_price
         
+        # Check price trend over last 10 seconds (UP should be trending up, DOWN should be trending down)
+        token_trend = self.dashboard.calc.calc_price_trend(token.trades, window=10.0) if token and token.trades else None
+        token_reversing = self.dashboard.calc.is_trend_reversing_fast(token.trades, window=10.0) if token and token.trades else False
+        
+        trend_ok = (token_trend is None or (
+            (side == "BUY_UP" and token_trend >= 0) or
+            (side == "BUY_DOWN" and token_trend <= 0)
+        )) and not token_reversing
+        
         # Defensive time cutoff check (race condition guard)
         time_left = max(0, self.state.end_time - time.time())
         no_entry_cutoff = self.config.strategy.no_entry_before_end_sec
@@ -2911,12 +3047,37 @@ class LiveTradingBot:
                     f"({token.last_price:.4f} not in [{min_price}, {max_price}])"
                 )
                 return
+            if not trend_ok:
+                if token_reversing:
+                    signal_logger.info(
+                        f"SIGNAL BLOCKED: {side} - price reversing fast "
+                        f"(requires confirmation before entry)"
+                    )
+                else:
+                    signal_logger.info(
+                        f"SIGNAL BLOCKED: {side} - not trending in desired direction "
+                        f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
+                    )
+                return
         elif time_left < no_entry_cutoff:
             signal_logger.info(
                 f"SIGNAL BLOCKED: {side} - too close to market end "
                 f"({time_left:.0f}s left < {no_entry_cutoff}s cutoff)"
             )
             logger.warning(f"Entry blocked: {time_left:.0f}s left < {no_entry_cutoff}s cutoff")
+            return
+
+        if not trend_ok:
+            if token_reversing:
+                signal_logger.info(
+                    f"SIGNAL BLOCKED: {side} - price reversing fast "
+                    f"(requires confirmation before entry)"
+                )
+            else:
+                signal_logger.info(
+                    f"SIGNAL BLOCKED: {side} - not trending in desired direction "
+                    f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
+                )
             return
 
         btc_buffer = self.dashboard._get_btc_buffer_status()
@@ -3553,16 +3714,6 @@ class LiveTradingBot:
                 try:
                     self._chainlink_task.cancel()
                     await self._chainlink_task
-                except:
-                    pass
-            
-            # Gracefully close Binance BTC price WebSocket
-            if self.binance_client:
-                await self.binance_client.disconnect()
-            if self._binance_task:
-                try:
-                    self._binance_task.cancel()
-                    await self._binance_task
                 except:
                     pass
             
