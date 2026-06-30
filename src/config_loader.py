@@ -9,7 +9,7 @@ import os
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 # Load .env from project root
@@ -45,6 +45,28 @@ class MarketConfig:
 
 
 @dataclass
+class LateEntryModeConfig:
+    """Single late-entry mode settings."""
+    enabled: bool = True
+    time_left_sec: int = 60
+    min_contracts: int = 5
+    max_trades: int = 1
+    buffer_avg_multiplier: float = 1.0
+    min_price: float = 0.0
+    max_price: float = 1.0
+
+
+@dataclass
+class LateEntryModesConfig:
+    """Three predefined late-entry windows: last 60s, 40s, and 20s."""
+    enabled: bool = False
+    total_max_trades: int = 3
+    mode_60s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(enabled=True, time_left_sec=60, min_contracts=5, max_trades=1, buffer_avg_multiplier=1.0, min_price=0.8, max_price=0.85))
+    mode_40s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(enabled=True, time_left_sec=40, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_price=0.85, max_price=0.9))
+    mode_20s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(enabled=True, time_left_sec=20, min_contracts=12, max_trades=1, buffer_avg_multiplier=0.5, min_price=0.9, max_price=0.99))
+
+
+@dataclass
 class StrategyConfig:
     """Strategy parameters."""
     min_price: float = 0.65
@@ -58,6 +80,7 @@ class StrategyConfig:
     momentum_min_pct: float = 0.0
     vwap_window_sec: int = 30
     win_rate_csv: str = "data/win_rate.csv"
+    late_entry_modes: LateEntryModesConfig = field(default_factory=LateEntryModesConfig)
 
 
 @dataclass
@@ -197,6 +220,27 @@ def load_config(config_path: Optional[str] = None) -> Config:
 
     # Strategy
     strategy_data = data.get("strategy", {})
+    late_modes_data = strategy_data.get("late_entry_modes", {})
+
+    def _load_late_mode(raw: Dict[str, Any], default_time_left: int, default_contracts: int, default_max_trades: int, default_multiplier: float, default_min_price: float = 0.0, default_max_price: float = 1.0) -> LateEntryModeConfig:
+        return LateEntryModeConfig(
+            enabled=bool(raw.get("enabled", True)),
+            time_left_sec=int(raw.get("time_left_sec", default_time_left)),
+            min_contracts=int(raw.get("min_contracts", default_contracts)),
+            max_trades=int(raw.get("max_trades", default_max_trades)),
+            buffer_avg_multiplier=float(raw.get("buffer_avg_multiplier", default_multiplier)),
+            min_price=float(raw.get("min_price", default_min_price)),
+            max_price=float(raw.get("max_price", default_max_price)),
+        )
+
+    late_entry_modes = LateEntryModesConfig(
+        enabled=bool(late_modes_data.get("enabled", False)),
+        total_max_trades=int(late_modes_data.get("total_max_trades", 3)),
+        mode_60s=_load_late_mode(late_modes_data.get("mode_60s", {}), 60, 5, 1, 1.0, 0.8, 0.85),
+        mode_40s=_load_late_mode(late_modes_data.get("mode_40s", {}), 40, 8, 1, 0.8, 0.85, 0.9),
+        mode_20s=_load_late_mode(late_modes_data.get("mode_20s", {}), 20, 12, 1, 0.5, 0.9, 0.99),
+    )
+
     strategy = StrategyConfig(
         min_price=strategy_data.get("min_price", 0.65),
         max_price=strategy_data.get("max_price", 0.91),
@@ -209,6 +253,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         momentum_min_pct=float(strategy_data.get("momentum_min_pct", 0.0)),
         vwap_window_sec=strategy_data.get("vwap_window_sec", 30),
         win_rate_csv=strategy_data.get("win_rate_csv", "data/win_rate.csv"),
+        late_entry_modes=late_entry_modes,
     )
 
     # Entry
@@ -354,6 +399,18 @@ def validate_config(config: Config) -> list:
             f"max_deviation_pct ({config.strategy.max_deviation_pct}) "
             f"must be greater than min_deviation_pct ({config.strategy.min_deviation_pct})"
         )
+
+    for mode_name, mode_cfg in [
+        ("mode_60s", config.strategy.late_entry_modes.mode_60s),
+        ("mode_40s", config.strategy.late_entry_modes.mode_40s),
+        ("mode_20s", config.strategy.late_entry_modes.mode_20s),
+    ]:
+        if mode_cfg.min_contracts <= 0:
+            errors.append(f"strategy.late_entry_modes.{mode_name}.min_contracts must be > 0")
+        if mode_cfg.max_trades <= 0:
+            errors.append(f"strategy.late_entry_modes.{mode_name}.max_trades must be > 0")
+        if mode_cfg.buffer_avg_multiplier <= 0:
+            errors.append(f"strategy.late_entry_modes.{mode_name}.buffer_avg_multiplier must be > 0")
 
     if config.buffer < 0:
         errors.append("buffer must be >= 0")
