@@ -403,6 +403,7 @@ class TradingStats:
         self.current_market_slug: str = ""
         self.position_closed_this_market: bool = False
         self.entry_blocked: bool = False  # Блокировка повторных попыток после таймаута
+        self.mode_entry_counts: Dict[str, int] = {}
         self._load()
     
     def _load(self):
@@ -469,10 +470,26 @@ class TradingStats:
             self.position = None
             self.position_closed_this_market = False
             self.entry_blocked = False  # Сброс блокировки для нового рынка
+            self.mode_entry_counts = {}
             self._save()
     
     def can_enter(self) -> bool:
         return self.position is None and not self.position_closed_this_market and not self.entry_blocked
+
+    def late_mode_trade_count(self, mode_name: str) -> int:
+        return int(self.mode_entry_counts.get(mode_name, 0))
+
+    def can_enter_late_mode(self, mode_name: str, max_trades: int) -> bool:
+        return self.late_mode_trade_count(mode_name) < max_trades
+
+    def total_late_mode_trade_count(self) -> int:
+        return int(sum(self.mode_entry_counts.values()))
+
+    def can_enter_late_mode_total(self, max_trades: int) -> bool:
+        return self.total_late_mode_trade_count() < max_trades
+
+    def record_late_mode_entry(self, mode_name: str):
+        self.mode_entry_counts[mode_name] = self.late_mode_trade_count(mode_name) + 1
     
     def block_entry(self, reason: str = ""):
         """Блокирует повторные попытки входа на текущем рынке."""
@@ -495,6 +512,28 @@ class TradingStats:
             btc_price_at_entry=btc_price_at_entry,
             btc_anchor_at_entry=btc_anchor_at_entry,
         )
+
+    def add_to_position(self, price: float, contracts: int, btc_price_at_entry: float = 0.0):
+        """Scale into an existing position by averaging entry price and contracts."""
+        if not self.position or contracts <= 0:
+            return
+
+        existing_contracts = self.position.contracts
+        total_contracts = existing_contracts + contracts
+        self.position.entry_price = (
+            (self.position.entry_price * existing_contracts) + (price * contracts)
+        ) / total_contracts
+
+        if btc_price_at_entry > 0:
+            if self.position.btc_price_at_entry > 0:
+                self.position.btc_price_at_entry = (
+                    (self.position.btc_price_at_entry * existing_contracts)
+                    + (btc_price_at_entry * contracts)
+                ) / total_contracts
+            else:
+                self.position.btc_price_at_entry = btc_price_at_entry
+
+        self.position.contracts = total_contracts
     
     def record_hedge(self, contracts: int, price: float):
         if self.position:
@@ -1740,6 +1779,37 @@ class Dashboard:
             f"(+/-{buffer_stats['avg_abs_pct']:.3f}%)"
         )
 
+    def _get_late_entry_mode(self, time_left: float) -> Optional[Dict[str, float]]:
+        modes = getattr(self.config.strategy, "late_entry_modes", None)
+        if not modes or not modes.enabled:
+            return None
+
+        candidates: List[Dict[str, float]] = []
+        for mode_cfg, mode_name in [
+            (modes.mode_60s, "mode_60s"),
+            (modes.mode_40s, "mode_40s"),
+            (modes.mode_20s, "mode_20s"),
+        ]:
+            window_sec = float(max(0, mode_cfg.time_left_sec))
+            if time_left <= window_sec and mode_cfg.enabled:
+                candidates.append(
+                    {
+                        "window_sec": float(window_sec),
+                        "min_contracts": float(mode_cfg.min_contracts),
+                        "max_trades": float(mode_cfg.max_trades),
+                        "buffer_avg_multiplier": float(mode_cfg.buffer_avg_multiplier),
+                        "min_price": float(mode_cfg.min_price),
+                        "max_price": float(mode_cfg.max_price),
+                        "name": mode_name,
+                    }
+                )
+
+        if not candidates:
+            return None
+
+        # Prioritize the tightest active window (20s over 40s over 60s).
+        return sorted(candidates, key=lambda item: item["window_sec"])[0]
+
     def _get_btc_buffer_status(self) -> Optional[Dict[str, float]]:
         buffer_stats = self._get_recent_btc_buffer()
         if not buffer_stats:
@@ -1758,9 +1828,12 @@ class Dashboard:
         base_buffer_abs_usd = max(self.config.buffer, stats_abs_usd)
 
         buffer_abs_usd = base_buffer_abs_usd
-        # In dangerous mode, require at least $25 and at least 50% of average buffer.
         time_left = max(0, self.state.end_time - time.time())
-        if self.config.strategy.dangerous and time_left <= 20:
+        late_mode = self._get_late_entry_mode(time_left)
+        if late_mode:
+            buffer_abs_usd = max(self.config.buffer, stats_abs_usd * late_mode["buffer_avg_multiplier"])
+        elif self.config.strategy.dangerous and time_left <= 20:
+            # Legacy fallback when structured late-entry modes are disabled.
             buffer_abs_usd = max(20.0, stats_abs_usd * 0.5)
         
         return {
@@ -1771,6 +1844,10 @@ class Dashboard:
             "buffer_abs_pct": stats_abs_pct,
             "buffer_metric": "average",
             "ok": current_abs_usd >= buffer_abs_usd,
+            "late_mode_name": late_mode["name"] if late_mode else "",
+            "late_mode_window_sec": late_mode["window_sec"] if late_mode else 0.0,
+            "late_mode_min_contracts": late_mode["min_contracts"] if late_mode else 0.0,
+            "late_mode_buffer_multiplier": late_mode["buffer_avg_multiplier"] if late_mode else 0.0,
         }
     
     def _fmt_price(self, price: float) -> str:
@@ -1953,8 +2030,6 @@ class Dashboard:
         base_wr = self.winrate_table.get_winrate(fav_price, time_bin, span)
         wr_str = f"{base_wr:.1f}%" if base_wr else "N/A"
         
-        min_price = self.config.strategy.min_price
-        max_price = self.config.strategy.max_price
         min_elapsed = self.config.strategy.min_elapsed_sec
         min_dev = self.config.strategy.min_deviation_pct
         max_dev = self.config.strategy.max_deviation_pct
@@ -1963,6 +2038,15 @@ class Dashboard:
         
         elapsed_sec = self.config.market.duration_sec - time_left
         btc_buffer = self._get_btc_buffer_status()
+        
+        # Use late-entry mode price range if active, otherwise use strategy range
+        late_mode = self._get_late_entry_mode(time_left)
+        if late_mode:
+            min_price = late_mode.get("min_price", 0.0)
+            max_price = late_mode.get("max_price", 1.0)
+        else:
+            min_price = self.config.strategy.min_price
+            max_price = self.config.strategy.max_price
         
         price_ok = min_price <= fav_price <= max_price
         time_ok = elapsed_sec >= min_elapsed
@@ -1982,18 +2066,30 @@ class Dashboard:
         
         signal = "⏳ WAIT"
         signal_color = "yellow"
+        late_mode = self._get_late_entry_mode(time_left)
+        late_window_price_only = late_mode is not None
         last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
+        price_only_gate = late_window_price_only or last_20s_price_only
         
-        if last_20s_price_only:
+        if price_only_gate:
             if price_ok and btc_buffer_ok:
-                signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
+                if late_mode:
+                    signal = (
+                        f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s: "
+                        f"x{late_mode['buffer_avg_multiplier']:.2f} buffer, "
+                        f"minC={int(late_mode['min_contracts'])})"
+                    )
+                else:
+                    signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
                 signal_color = "bold green"
                 self.last_signal = f"BUY_{fav_name}"
             elif not btc_buffer_ok and btc_buffer:
-                signal = f"⏳ WAIT (last 20s: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
+                label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
+                signal = f"⏳ WAIT ({label}: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
                 self.last_signal = ""
             else:
-                signal = "⏳ WAIT (last 20s: P not in range)"
+                label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
+                signal = f"⏳ WAIT ({label}: P not in range)"
                 self.last_signal = ""
         elif not time_cutoff_ok:
             signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
@@ -2054,8 +2150,15 @@ class Dashboard:
                 f"BTC Buffer:  ${btc_buffer['current_abs_usd']:,.2f} vs ${btc_buffer['buffer_abs_usd']:,.2f} "
                 f"({'OK' if btc_buffer_ok else 'WAIT'})"
             )
-        if last_20s_price_only:
-            lines.insert(7, "Last 20s:   DANGEROUS BTC buffer = max($15.00, 50% of avg buffer)")
+        if late_mode:
+            lines.insert(
+                7,
+                f"Late mode:   last {int(late_mode['window_sec'])}s | "
+                f"minC={int(late_mode['min_contracts'])} | "
+                f"buffer x{late_mode['buffer_avg_multiplier']:.2f}",
+            )
+        elif last_20s_price_only:
+            lines.insert(7, "Last 20s:   DANGEROUS BTC buffer = max($20.00, 50% of avg buffer)")
         
         title = f"[bold]Strategy: P {min_price}-{max_price}, T≥{min_elapsed}s, Dev {min_dev}%-{max_dev}%[/bold]"
         border = "green" if signal_color == "bold green" else "magenta"
@@ -2305,14 +2408,21 @@ class Dashboard:
             base_wr = self.winrate_table.get_winrate(fav_price, time_bin, span)
             wr_str = f"{base_wr:.1f}%" if base_wr else None
 
-            min_price = self.config.strategy.min_price
-            max_price = self.config.strategy.max_price
             min_elapsed = self.config.strategy.min_elapsed_sec
             min_dev = self.config.strategy.min_deviation_pct
             max_dev = self.config.strategy.max_deviation_pct
             no_entry_cutoff = self.config.strategy.no_entry_before_end_sec
             elapsed_sec = self.config.market.duration_sec - time_left
             btc_buffer = self._get_btc_buffer_status()
+
+            # Use late-entry mode price range if active, otherwise use strategy range
+            late_mode = self._get_late_entry_mode(time_left)
+            if late_mode:
+                min_price = late_mode.get("min_price", 0.0)
+                max_price = late_mode.get("max_price", 1.0)
+            else:
+                min_price = self.config.strategy.min_price
+                max_price = self.config.strategy.max_price
 
             price_ok = min_price <= fav_price <= max_price
             time_ok = elapsed_sec >= min_elapsed
@@ -2330,15 +2440,23 @@ class Dashboard:
             down_trend_ok = down_trend is None or down_trend <= 0
             fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
 
+            late_window_price_only = late_mode is not None
             last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
+            price_only_gate = late_window_price_only or last_20s_price_only
 
-            if last_20s_price_only:
+            if price_only_gate:
                 if price_ok and btc_buffer_ok:
-                    signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
+                    signal = (
+                        f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s mode)"
+                        if late_mode
+                        else f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
+                    )
                 elif not btc_buffer_ok and btc_buffer:
-                    signal = f"⏳ WAIT (last 20s: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
+                    label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
+                    signal = f"⏳ WAIT ({label}: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
                 else:
-                    signal = "⏳ WAIT (last 20s: P not in range)"
+                    label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
+                    signal = f"⏳ WAIT ({label}: P not in range)"
             elif not time_cutoff_ok:
                 signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
             elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok:
@@ -2386,7 +2504,7 @@ class Dashboard:
                     "trend": fav_trend_ok,
                     "btc_buffer": btc_buffer_ok,
                     "time_cutoff": time_cutoff_ok,
-                    "last_20s_price_only": last_20s_price_only,
+                    "last_20s_price_only": price_only_gate,
                 },
                 "btc_buffer_line": (
                     f"${btc_buffer['current_abs_usd']:,.2f} vs ${btc_buffer['buffer_abs_usd']:,.2f}"
@@ -2913,8 +3031,51 @@ class LiveTradingBot:
     
     async def execute_entry(self, side: str):
         """Execute entry order (live CLOB or simulation)."""
-        if not self.stats.can_enter():
-            signal_logger.info(f"SIGNAL IGNORED: {side} - cannot enter (already in position)")
+        time_left = max(0, self.state.end_time - time.time())
+        late_mode = self.dashboard._get_late_entry_mode(time_left)
+        late_modes_cfg = getattr(self.config.strategy, "late_entry_modes", None)
+        total_late_mode_max_trades = int(getattr(late_modes_cfg, "total_max_trades", 3))
+        total_late_mode_trade_count = self.stats.total_late_mode_trade_count()
+        total_trade_cap_ok = self.stats.can_enter_late_mode_total(total_late_mode_max_trades)
+
+        if late_mode:
+            mode_name = str(late_mode.get("name", ""))
+            mode_max_trades = int(late_mode.get("max_trades", 1))
+            mode_trade_count = self.stats.late_mode_trade_count(mode_name)
+            mode_trade_cap_ok = self.stats.can_enter_late_mode(mode_name, mode_max_trades)
+        else:
+            mode_name = ""
+            mode_max_trades = 0
+            mode_trade_count = 0
+            mode_trade_cap_ok = True
+
+        if late_mode and not mode_trade_cap_ok:
+            signal_logger.info(
+                f"SIGNAL IGNORED: {side} - late mode '{mode_name}' trade cap reached "
+                f"({mode_trade_count}/{mode_max_trades})"
+            )
+            return
+
+        if late_mode and not total_trade_cap_ok:
+            signal_logger.info(
+                f"SIGNAL IGNORED: {side} - total late-mode trade cap reached "
+                f"({total_late_mode_trade_count}/{total_late_mode_max_trades})"
+            )
+            return
+
+        if self.stats.position is not None:
+            if not late_mode:
+                signal_logger.info(f"SIGNAL IGNORED: {side} - cannot enter (already in position)")
+                return
+            expected_token_name = "UP" if side == "BUY_UP" else "DOWN"
+            if self.stats.position.token_name != expected_token_name:
+                signal_logger.info(
+                    f"SIGNAL IGNORED: {side} - opposite position already open "
+                    f"({self.stats.position.token_name})"
+                )
+                return
+        elif not self.stats.can_enter():
+            signal_logger.info(f"SIGNAL IGNORED: {side} - cannot enter (entry blocked for this market)")
             return
 
         if side == "BUY_UP":
@@ -2930,8 +3091,12 @@ class LiveTradingBot:
             signal_logger.warning(f"SIGNAL IGNORED: {side} - token data missing")
             return
 
-        min_price = self.config.strategy.min_price
-        max_price = self.config.strategy.max_price
+        if late_mode:
+            min_price = float(late_mode.get("min_price", self.config.strategy.min_price))
+            max_price = float(late_mode.get("max_price", self.config.strategy.max_price))
+        else:
+            min_price = self.config.strategy.min_price
+            max_price = self.config.strategy.max_price
         price_ok = min_price <= token.last_price <= max_price
         
         # Check price trend over last 10 seconds (UP should be trending up, DOWN should be trending down)
@@ -2942,13 +3107,13 @@ class LiveTradingBot:
         )
         
         # Defensive time cutoff check (race condition guard)
-        time_left = max(0, self.state.end_time - time.time())
         no_entry_cutoff = self.config.strategy.no_entry_before_end_sec
         last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
-        if last_20s_price_only:
+        price_only_gate = late_mode is not None or last_20s_price_only
+        if price_only_gate:
             if not price_ok:
                 signal_logger.info(
-                    f"SIGNAL BLOCKED: {side} - last 20s price-only gate failed "
+                    f"SIGNAL BLOCKED: {side} - late-window price-only gate failed "
                     f"({token.last_price:.4f} not in [{min_price}, {max_price}])"
                 )
                 return
@@ -3060,6 +3225,21 @@ class LiveTradingBot:
         signal_logger.info("=" * 60)
         
         logger.info(f"Executing entry: {token_name}")
+
+        selected_min_contracts = (
+            int(late_mode["min_contracts"])
+            if late_mode
+            else int(self.config.entry.min_contracts)
+        )
+        if late_mode:
+            signal_logger.info(
+                f"  Late mode active: last {int(late_mode['window_sec'])}s | "
+                f"mode={mode_name} | "
+                f"trades={mode_trade_count + 1}/{mode_max_trades} | "
+                f"late_total={total_late_mode_trade_count + 1}/{total_late_mode_max_trades} | "
+                f"min_contracts={selected_min_contracts} | "
+                f"buffer_mult={late_mode['buffer_avg_multiplier']:.2f}"
+            )
         
         exec_config = ExecutionConfig(
             bet_amount_usd=self.config.entry.bet_amount_usd,
@@ -3067,7 +3247,7 @@ class LiveTradingBot:
             max_retries=self.config.entry.max_retries,
             retry_delay_ms=self.config.entry.retry_delay_ms,
             fill_timeout_ms=self.config.entry.fill_timeout_ms,
-            min_contracts=self.config.entry.min_contracts,
+            min_contracts=selected_min_contracts,
             min_order_usd=self.config.entry.min_order_usd,
             max_entry_price=self.config.entry.max_entry_price
         )
@@ -3087,16 +3267,26 @@ class LiveTradingBot:
         )
         
         if result.success:
-            self.stats.record_entry(
-                token_name=token_name,
-                token_id=token.token_id,
-                opposite_token_id=opposite_token.token_id,
-                price=result.avg_price,
-                contracts=result.contracts_filled,
-                market_slug=self.state.slug,
-                btc_price_at_entry=btc_price_at_entry,
-                btc_anchor_at_entry=btc_anchor_at_entry,
-            )
+            if self.stats.position is None:
+                self.stats.record_entry(
+                    token_name=token_name,
+                    token_id=token.token_id,
+                    opposite_token_id=opposite_token.token_id,
+                    price=result.avg_price,
+                    contracts=result.contracts_filled,
+                    market_slug=self.state.slug,
+                    btc_price_at_entry=btc_price_at_entry,
+                    btc_anchor_at_entry=btc_anchor_at_entry,
+                )
+            else:
+                self.stats.add_to_position(
+                    price=result.avg_price,
+                    contracts=result.contracts_filled,
+                    btc_price_at_entry=btc_price_at_entry,
+                )
+
+            if late_mode and mode_name:
+                self.stats.record_late_mode_entry(mode_name)
             
             # Log BTC price movement for this buy
             if self.btc_price_movement_logger:
