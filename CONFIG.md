@@ -63,6 +63,42 @@ These parameters control **which signals the bot acts on**. Think of them as fil
 **Maximum token price to enter.** The bot rejects tokens priced above this. Higher prices mean higher probability but tiny profit margin. At $0.88, you profit only $0.12 per contract on a win but lose $0.88 on a loss (need 88% win rate). Range: 0.80 - 0.95. Start with 0.88.
 
 ```
+"dangerous": false
+```
+**Enable dangerous mode for late-entry behavior.** When `true`, and only in the final 20 seconds of a market, the bot bypasses time/deviation/momentum/BTC-buffer gates and uses only `min_price <= favorite_price <= max_price` to allow BUY. Keep `false` unless you explicitly want this aggressive override.
+
+```
+"late_entry_modes": {
+  "enabled": true,
+  "total_max_trades": 3,
+  "mode_60s": { "enabled": true, "time_left_sec": 60, "min_contracts": 5, "max_trades": 1, "buffer_avg_multiplier": 1.0, "min_price": 0.8, "max_price": 0.85 },
+  "mode_40s": { "enabled": true, "time_left_sec": 40, "min_contracts": 8, "max_trades": 1, "buffer_avg_multiplier": 0.8, "min_price": 0.85, "max_price": 0.9 },
+  "mode_20s": { "enabled": true, "time_left_sec": 20, "min_contracts": 12, "max_trades": 1, "buffer_avg_multiplier": 0.5, "min_price": 0.9, "max_price": 0.99 }
+}
+```
+
+**Three late-entry strategies for last 60s / 40s / 20s with mode-specific price ranges.**
+
+- `enabled`: turns the mode system on/off.
+- `total_max_trades`: maximum number of entries allowed across all late-entry modes per market.
+- `mode_60s`, `mode_40s`, `mode_20s`: each mode activates when remaining time is less than or equal to `time_left_sec`.
+  - `time_left_sec`: per-mode activation threshold (seconds remaining in market).
+  - `min_contracts`: minimum contracts enforced for entries in that late window.
+  - `max_trades`: maximum number of entries allowed in this mode per market.
+  - `buffer_avg_multiplier`: multiplier applied to average BTC buffer (`avg_abs_usd_last_N_windows`) before comparing with current BTC move.
+  - `min_price` / `max_price`: price range specific to this late-entry window (overrides global `min_price`/`max_price` when active).
+
+When multiple windows are active (for example at 18s left), the tightest window has priority (`20s` over `40s` over `60s`). The price range of the active mode applies.
+
+Effective late-window behavior:
+
+- **Price gate:** `mode_min_price <= favorite_price <= mode_max_price`
+- **BTC buffer:** `max(buffer, avg_abs_usd_last_N_windows * buffer_avg_multiplier)`
+- **Min contracts:** enforced per mode
+- **Trade count:** capped by `max_trades` per active mode and market
+- **Trade count:** capped by both mode `max_trades` and `total_max_trades` across all late modes per market
+
+```
 "min_elapsed_sec": 530
 ```
 **Minimum seconds elapsed since market opened before allowing entry.** Each market lasts 900 seconds (15 min). This prevents entering too early when the market direction is unclear. At 530, the bot waits ~8.8 minutes. Range: 300 - 800. Higher = safer but fewer opportunities.
@@ -236,6 +272,23 @@ Optional Telegram integration for trade alerts and equity charts. Requires TELEG
 "file_rotation_hours": 3
 ```
 **Rotate log files every N hours.** Prevents log files from growing indefinitely. Range: 1 - 24.
+
+---
+
+## buffer -- BTC move filter threshold
+
+```
+"buffer": 25.0
+```
+
+**Minimum BTC absolute move threshold (USD).**
+The entry gate compares current absolute BTC move from anchor vs an adaptive threshold. This value is the hard floor so the threshold never drops too low in quiet windows.
+
+Effective threshold:
+
+- `max(buffer, avg_abs_usd_last_N_windows)`
+
+Decay features are not used in this version.
 
 ---
 
