@@ -38,7 +38,7 @@ order_logger.setLevel(logging.DEBUG)
 
 # Polymarket minimums
 MIN_ORDER_USD = 1.0
-MIN_CONTRACTS =30
+MIN_CONTRACTS =20
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -103,7 +103,7 @@ class ExecutionConfig:
     max_retries: int = 5
     retry_delay_ms: int = 300
     fill_timeout_ms: int = 2000
-    min_contracts: int = 30
+    min_contracts: int = 20
     min_order_usd: float = 1.0
     max_entry_price: float = 0.91
 
@@ -196,7 +196,7 @@ class OrderExecutor:
             order_logger.error(f"CLOB CLIENT INIT FAILED: {e}")
             return False
     
-    def _calculate_contracts(self, amount_usd: float, price: float) -> int:
+    def _calculate_contracts(self, amount_usd: float, price: float, min_contracts: Optional[int] = None) -> int:
         """
         Calculate number of contracts for given amount.
         
@@ -205,15 +205,17 @@ class OrderExecutor:
             price: Price per contract
         
         Returns:
-            Number of contracts (minimum MIN_CONTRACTS)
+            Number of contracts (minimum min_contracts)
         """
+        if min_contracts is None:
+            min_contracts = MIN_CONTRACTS
         if price <= 0:
-            return MIN_CONTRACTS
+            return min_contracts
         
         contracts = int(amount_usd / price)
-        return max(contracts, MIN_CONTRACTS)
+        return max(contracts, min_contracts)
     
-    def _validate_order_size(self, contracts: int, price: float) -> Tuple[int, bool]:
+    def _validate_order_size(self, contracts: int, price: float, min_contracts: Optional[int] = None) -> Tuple[int, bool]:
         """
         Validate and adjust order size to meet minimums.
         
@@ -226,9 +228,12 @@ class OrderExecutor:
         """
         order_value = contracts * price
         
-        # Must be at least MIN_CONTRACTS
-        if contracts < MIN_CONTRACTS:
-            contracts = MIN_CONTRACTS
+        if min_contracts is None:
+            min_contracts = MIN_CONTRACTS
+
+        # Must be at least configured minimum contracts
+        if contracts < min_contracts:
+            contracts = min_contracts
         
         # Must be at least MIN_ORDER_USD
         if order_value < MIN_ORDER_USD:
@@ -252,8 +257,8 @@ class OrderExecutor:
             )
             return OrderResult(success=False, error="Price exceeded max entry")
 
-        contracts_needed = self._calculate_contracts(config.bet_amount_usd, initial_price)
-        order_size, _ = self._validate_order_size(contracts_needed, order_price)
+        contracts_needed = self._calculate_contracts(config.bet_amount_usd, initial_price, config.min_contracts)
+        order_size, _ = self._validate_order_size(contracts_needed, order_price, config.min_contracts)
         total_cost = order_size * order_price
         oid = f"SIM-{uuid.uuid4().hex[:12]}"
         order_logger.info("=" * 60)
@@ -663,7 +668,7 @@ class OrderExecutor:
             order_logger.error("ENTRY FAILED: Could not get initial price")
             return OrderResult(success=False, error="Could not get price")
         
-        contracts_needed = self._calculate_contracts(config.bet_amount_usd, initial_price)
+        contracts_needed = self._calculate_contracts(config.bet_amount_usd, initial_price, config.min_contracts)
         contracts_bought = 0
         total_cost = 0.0
         attempt = 0
@@ -710,7 +715,7 @@ class OrderExecutor:
                 order_logger.info(f"  ✅ Already filled {contracts_bought}/{contracts_needed} - no retry needed")
                 break
             
-            order_size, _ = self._validate_order_size(remaining, order_price)
+            order_size, _ = self._validate_order_size(remaining, order_price, config.min_contracts)
             
             order_logger.info(f"  Contracts bought so far: {contracts_bought}")
             order_logger.info(f"  Remaining needed: {remaining}")
