@@ -185,7 +185,7 @@ _HTML = """<!DOCTYPE html>
               btcBits.push("\u2014 recent BTC / anchor \u2014");
               for (var hi = b.btc_anchor_history.length - 1; hi >= 0; hi--) {
                 var h = b.btc_anchor_history[hi];
-                var ht = h.ts ? new Date(h.ts * 1000).toISOString().substr(11, 8) : "?";
+                var ht = h.window_ts ? new Date(h.window_ts * 1000).toISOString().substr(11, 8) : (h.ts ? new Date(h.ts * 1000).toISOString().substr(11, 8) : "?");
                 btcBits.push(
                   esc(ht) +
                   " BTC $" + esc(numFmt(h.btc_price, 2)) +
