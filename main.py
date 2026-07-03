@@ -82,6 +82,7 @@ from src.btc_volume_feed import BTCVolumeFeed
 
 # Constants
 GAMMA_API = "https://gamma-api.polymarket.com"
+CRYPTO_PRICE_API = "https://polymarket.com/api/crypto/crypto-price"
 WSS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CHAINLINK_RTDS_URL = "wss://ws-live-data.polymarket.com"
 BINANCE_BTC_WSS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
@@ -159,8 +160,10 @@ class MarketState:
     # Chainlink BTC/USD price tracking
     btc_anchor_price: float = 0.0    # Price at market start
     btc_market_anchor_price: float = 0.0  # Fixed anchor for current market (reset only on new market)
+    btc_market_anchor_source: str = "none"  # none | fallback_tick | feed_tick | official_ptb
     btc_current_price: float = 0.0   # Latest Chainlink price
     btc_last_update: float = 0.0     # Timestamp of last price update
+    btc_anchor_history: deque = field(default_factory=lambda: deque(maxlen=15))  # Recent BTC/anchor samples
     btc_connected: bool = False      # RTDS connection status
     btc_feed_source: str = "chainlink"  # chainlink | binance
     btc_window_moves: deque = field(default_factory=lambda: deque(maxlen=50))  # Completed window abs moves
@@ -818,6 +821,9 @@ class ChainlinkPriceClient:
         self.running = False
         self._ws = None
         self._ping_task: Optional[asyncio.Task] = None
+        self._ptb_task: Optional[asyncio.Task] = None
+        self._ptb_slug: str = ""
+        self._ptb_next_retry_ts: float = 0.0
         # Track which window the current anchor belongs to
         self._current_window: int = 0
         # Buffer: last price before boundary (for most accurate anchor)
@@ -839,6 +845,108 @@ class ChainlinkPriceClient:
     def _is_btc_symbol(cls, symbol: str) -> bool:
         s = cls._normalize_symbol(symbol)
         return s in {"btcusd", "btcusdt"}
+
+    def _ptb_variant(self) -> str:
+        override = (os.getenv("POLY_CRYPTO_PRICE_VARIANT") or "").strip()
+        if override:
+            return override
+        # For Polymarket BTC up/down 5m and 15m windows, variant='fifteen' matches UI behavior.
+        if self._market_duration in (300, 900):
+            return "fifteen"
+        return "fifteen"
+
+    @staticmethod
+    def _iso_from_epoch(ts: float) -> str:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @staticmethod
+    def _market_start_from_slug(slug: str) -> Optional[int]:
+        m = re.search(r"btc-updown-[^-]+-(\d+)$", str(slug or ""))
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    async def _fetch_official_market_anchor(self, slug: str, end_time: float) -> Optional[float]:
+        start_ts = self._market_start_from_slug(slug)
+        if not start_ts or end_time <= 0:
+            return None
+
+        params = {
+            "symbol": "BTC",
+            "eventStartTime": self._iso_from_epoch(float(start_ts)),
+            "variant": self._ptb_variant(),
+            "endDate": self._iso_from_epoch(float(end_time)),
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "Referer": "https://polymarket.com/",
+        }
+
+        timeout = aiohttp.ClientTimeout(total=8)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(CRYPTO_PRICE_API, params=params, headers=headers) as resp:
+                    if resp.status != 200:
+                        logger.debug(f"PTB request HTTP {resp.status} for {slug}")
+                        return None
+                    payload = await resp.json()
+        except Exception as e:
+            logger.debug(f"PTB request failed for {slug}: {e}")
+            return None
+
+        try:
+            open_price = float(payload.get("openPrice") or 0.0)
+        except (TypeError, ValueError):
+            open_price = 0.0
+
+        if open_price > 0:
+            return open_price
+
+        return None
+
+    def _maybe_schedule_official_anchor_fetch(self):
+        slug = str(self.state.slug or "")
+        if not slug:
+            return
+        if self.state.btc_market_anchor_source == "official_ptb":
+            return
+
+        now = time.time()
+        if slug != self._ptb_slug:
+            self._ptb_slug = slug
+            self._ptb_next_retry_ts = 0.0
+
+        if now < self._ptb_next_retry_ts:
+            return
+
+        if self._ptb_task and not self._ptb_task.done():
+            return
+
+        end_time_snapshot = float(self.state.end_time or 0.0)
+        self._ptb_next_retry_ts = now + 5.0
+        self._ptb_task = asyncio.create_task(
+            self._resolve_official_anchor_once(slug, end_time_snapshot)
+        )
+
+    async def _resolve_official_anchor_once(self, slug: str, end_time_snapshot: float):
+        price = await self._fetch_official_market_anchor(slug, end_time_snapshot)
+        if price and price > 0 and slug == (self.state.slug or ""):
+            prev = self.state.btc_market_anchor_price
+            self.state.btc_market_anchor_price = price
+            self.state.btc_market_anchor_source = "official_ptb"
+            if prev > 0 and abs(prev - price) > 0.01:
+                logger.info(
+                    f"BTC market anchor overridden by official PTB: ${prev:,.2f} -> ${price:,.2f} "
+                    f"(market {slug})"
+                )
+            else:
+                logger.info(
+                    f"BTC market anchor set from official PTB: ${price:,.2f} (market {slug})"
+                )
     
     async def connect(self):
         """Connect to BTC price stream. Always on."""
@@ -979,9 +1087,12 @@ class ChainlinkPriceClient:
             # Capture fixed anchor once per market (settlement anchor).
             if self.state.slug and self.state.btc_market_anchor_price <= 0:
                 self.state.btc_market_anchor_price = price
+                self.state.btc_market_anchor_source = "feed_tick"
                 logger.info(
                     f"BTC market anchor set: ${price:,.2f} (market {self.state.slug})"
                 )
+
+            self._maybe_schedule_official_anchor_fetch()
             
             # === CALIBRATION LOG: every tick within [-15s..+5s] of any boundary ===
             price_window = self._get_window(price_ts)
@@ -1043,6 +1154,14 @@ class ChainlinkPriceClient:
             # Always buffer the latest price for next boundary crossing
             self._last_price_before_boundary = price
             self._last_price_ts = price_ts
+
+            # Keep a short history for web dashboard visibility.
+            self.state.btc_anchor_history.append({
+                "ts": int(now),
+                "btc_price": float(self.state.btc_current_price or 0.0),
+                "anchor_price": float(self.state.btc_anchor_price or 0.0),
+                "market_anchor_price": float(self.state.btc_market_anchor_price or 0.0),
+            })
             
         except (json.JSONDecodeError, ValueError, KeyError, TypeError):
             pass
@@ -1062,6 +1181,16 @@ class ChainlinkPriceClient:
     async def disconnect(self):
         """Gracefully close BTC price WebSocket connection."""
         self.running = False
+
+        if self._ptb_task and not self._ptb_task.done():
+            self._ptb_task.cancel()
+            try:
+                await self._ptb_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._ptb_task = None
         
         if self._ping_task and not self._ping_task.done():
             self._ping_task.cancel()
@@ -1713,18 +1842,40 @@ class Dashboard:
 
     def _get_recent_btc_buffer(self, periods: int = 5) -> Optional[Dict[str, float]]:
         """Average absolute BTC move over the last N completed windows (live rolling)."""
+        # Newest -> oldest weights for the last 5 windows.
+        recency_weights = [1.2, 1.0, 1.0, 0.8, 0.8]
+
+        def _weighted_stats(rows_newest_first: List[Dict[str, Any]]) -> Dict[str, float]:
+            count = len(rows_newest_first)
+            if count <= 0:
+                return {"periods": 0.0, "avg_abs_pct": 0.0, "avg_abs_usd": 0.0}
+
+            # For fewer than 5 rows, keep the newest-biased prefix.
+            weights = recency_weights[:count]
+            weight_sum = sum(weights)
+            if weight_sum <= 0:
+                weights = [1.0] * count
+                weight_sum = float(count)
+
+            weighted_abs_pct = 0.0
+            weighted_abs_usd = 0.0
+            for row, w in zip(rows_newest_first, weights):
+                weighted_abs_pct += abs(float(row.get("abs_pct", 0.0))) * w
+                weighted_abs_usd += abs(float(row.get("abs_usd", 0.0))) * w
+
+            return {
+                "periods": float(count),
+                "avg_abs_pct": weighted_abs_pct / weight_sum,
+                "avg_abs_usd": weighted_abs_usd / weight_sum,
+            }
+
         live_rows = list(self.state.btc_window_moves)[-periods:]
         if live_rows:
             # Periodically refresh the display of latest windows (every 20 calls)
             if int(time.time()) % 20 < 1:
                 self._display_latest_5_windows()
-            abs_pct_moves = [float(r.get("abs_pct", 0.0)) for r in live_rows]
-            abs_usd_moves = [float(r.get("abs_usd", 0.0)) for r in live_rows]
-            return {
-                "periods": float(len(live_rows)),
-                "avg_abs_pct": sum(abs_pct_moves) / len(abs_pct_moves),
-                "avg_abs_usd": sum(abs_usd_moves) / len(abs_usd_moves),
-            }
+            # live_rows is oldest->newest; reverse so weights apply newest first.
+            return _weighted_stats(list(reversed(live_rows)))
 
         if not self._signals_csv_path.exists():
             return None
@@ -1753,19 +1904,17 @@ class Dashboard:
             if not recent_rows:
                 return None
 
-            abs_pct_moves: List[float] = []
-            abs_usd_moves: List[float] = []
+            normalized_rows: List[Dict[str, float]] = []
             for row in recent_rows:
                 opening_price = float(row["opening_price"])
                 btc_price = float(row["btc_price"])
-                abs_pct_moves.append(abs(float(row["btc_delta_pct"])))
-                abs_usd_moves.append(abs(btc_price - opening_price))
+                normalized_rows.append({
+                    "abs_pct": abs(float(row["btc_delta_pct"])),
+                    "abs_usd": abs(btc_price - opening_price),
+                })
 
-            return {
-                "periods": float(len(recent_rows)),
-                "avg_abs_pct": sum(abs_pct_moves) / len(abs_pct_moves),
-                "avg_abs_usd": sum(abs_usd_moves) / len(abs_usd_moves),
-            }
+            # recent_rows is already newest->oldest.
+            return _weighted_stats(normalized_rows)
         except Exception:
             return None
 
@@ -1786,9 +1935,10 @@ class Dashboard:
 
         candidates: List[Dict[str, float]] = []
         for mode_cfg, mode_name in [
-            (modes.mode_60s, "mode_60s"),
             (modes.mode_40s, "mode_40s"),
+            (modes.mode_30s, "mode_30s"),
             (modes.mode_20s, "mode_20s"),
+            (modes.mode_60s, "mode_60s"),
         ]:
             window_sec = float(max(0, mode_cfg.time_left_sec))
             if time_left <= window_sec and mode_cfg.enabled:
@@ -1800,7 +1950,7 @@ class Dashboard:
                         "buffer_avg_multiplier": float(mode_cfg.buffer_avg_multiplier),
                         "min_price": float(mode_cfg.min_price),
                         "max_price": float(mode_cfg.max_price),
-                        "name": mode_name,
+                        "name": f"mode_{int(window_sec)}s",
                     }
                 )
 
@@ -2528,6 +2678,9 @@ class Dashboard:
         btc_block: dict = {
             "btc_current_price": s.btc_current_price,
             "btc_anchor_price": s.btc_anchor_price,
+            "btc_market_anchor_price": s.btc_market_anchor_price,
+            "btc_market_anchor_source": s.btc_market_anchor_source,
+            "btc_anchor_history": [],
             "btc_connected": s.btc_connected,
             "fresh_sec": btc_age,
             "deviation_line": "",
@@ -2552,6 +2705,15 @@ class Dashboard:
                 "abs_pct": round(float(r.get("abs_pct", 0.0)), 4),
             }
             for r in recent_windows
+        ]
+        btc_block["btc_anchor_history"] = [
+            {
+                "ts": int(r.get("ts", 0)),
+                "btc_price": round(float(r.get("btc_price", 0.0)), 2),
+                "anchor_price": round(float(r.get("anchor_price", 0.0)), 2),
+                "market_anchor_price": round(float(r.get("market_anchor_price", 0.0)), 2),
+            }
+            for r in list(self.state.btc_anchor_history)
         ]
 
         st = self.stats
@@ -2963,8 +3125,10 @@ class LiveTradingBot:
         self.state.connected = False
         # Reset fixed settlement anchor for the new market.
         self.state.btc_market_anchor_price = 0.0
+        self.state.btc_market_anchor_source = "none"
         if self.state.btc_current_price > 0:
             self.state.btc_market_anchor_price = self.state.btc_current_price
+            self.state.btc_market_anchor_source = "fallback_tick"
         
         # Log token assignments for debugging
         logger.info(f"Market tokens assigned:")
