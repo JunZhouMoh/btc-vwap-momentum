@@ -155,9 +155,17 @@ _HTML = """<!DOCTYPE html>
           var b = d.btc || {};
           var btcEl = document.getElementById("btc");
           if (b.btc_connected && b.btc_current_price > 0) {
+            var sourceMap = {
+              "official_ptb": "official PTB",
+              "fallback_tick": "fallback tick",
+              "feed_tick": "feed tick",
+              "none": "pending"
+            };
+            var marketAnchorSource = sourceMap[b.btc_market_anchor_source] || (b.btc_market_anchor_source || "pending");
             var btcBits = [
               "$" + esc(numFmt(b.btc_current_price, 2)),
               "Anchor $" + (b.btc_anchor_price > 0 ? esc(numFmt(b.btc_anchor_price, 2)) : "\u2014"),
+              "Market Anchor $" + (b.btc_market_anchor_price > 0 ? esc(numFmt(b.btc_market_anchor_price, 2)) : "\u2014") + " (" + esc(marketAnchorSource) + ")",
               esc(b.deviation_line || ""),
             ];
             if (b.buffer_avg_abs_usd != null || b.buffer_avg_abs_pct != null) {
@@ -171,6 +179,18 @@ _HTML = """<!DOCTYPE html>
                 var w = b.buffer_windows[wi];
                 var wt = w.window_ts ? new Date(w.window_ts * 1000).toISOString().substr(11, 8) : "?";
                 btcBits.push(esc(wt) + " $" + esc(numFmt(w.abs_usd, 2)) + " (" + esc(numFmt(w.abs_pct, 4)) + "%)");
+              }
+            }
+            if (b.btc_anchor_history && b.btc_anchor_history.length) {
+              btcBits.push("\u2014 recent BTC / anchor \u2014");
+              for (var hi = b.btc_anchor_history.length - 1; hi >= 0; hi--) {
+                var h = b.btc_anchor_history[hi];
+                var ht = h.ts ? new Date(h.ts * 1000).toISOString().substr(11, 8) : "?";
+                btcBits.push(
+                  esc(ht) +
+                  " BTC $" + esc(numFmt(h.btc_price, 2)) +
+                  " | A $" + esc(numFmt(h.anchor_price, 2))
+                );
               }
             }
             btcBits.push(
