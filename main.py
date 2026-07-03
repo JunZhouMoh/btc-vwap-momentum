@@ -1155,13 +1155,18 @@ class ChainlinkPriceClient:
             self._last_price_before_boundary = price
             self._last_price_ts = price_ts
 
-            # Keep a short history for web dashboard visibility.
-            self.state.btc_anchor_history.append({
+            # Keep a short history for web dashboard visibility (one row per window).
+            history_row = {
                 "ts": int(now),
+                "window_ts": int(price_window),
                 "btc_price": float(self.state.btc_current_price or 0.0),
                 "anchor_price": float(self.state.btc_anchor_price or 0.0),
                 "market_anchor_price": float(self.state.btc_market_anchor_price or 0.0),
-            })
+            }
+            if self.state.btc_anchor_history and int(self.state.btc_anchor_history[-1].get("window_ts", -1)) == int(price_window):
+                self.state.btc_anchor_history[-1] = history_row
+            else:
+                self.state.btc_anchor_history.append(history_row)
             
         except (json.JSONDecodeError, ValueError, KeyError, TypeError):
             pass
@@ -1934,12 +1939,10 @@ class Dashboard:
             return None
 
         candidates: List[Dict[str, float]] = []
-        for mode_cfg, mode_name in [
-            (modes.mode_40s, "mode_40s"),
-            (modes.mode_30s, "mode_30s"),
-            (modes.mode_20s, "mode_20s"),
-            (modes.mode_60s, "mode_60s"),
-        ]:
+        for mode_name in ["mode_60s", "mode_40s", "mode_30s", "mode_20s"]:
+            mode_cfg = getattr(modes, mode_name, None)
+            if mode_cfg is None:
+                continue
             window_sec = float(max(0, mode_cfg.time_left_sec))
             if time_left <= window_sec and mode_cfg.enabled:
                 candidates.append(
@@ -2709,6 +2712,7 @@ class Dashboard:
         btc_block["btc_anchor_history"] = [
             {
                 "ts": int(r.get("ts", 0)),
+                "window_ts": int(r.get("window_ts", 0)),
                 "btc_price": round(float(r.get("btc_price", 0.0)), 2),
                 "anchor_price": round(float(r.get("anchor_price", 0.0)), 2),
                 "market_anchor_price": round(float(r.get("market_anchor_price", 0.0)), 2),
