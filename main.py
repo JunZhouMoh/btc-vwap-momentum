@@ -2815,6 +2815,74 @@ class LiveTradingBot:
         self.tasks = []
         self._sim_history: Optional[SimulationHistoryLogger] = None
         self._web_snapshot_holder: Optional[WebSnapshotHolder] = None
+        self._config_lock = threading.Lock()
+
+    def _web_get_late_modes(self) -> Dict[str, Any]:
+        with self._config_lock:
+            modes = getattr(self.config.strategy, "late_entry_modes", None)
+            if not modes:
+                return {"enabled": False, "total_max_trades": 0, "modes": []}
+
+            out_modes = []
+            for key in ["mode_60s", "mode_40s", "mode_30s", "mode_20s"]:
+                m = getattr(modes, key, None)
+                if not m:
+                    continue
+                out_modes.append({
+                    "key": key,
+                    "enabled": bool(getattr(m, "enabled", False)),
+                    "time_left_sec": int(getattr(m, "time_left_sec", 0)),
+                    "min_contracts": int(getattr(m, "min_contracts", 1)),
+                    "max_trades": int(getattr(m, "max_trades", 1)),
+                    "buffer_avg_multiplier": float(getattr(m, "buffer_avg_multiplier", 1.0)),
+                    "min_buffer_threshold_usd": float(getattr(m, "min_buffer_threshold_usd", self.config.buffer)),
+                    "min_price": float(getattr(m, "min_price", 0.0)),
+                    "max_price": float(getattr(m, "max_price", 1.0)),
+                })
+
+            return {
+                "enabled": bool(getattr(modes, "enabled", False)),
+                "total_max_trades": int(getattr(modes, "total_max_trades", 1)),
+                "modes": out_modes,
+            }
+
+    def _web_update_late_modes(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return self._web_get_late_modes()
+
+        with self._config_lock:
+            modes = getattr(self.config.strategy, "late_entry_modes", None)
+            if not modes:
+                return {"enabled": False, "total_max_trades": 0, "modes": []}
+
+            modes.enabled = bool(payload.get("enabled", modes.enabled))
+            try:
+                modes.total_max_trades = max(1, int(payload.get("total_max_trades", modes.total_max_trades)))
+            except (TypeError, ValueError):
+                pass
+
+            incoming = payload.get("modes", [])
+            if isinstance(incoming, list):
+                for row in incoming:
+                    if not isinstance(row, dict):
+                        continue
+                    key = str(row.get("key", "")).strip()
+                    mode_cfg = getattr(modes, key, None)
+                    if not mode_cfg:
+                        continue
+                    try:
+                        mode_cfg.enabled = bool(row.get("enabled", mode_cfg.enabled))
+                        mode_cfg.time_left_sec = max(0, int(row.get("time_left_sec", mode_cfg.time_left_sec)))
+                        mode_cfg.min_contracts = max(1, int(row.get("min_contracts", mode_cfg.min_contracts)))
+                        mode_cfg.max_trades = max(1, int(row.get("max_trades", mode_cfg.max_trades)))
+                        mode_cfg.buffer_avg_multiplier = max(0.0, float(row.get("buffer_avg_multiplier", mode_cfg.buffer_avg_multiplier)))
+                        mode_cfg.min_buffer_threshold_usd = max(0.0, float(row.get("min_buffer_threshold_usd", getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer))))
+                        mode_cfg.min_price = float(row.get("min_price", mode_cfg.min_price))
+                        mode_cfg.max_price = float(row.get("max_price", mode_cfg.max_price))
+                    except (TypeError, ValueError):
+                        continue
+
+        return self._web_get_late_modes()
     
     async def initialize(self) -> bool:
         # Load config
@@ -3008,7 +3076,13 @@ class LiveTradingBot:
                 wd.host = "0.0.0.0"
 
             self._web_snapshot_holder = WebSnapshotHolder()
-            ok = start_web_dashboard(wd.host, wd.port, self._web_snapshot_holder)
+            ok = start_web_dashboard(
+                wd.host,
+                wd.port,
+                self._web_snapshot_holder,
+                get_late_modes=self._web_get_late_modes,
+                update_late_modes=self._web_update_late_modes,
+            )
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
             railway_public = os.getenv("RAILWAY_PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
             if railway_public:
