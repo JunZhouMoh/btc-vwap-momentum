@@ -53,6 +53,7 @@ class LateEntryModeConfig:
     min_contracts: int = 5
     max_trades: int = 1
     buffer_avg_multiplier: float = 1.0
+    min_buffer_threshold_usd: float = 25.0
     min_price: float = 0.0
     max_price: float = 1.0
 
@@ -62,10 +63,10 @@ class LateEntryModesConfig:
     """Predefined late-entry windows; tightest active window wins."""
     enabled: bool = False
     total_max_trades: int = 3
-    mode_60s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_60s", enabled=True, time_left_sec=60, min_contracts=5, max_trades=1, buffer_avg_multiplier=1.0, min_price=0.8, max_price=0.99))
-    mode_40s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_40s", enabled=True, time_left_sec=40, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_price=0.85, max_price=0.99))
-    mode_30s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_30s", enabled=True, time_left_sec=30, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_price=0.85, max_price=0.99))
-    mode_20s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_20s", enabled=True, time_left_sec=20, min_contracts=12, max_trades=1, buffer_avg_multiplier=0.5, min_price=0.9, max_price=0.99))
+    mode_60s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_60s", enabled=True, time_left_sec=60, min_contracts=5, max_trades=1, buffer_avg_multiplier=1.0, min_buffer_threshold_usd=25.0, min_price=0.8, max_price=0.99))
+    mode_40s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_40s", enabled=True, time_left_sec=40, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
+    mode_30s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_30s", enabled=True, time_left_sec=30, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
+    mode_20s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_20s", enabled=True, time_left_sec=20, min_contracts=12, max_trades=1, buffer_avg_multiplier=0.5, min_buffer_threshold_usd=20.0, min_price=0.9, max_price=0.99))
 
 
 @dataclass
@@ -246,7 +247,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         except (TypeError, ValueError):
             return float(default)
 
-    def _load_late_mode(raw: Dict[str, Any], default_time_left: int, default_contracts: int, default_max_trades: int, default_multiplier: float, default_min_price: float = 0.0, default_max_price: float = 1.0) -> LateEntryModeConfig:
+    def _load_late_mode(raw: Dict[str, Any], default_time_left: int, default_contracts: int, default_max_trades: int, default_multiplier: float, default_min_buffer_threshold_usd: float, default_min_price: float = 0.0, default_max_price: float = 1.0) -> LateEntryModeConfig:
         return LateEntryModeConfig(
             name=str(raw.get("name", "") or "").strip(),
             enabled=bool(raw.get("enabled", True)),
@@ -254,6 +255,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             min_contracts=_to_int(raw.get("min_contracts", default_contracts), default_contracts),
             max_trades=_to_int(raw.get("max_trades", default_max_trades), default_max_trades),
             buffer_avg_multiplier=_to_float(raw.get("buffer_avg_multiplier", default_multiplier), default_multiplier),
+            min_buffer_threshold_usd=_to_float(raw.get("min_buffer_threshold_usd", default_min_buffer_threshold_usd), default_min_buffer_threshold_usd),
             min_price=_to_float(raw.get("min_price", default_min_price), default_min_price),
             max_price=_to_float(raw.get("max_price", default_max_price), default_max_price),
         )
@@ -261,10 +263,10 @@ def load_config(config_path: Optional[str] = None) -> Config:
     late_entry_modes = LateEntryModesConfig(
         enabled=bool(late_modes_data.get("enabled", False)),
         total_max_trades=_to_int(late_modes_data.get("total_max_trades", 3), 3),
-        mode_60s=_load_late_mode(late_modes_data.get("mode_60s", {}), 60, 5, 1, 1.0, 0.8, 0.99),
-        mode_40s=_load_late_mode(late_modes_data.get("mode_40s", {}), 40, 8, 1, 0.8, 0.85, 0.99),
-        mode_30s=_load_late_mode(late_modes_data.get("mode_30s", {}), 30, 8, 1, 0.8, 0.85, 0.99),
-        mode_20s=_load_late_mode(late_modes_data.get("mode_20s", {}), 20, 12, 1, 0.5, 0.9, 0.99),
+        mode_60s=_load_late_mode(late_modes_data.get("mode_60s", {}), 60, 5, 1, 1.0, 25.0, 0.8, 0.99),
+        mode_40s=_load_late_mode(late_modes_data.get("mode_40s", {}), 40, 8, 1, 0.8, 25.0, 0.85, 0.99),
+        mode_30s=_load_late_mode(late_modes_data.get("mode_30s", {}), 30, 8, 1, 0.8, 25.0, 0.85, 0.99),
+        mode_20s=_load_late_mode(late_modes_data.get("mode_20s", {}), 20, 12, 1, 0.5, 20.0, 0.9, 0.99),
     )
 
     for fallback_name, mode_cfg in [
@@ -447,6 +449,8 @@ def validate_config(config: Config) -> list:
             errors.append(f"strategy.late_entry_modes.{mode_name}.max_trades must be > 0")
         if mode_cfg.buffer_avg_multiplier <= 0:
             errors.append(f"strategy.late_entry_modes.{mode_name}.buffer_avg_multiplier must be > 0")
+        if mode_cfg.min_buffer_threshold_usd < 0:
+            errors.append(f"strategy.late_entry_modes.{mode_name}.min_buffer_threshold_usd must be >= 0")
 
     if config.buffer < 0:
         errors.append("buffer must be >= 0")
