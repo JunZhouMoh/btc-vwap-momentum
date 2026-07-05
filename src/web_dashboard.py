@@ -10,9 +10,9 @@ import math
 import socket
 import threading
 import time
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 import uvicorn
 
@@ -39,6 +39,16 @@ _HTML = """<!DOCTYPE html>
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.85rem; }
     .card h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
       margin: 0 0 0.5rem; }
+    .controls .row { margin-bottom: 0.35rem; align-items: center; }
+    .controls label { min-width: 105px; color: var(--muted); font-size: 0.8rem; }
+    .controls input[type="number"] { width: 86px; background: #0d1117; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 0.25rem 0.35rem; }
+    .controls input[type="checkbox"] { transform: scale(1.05); }
+    .mode-grid { display: grid; gap: 0.55rem; }
+    .mode-box { border: 1px solid var(--border); border-radius: 8px; padding: 0.55rem; }
+    .mode-title { color: var(--blue); font-size: 0.8rem; margin-bottom: 0.35rem; }
+    .btn { background: #1f6feb; color: #fff; border: 0; border-radius: 7px; padding: 0.35rem 0.6rem; cursor: pointer; font-size: 0.8rem; }
+    .btn.secondary { background: #30363d; }
+    .status { color: var(--muted); font-size: 0.78rem; }
     .row { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.9rem; }
     .sig { font-size: 1rem; font-weight: 600; }
     .sig.wait { color: var(--yellow); }
@@ -58,6 +68,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
     <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
+    <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
@@ -80,6 +91,121 @@ _HTML = """<!DOCTYPE html>
       if (n === null || n === undefined || typeof n !== "number" || isNaN(n)) return "\u2014";
       return n.toFixed(dec);
     }
+    function readNum(id, fallback) {
+      var el = document.getElementById(id);
+      if (!el) return fallback;
+      var v = parseFloat(el.value);
+      return isNaN(v) ? fallback : v;
+    }
+    function readInt(id, fallback) {
+      var el = document.getElementById(id);
+      if (!el) return fallback;
+      var v = parseInt(el.value, 10);
+      return isNaN(v) ? fallback : v;
+    }
+
+    function buildModeEditor(mode) {
+      var k = mode.key;
+      var h = [];
+      h.push('<div class="mode-box">');
+      h.push('<div class="mode-title">' + esc(k) + '</div>');
+      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="' + esc(k) + '_enabled" ' + (mode.enabled ? 'checked' : '') + '/></div>');
+      h.push('<div class="row"><label>Time Left</label><input type="number" id="' + esc(k) + '_time_left_sec" step="1" value="' + esc(mode.time_left_sec) + '"/></div>');
+      h.push('<div class="row"><label>Min Contracts</label><input type="number" id="' + esc(k) + '_min_contracts" step="1" value="' + esc(mode.min_contracts) + '"/></div>');
+      h.push('<div class="row"><label>Max Trades</label><input type="number" id="' + esc(k) + '_max_trades" step="1" value="' + esc(mode.max_trades) + '"/></div>');
+      h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="' + esc(k) + '_buffer_avg_multiplier" step="0.01" value="' + esc(mode.buffer_avg_multiplier) + '"/></div>');
+      h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="' + esc(k) + '_min_buffer_threshold_usd" step="0.1" value="' + esc(mode.min_buffer_threshold_usd) + '"/></div>');
+      h.push('<div class="row"><label>Min Price</label><input type="number" id="' + esc(k) + '_min_price" step="0.001" value="' + esc(mode.min_price) + '"/></div>');
+      h.push('<div class="row"><label>Max Price</label><input type="number" id="' + esc(k) + '_max_price" step="0.001" value="' + esc(mode.max_price) + '"/></div>');
+      h.push('</div>');
+      return h.join('');
+    }
+
+    function renderLateModes(cfg) {
+      var box = document.getElementById('lateModes');
+      if (!box) return;
+      if (!cfg || !cfg.modes) {
+        box.textContent = 'Late mode config unavailable';
+        return;
+      }
+
+      var html = [];
+      html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="late_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
+      html.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="' + esc(cfg.total_max_trades) + '"/></div>');
+      html.push('<div class="mode-grid">');
+      for (var i = 0; i < cfg.modes.length; i++) {
+        html.push(buildModeEditor(cfg.modes[i]));
+      }
+      html.push('</div>');
+      html.push('<div style="margin-top:0.5rem" class="row">');
+      html.push('<button class="btn" onclick="saveLateModes()">Apply</button>');
+      html.push('<button class="btn secondary" onclick="loadLateModes()">Reload</button>');
+      html.push('</div>');
+      html.push('<div id="lateStatus" class="status"></div>');
+      box.innerHTML = html.join('');
+    }
+
+    function loadLateModes() {
+      var r = new XMLHttpRequest();
+      r.open('GET', '/api/late-modes', true);
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status !== 200) {
+          var box = document.getElementById('lateModes');
+          if (box) box.textContent = 'Could not load late mode config (HTTP ' + r.status + ')';
+          return;
+        }
+        try {
+          var cfg = JSON.parse(r.responseText);
+          renderLateModes(cfg);
+        } catch (e) {
+          var box2 = document.getElementById('lateModes');
+          if (box2) box2.textContent = 'Late mode parse error';
+        }
+      };
+      r.send();
+    }
+
+    function saveLateModes() {
+      var status = document.getElementById('lateStatus');
+      var keys = ['mode_60s', 'mode_40s', 'mode_30s', 'mode_20s'];
+      var modes = [];
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        modes.push({
+          key: k,
+          enabled: !!(document.getElementById(k + '_enabled') && document.getElementById(k + '_enabled').checked),
+          time_left_sec: readInt(k + '_time_left_sec', 0),
+          min_contracts: readInt(k + '_min_contracts', 1),
+          max_trades: readInt(k + '_max_trades', 1),
+          buffer_avg_multiplier: readNum(k + '_buffer_avg_multiplier', 1.0),
+          min_buffer_threshold_usd: readNum(k + '_min_buffer_threshold_usd', 0.0),
+          min_price: readNum(k + '_min_price', 0.0),
+          max_price: readNum(k + '_max_price', 1.0)
+        });
+      }
+
+      var payload = {
+        enabled: !!(document.getElementById('late_enabled') && document.getElementById('late_enabled').checked),
+        total_max_trades: readInt('late_total_max_trades', 1),
+        modes: modes
+      };
+
+      var r = new XMLHttpRequest();
+      r.open('POST', '/api/late-modes', true);
+      r.setRequestHeader('Content-Type', 'application/json');
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status === 200) {
+          if (status) status.textContent = 'Applied';
+          loadLateModes();
+        } else {
+          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
+        }
+      };
+      r.send(JSON.stringify(payload));
+    }
+
     function tick() {
       var errEl = document.getElementById("err");
       var r = new XMLHttpRequest();
@@ -233,6 +359,7 @@ _HTML = """<!DOCTYPE html>
       };
       r.send();
     }
+    loadLateModes();
     tick();
     setInterval(tick, 1000);
   </script>
@@ -280,7 +407,11 @@ class WebSnapshotHolder:
             return dict(self._data)
 
 
-def build_app(holder: WebSnapshotHolder) -> FastAPI:
+def build_app(
+  holder: WebSnapshotHolder,
+  get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+) -> FastAPI:
     app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
 
     @app.get("/", response_class=HTMLResponse)
@@ -295,6 +426,20 @@ def build_app(holder: WebSnapshotHolder) -> FastAPI:
     async def api_state():
         return JSONResponse(_sanitize_for_json(holder.get()))
 
+    @app.get("/api/late-modes")
+    async def api_late_modes_get():
+      if not get_late_modes:
+        return JSONResponse({"error": "Late mode controls unavailable"}, status_code=501)
+      return JSONResponse(_sanitize_for_json(get_late_modes()))
+
+    @app.post("/api/late-modes")
+    async def api_late_modes_post(req: Request):
+      if not update_late_modes:
+        return JSONResponse({"error": "Late mode controls unavailable"}, status_code=501)
+      payload = await req.json()
+      updated = update_late_modes(payload if isinstance(payload, dict) else {})
+      return JSONResponse(_sanitize_for_json(updated))
+
     return app
 
 
@@ -307,12 +452,18 @@ def _client_probe_address(bind_host: str) -> str:
     return bind_host
 
 
-def start_web_dashboard(host: str, port: int, holder: WebSnapshotHolder) -> bool:
+def start_web_dashboard(
+  host: str,
+  port: int,
+  holder: WebSnapshotHolder,
+  get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+) -> bool:
     """
     Start uvicorn in a daemon thread. Returns True if the port accepts connections
     shortly after start (False if bind failed or port is in use).
     """
-    app = build_app(holder)
+    app = build_app(holder, get_late_modes=get_late_modes, update_late_modes=update_late_modes)
 
     def run() -> None:
         try:
