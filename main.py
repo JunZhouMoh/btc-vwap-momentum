@@ -3505,11 +3505,8 @@ class LiveTradingBot:
         
         # Snapshot BTC prices at the moment of order submission
         btc_price_at_entry = self.state.btc_current_price
-        btc_anchor_at_entry = (
-            self.state.btc_market_anchor_price
-            if self.state.btc_market_anchor_price > 0
-            else self.state.btc_anchor_price
-        )
+        # Use rolling window anchor for all trading logic.
+        btc_anchor_at_entry = self.state.btc_anchor_price
         
         result = await self.executor.execute_entry(
             token_id=token.token_id,
@@ -3798,15 +3795,11 @@ class LiveTradingBot:
         time_left = self.state.end_time - time.time()
         if time_left <= 0:  # Close only at/after market expiry for clearer outcome
             hedged_was = pos.hedged
-            # Prefer oracle direction at expiry: this aligns with binary market outcome
+            # Use rolling window anchor for settlement decision in bot logic
             # (UP wins if current BTC > anchor BTC, else DOWN). Fallback to token price
             # only when BTC feed is unavailable.
             s = self.state
-            settlement_anchor = (
-                s.btc_market_anchor_price
-                if s.btc_market_anchor_price > 0
-                else s.btc_anchor_price
-            )
+            settlement_anchor = s.btc_anchor_price
             if settlement_anchor > 0 and s.btc_current_price > 0:
                 if s.btc_current_price > settlement_anchor:
                     winner = "UP"
