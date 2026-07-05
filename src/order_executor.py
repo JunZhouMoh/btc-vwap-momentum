@@ -81,6 +81,42 @@ def _is_auth_error(message: str) -> bool:
     )
 
 
+def _to_float_or_none(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_fill_price(response: Dict[str, Any], fallback_price: float) -> float:
+    """Best-effort extraction of actual fill price from API response."""
+    if not isinstance(response, dict):
+        return float(fallback_price)
+
+    for key in ("avgPrice", "averagePrice", "fillPrice", "price"):
+        v = _to_float_or_none(response.get(key))
+        if v is not None and v > 0:
+            return float(v)
+
+    taking = _to_float_or_none(response.get("takingAmount"))
+    making = _to_float_or_none(response.get("makingAmount"))
+    if taking and making and taking > 0 and making > 0:
+        # Try both orientations and pick a plausible binary price close to limit.
+        candidates = []
+        c1 = making / taking
+        c2 = taking / making
+        if 0 < c1 <= 1.5:
+            candidates.append(c1)
+        if 0 < c2 <= 1.5:
+            candidates.append(c2)
+        if candidates:
+            return min(candidates, key=lambda x: abs(x - fallback_price))
+
+    return float(fallback_price)
+
+
 @dataclass
 class OrderResult:
     """Result of an order execution attempt."""
@@ -490,7 +526,19 @@ class OrderExecutor:
             
             logger.info(f"Order placed: {success}, ID: {order_id[:20] if order_id else 'N/A'}...")
             
-            return success, order_id, response if isinstance(response, dict) else {"success": success, "orderID": order_id, "status": status}
+            if isinstance(response, dict):
+                normalized_response = dict(response)
+            else:
+                normalized_response = {
+                    "success": success,
+                    "orderID": order_id,
+                    "status": status,
+                    "errorMsg": error_msg,
+                    "takingAmount": taking_amount,
+                    "makingAmount": making_amount,
+                }
+
+            return success, order_id, normalized_response
             
         except Exception as e:
             elapsed = (time.time() - start_time) * 1000
@@ -831,7 +879,7 @@ class OrderExecutor:
                     order_logger.warning(f"  ⚠️ OVERFILL: got {filled}, ordered {order_size}")
                     logger.warning(f"Entry overfill: {filled} > {order_size}")
                 
-                fill_price = order_price
+                fill_price = _extract_fill_price(response, order_price)
                 
                 contracts_bought += filled
                 total_cost += filled * fill_price
@@ -848,7 +896,10 @@ class OrderExecutor:
                     "timestamp": datetime.now().isoformat()
                 })
                 
-                order_logger.info(f"  ✅ FILLED: {filled} contracts @ {fill_price:.4f}")
+                order_logger.info(
+                    f"  ✅ FILLED: {filled} contracts @ {fill_price:.4f} "
+                    f"(limit was {order_price:.4f})"
+                )
                 order_logger.info(f"  Progress: {contracts_bought}/{contracts_needed} ({contracts_bought/contracts_needed*100:.1f}%)")
                 
                 logger.info(f"Filled: {filled} @ {fill_price:.2f} (total: {contracts_bought}/{contracts_needed})")
