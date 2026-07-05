@@ -1951,6 +1951,7 @@ class Dashboard:
                         "min_contracts": float(mode_cfg.min_contracts),
                         "max_trades": float(mode_cfg.max_trades),
                         "buffer_avg_multiplier": float(mode_cfg.buffer_avg_multiplier),
+                        "min_buffer_threshold_usd": float(getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer)),
                         "min_price": float(mode_cfg.min_price),
                         "max_price": float(mode_cfg.max_price),
                         "name": f"mode_{int(window_sec)}s",
@@ -1984,7 +1985,8 @@ class Dashboard:
         time_left = max(0, self.state.end_time - time.time())
         late_mode = self._get_late_entry_mode(time_left)
         if late_mode:
-            buffer_abs_usd = max(self.config.buffer, stats_abs_usd * late_mode["buffer_avg_multiplier"])
+            mode_floor_usd = float(late_mode.get("min_buffer_threshold_usd", self.config.buffer))
+            buffer_abs_usd = max(mode_floor_usd, stats_abs_usd * late_mode["buffer_avg_multiplier"])
         elif self.config.strategy.dangerous and time_left <= 20:
             # Legacy fallback when structured late-entry modes are disabled.
             buffer_abs_usd = max(20.0, stats_abs_usd * 0.5)
@@ -2001,6 +2003,7 @@ class Dashboard:
             "late_mode_window_sec": late_mode["window_sec"] if late_mode else 0.0,
             "late_mode_min_contracts": late_mode["min_contracts"] if late_mode else 0.0,
             "late_mode_buffer_multiplier": late_mode["buffer_avg_multiplier"] if late_mode else 0.0,
+            "late_mode_min_buffer_threshold_usd": late_mode.get("min_buffer_threshold_usd", 0.0) if late_mode else 0.0,
         }
     
     def _fmt_price(self, price: float) -> str:
@@ -3419,6 +3422,12 @@ class LiveTradingBot:
             min_order_usd=self.config.entry.min_order_usd,
             max_entry_price=self.config.entry.max_entry_price
         )
+
+        intended_limit_price = (token.best_ask or 0.0) + float(self.config.entry.price_offset)
+        signal_logger.info(
+            f"  Intended limit price: {intended_limit_price:.4f} "
+            f"(ASK {token.best_ask:.4f} + offset {self.config.entry.price_offset:.4f})"
+        )
         
         # Snapshot BTC prices at the moment of order submission
         btc_price_at_entry = self.state.btc_current_price
@@ -3482,6 +3491,10 @@ class LiveTradingBot:
             signal_logger.info(f"  Token: {token_name}")
             signal_logger.info(f"  Contracts: {result.contracts_filled}")
             signal_logger.info(f"  Avg Price: {result.avg_price:.4f}")
+            signal_logger.info(
+                f"  Slippage vs intended: {result.avg_price - intended_limit_price:+.4f} "
+                f"(actual {result.avg_price:.4f} vs intended {intended_limit_price:.4f})"
+            )
             signal_logger.info(f"  Total Cost: ${result.total_cost:.2f}")
             signal_logger.info(f"  Attempts: {result.attempts}")
             signal_logger.info("-" * 40)
