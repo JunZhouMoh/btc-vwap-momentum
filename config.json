@@ -50,7 +50,7 @@
         "max_price": 0.99
       },
       "mode_60s": {
-        "enabled": false,
+        "enabled": true,
         "time_left_sec": 60,
         "min_contracts": 5,
         "max_trades": 1,
