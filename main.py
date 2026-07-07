@@ -2883,6 +2883,39 @@ class LiveTradingBot:
                         continue
 
         return self._web_get_late_modes()
+
+    def _web_trigger_manual_buy(self) -> Dict[str, Any]:
+        if not self.running:
+            return {"ok": False, "error": "Bot is not running"}
+
+        if not self.dashboard:
+            return {"ok": False, "error": "Dashboard not ready"}
+
+        if self.dashboard.last_signal:
+            return {"ok": False, "error": "A signal is already queued"}
+
+        up = self.state.up_token
+        down = self.state.down_token
+        if not up or not down:
+            return {"ok": False, "error": "Market tokens not ready"}
+
+        time_left_now = max(0.0, self.state.end_time - time.time())
+        late_mode_active = self.dashboard._get_late_entry_mode(time_left_now) is not None
+        if not (self.stats.can_enter() or late_mode_active):
+            return {"ok": False, "error": "Cannot enter right now"}
+
+        up_last = float(up.last_price or 0.0)
+        down_last = float(down.last_price or 0.0)
+        if up_last <= 0.0 and down_last <= 0.0:
+            return {"ok": False, "error": "No live token prices yet"}
+
+        signal = "BUY_UP" if up_last >= down_last else "BUY_DOWN"
+        self.dashboard.last_signal = signal
+        logger.info(
+            f"Manual web buy queued: {signal} "
+            f"(up={up_last:.4f}, down={down_last:.4f}, market={self.state.slug})"
+        )
+        return {"ok": True, "signal": signal, "message": f"Queued {signal}"}
     
     async def initialize(self) -> bool:
         # Load config
@@ -3082,6 +3115,7 @@ class LiveTradingBot:
                 self._web_snapshot_holder,
                 get_late_modes=self._web_get_late_modes,
                 update_late_modes=self._web_update_late_modes,
+                trigger_manual_buy=self._web_trigger_manual_buy,
             )
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
             railway_public = os.getenv("RAILWAY_PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
