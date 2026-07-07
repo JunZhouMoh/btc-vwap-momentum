@@ -1603,6 +1603,7 @@ class Dashboard:
         self.winrate_table = WinRateTable(str(win_rate_path))
         
         self.last_signal = ""
+        self.manual_buy_live_status = "idle"
         self.entry_flash = False
         self.hedge_flash = False
         self.btc_volume_feed: Optional[BTCVolumeFeed] = None
@@ -2774,6 +2775,7 @@ class Dashboard:
             "btc": btc_block,
             "trading": trading,
             "last_signal": self.last_signal,
+            "manual_buy_live_status": self.manual_buy_live_status,
         }
 
 
@@ -2886,27 +2888,32 @@ class LiveTradingBot:
 
     def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.running:
+            self.dashboard.manual_buy_live_status = "blocked: bot not running"
             return {"ok": False, "error": "Bot is not running"}
 
         if not self.dashboard:
             return {"ok": False, "error": "Dashboard not ready"}
 
         if self.dashboard.last_signal:
+            self.dashboard.manual_buy_live_status = "queued: waiting for previous signal"
             return {"ok": False, "error": "A signal is already queued"}
 
         up = self.state.up_token
         down = self.state.down_token
         if not up or not down:
+            self.dashboard.manual_buy_live_status = "blocked: market tokens not ready"
             return {"ok": False, "error": "Market tokens not ready"}
 
         time_left_now = max(0.0, self.state.end_time - time.time())
         late_mode_active = self.dashboard._get_late_entry_mode(time_left_now) is not None
         if not (self.stats.can_enter() or late_mode_active):
+            self.dashboard.manual_buy_live_status = "blocked: entry not allowed now"
             return {"ok": False, "error": "Cannot enter right now"}
 
         up_last = float(up.last_price or 0.0)
         down_last = float(down.last_price or 0.0)
         if up_last <= 0.0 and down_last <= 0.0:
+            self.dashboard.manual_buy_live_status = "blocked: no live prices"
             return {"ok": False, "error": "No live token prices yet"}
 
         amount_usd = self.config.entry.bet_amount_usd
@@ -2914,12 +2921,15 @@ class LiveTradingBot:
             try:
                 amount_usd = float(payload.get("amount_usd"))
             except (TypeError, ValueError):
+                self.dashboard.manual_buy_live_status = "blocked: invalid amount"
                 return {"ok": False, "error": "Invalid amount"}
         if not (amount_usd > 0):
+            self.dashboard.manual_buy_live_status = "blocked: amount must be > 0"
             return {"ok": False, "error": "Amount must be > 0"}
 
         signal = "BUY_UP" if up_last >= down_last else "BUY_DOWN"
         self.dashboard.last_signal = f"{signal}|amount={amount_usd:.8f}"
+        self.dashboard.manual_buy_live_status = f"queued: {signal} ${amount_usd:.2f}"
         logger.info(
             f"Manual web buy queued: {signal} amount=${amount_usd:.2f} "
             f"(up={up_last:.4f}, down={down_last:.4f}, market={self.state.slug})"
@@ -3951,6 +3961,8 @@ class LiveTradingBot:
                     if can_attempt_signal and self.dashboard.last_signal:
                         if order_task is None or order_task.done():
                             signal = self.dashboard.last_signal
+                            if "|amount=" in signal:
+                                self.dashboard.manual_buy_live_status = "running: sending order"
                             self.dashboard.last_signal = ""
                             order_task = asyncio.create_task(self._safe_execute_entry(signal))
                     
@@ -4039,6 +4051,9 @@ class LiveTradingBot:
         try:
             side = signal
             bet_override: Optional[float] = None
+            is_manual = "|amount=" in signal
+            before_trade_count = self.stats.trade_count
+            before_contracts = self.stats.position.contracts if self.stats.position else 0
             if "|amount=" in signal:
                 raw_side, raw_amt = signal.split("|amount=", 1)
                 side = raw_side.strip()
@@ -4050,7 +4065,15 @@ class LiveTradingBot:
                     bet_override = None
 
             await self.execute_entry(side, bet_amount_override_usd=bet_override)
+            if is_manual:
+                after_contracts = self.stats.position.contracts if self.stats.position else 0
+                if after_contracts > before_contracts or self.stats.trade_count > before_trade_count:
+                    self.dashboard.manual_buy_live_status = "sent: executed"
+                else:
+                    self.dashboard.manual_buy_live_status = "processed: no fill"
         except Exception as e:
+            if "|amount=" in signal:
+                self.dashboard.manual_buy_live_status = "error: execution failed"
             logger.error(f"Entry execution error: {e}")
             signal_logger.error(f"ENTRY ERROR: {e}")
     
