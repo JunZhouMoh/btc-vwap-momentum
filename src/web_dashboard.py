@@ -260,6 +260,7 @@ _HTML = """<!DOCTYPE html>
           var buyAmountVal = existingAmountEl ? existingAmountEl.value : "";
           var existingBuyStatusEl = document.getElementById("buyStatus");
           var buyStatusVal = existingBuyStatusEl ? existingBuyStatusEl.textContent : "";
+          var liveStatusVal = d.manual_buy_live_status ? String(d.manual_buy_live_status) : "idle";
           var defaultBuyAmount = (d.trading && typeof d.trading.bet_usd === "number" && !isNaN(d.trading.bet_usd))
             ? d.trading.bet_usd
             : 1;
@@ -269,6 +270,7 @@ _HTML = """<!DOCTYPE html>
             "Timer: " + (hdr.time_left_sec != null ? esc(Math.floor(hdr.time_left_sec) + "s left") : "\u2014"),
             "WS: " + (hdr.ws_connected ? "live" : "disconnected"),
             "Mode: " + (hdr.simulation ? "simulation" : "real"),
+            'Live: ' + esc(liveStatusVal),
             '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="' + esc(buyAmountVal) + '" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn" onclick="manualBuy()">Buy</button> <span id="buyStatus" class="status">' + esc(buyStatusVal) + '</span></span>'
           ].join("<br/>");
           var st = d.strategy || {};
