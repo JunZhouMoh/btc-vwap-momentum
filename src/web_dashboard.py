@@ -208,6 +208,11 @@ _HTML = """<!DOCTYPE html>
 
     function manualBuy() {
       var status = document.getElementById('buyStatus');
+      var amount = readNum('buyAmount', 0);
+      if (!(amount > 0)) {
+        if (status) status.textContent = 'Amount must be > 0';
+        return;
+      }
       if (status) status.textContent = 'Submitting...';
 
       var r = new XMLHttpRequest();
@@ -233,7 +238,7 @@ _HTML = """<!DOCTYPE html>
         }
         if (status) status.textContent = txt;
       };
-      r.send('{}');
+      r.send(JSON.stringify({ amount_usd: amount }));
     }
 
     function tick() {
@@ -251,11 +256,20 @@ _HTML = """<!DOCTYPE html>
           var ts = "";
           if (d.ts) ts = new Date(d.ts * 1000).toISOString();
           document.getElementById("meta").innerHTML = esc(slug) + " \u00b7 " + esc(ts);
+          var existingAmountEl = document.getElementById("buyAmount");
+          var buyAmountVal = existingAmountEl ? existingAmountEl.value : "";
+          var existingBuyStatusEl = document.getElementById("buyStatus");
+          var buyStatusVal = existingBuyStatusEl ? existingBuyStatusEl.textContent : "";
+          var defaultBuyAmount = (d.trading && typeof d.trading.bet_usd === "number" && !isNaN(d.trading.bet_usd))
+            ? d.trading.bet_usd
+            : 1;
+          if (!buyAmountVal) buyAmountVal = String(defaultBuyAmount);
+
           document.getElementById("session").innerHTML = [
             "Timer: " + (hdr.time_left_sec != null ? esc(Math.floor(hdr.time_left_sec) + "s left") : "\u2014"),
             "WS: " + (hdr.ws_connected ? "live" : "disconnected"),
             "Mode: " + (hdr.simulation ? "simulation" : "real"),
-            '<span><button class="btn" onclick="manualBuy()">Buy</button> <span id="buyStatus" class="status"></span></span>'
+            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="' + esc(buyAmountVal) + '" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn" onclick="manualBuy()">Buy</button> <span id="buyStatus" class="status">' + esc(buyStatusVal) + '</span></span>'
           ].join("<br/>");
           var st = d.strategy || {};
           var sig = st.signal_text || "\u2014";
@@ -442,7 +456,7 @@ def build_app(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  trigger_manual_buy: Optional[Callable[[], Dict[str, Any]]] = None,
+  trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> FastAPI:
     app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
 
@@ -473,10 +487,17 @@ def build_app(
       return JSONResponse(_sanitize_for_json(updated))
 
     @app.post("/api/manual-buy")
-    async def api_manual_buy():
+    async def api_manual_buy(req: Request):
       if not trigger_manual_buy:
         return JSONResponse({"error": "Manual buy unavailable"}, status_code=501)
-      result = trigger_manual_buy()
+      payload: Dict[str, Any] = {}
+      try:
+        parsed = await req.json()
+        if isinstance(parsed, dict):
+          payload = parsed
+      except Exception:
+        payload = {}
+      result = trigger_manual_buy(payload)
       if not isinstance(result, dict):
         return JSONResponse({"error": "Manual buy failed"}, status_code=500)
       if result.get("ok"):
@@ -501,7 +522,7 @@ def start_web_dashboard(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  trigger_manual_buy: Optional[Callable[[], Dict[str, Any]]] = None,
+  trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> bool:
     """
     Start uvicorn in a daemon thread. Returns True if the port accepts connections
