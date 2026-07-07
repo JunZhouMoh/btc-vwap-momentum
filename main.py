@@ -2884,7 +2884,7 @@ class LiveTradingBot:
 
         return self._web_get_late_modes()
 
-    def _web_trigger_manual_buy(self) -> Dict[str, Any]:
+    def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.running:
             return {"ok": False, "error": "Bot is not running"}
 
@@ -2909,13 +2909,27 @@ class LiveTradingBot:
         if up_last <= 0.0 and down_last <= 0.0:
             return {"ok": False, "error": "No live token prices yet"}
 
+        amount_usd = self.config.entry.bet_amount_usd
+        if isinstance(payload, dict) and ("amount_usd" in payload):
+            try:
+                amount_usd = float(payload.get("amount_usd"))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "Invalid amount"}
+        if not (amount_usd > 0):
+            return {"ok": False, "error": "Amount must be > 0"}
+
         signal = "BUY_UP" if up_last >= down_last else "BUY_DOWN"
-        self.dashboard.last_signal = signal
+        self.dashboard.last_signal = f"{signal}|amount={amount_usd:.8f}"
         logger.info(
-            f"Manual web buy queued: {signal} "
+            f"Manual web buy queued: {signal} amount=${amount_usd:.2f} "
             f"(up={up_last:.4f}, down={down_last:.4f}, market={self.state.slug})"
         )
-        return {"ok": True, "signal": signal, "message": f"Queued {signal}"}
+        return {
+            "ok": True,
+            "signal": signal,
+            "amount_usd": amount_usd,
+            "message": f"Queued {signal} (${amount_usd:.2f})",
+        }
     
     async def initialize(self) -> bool:
         # Load config
@@ -3308,7 +3322,7 @@ class LiveTradingBot:
             f"cumulative ${s['total_pnl_usd']:+.4f} | WR {s['win_rate_pct']:.2f}% ({n} closed)"
         )
     
-    async def execute_entry(self, side: str):
+    async def execute_entry(self, side: str, bet_amount_override_usd: Optional[float] = None):
         """Execute entry order (live CLOB or simulation)."""
         time_left = max(0, self.state.end_time - time.time())
         late_mode = self.dashboard._get_late_entry_mode(time_left)
@@ -3520,8 +3534,12 @@ class LiveTradingBot:
                 f"buffer_mult={late_mode['buffer_avg_multiplier']:.2f}"
             )
         
+        bet_amount_usd = self.config.entry.bet_amount_usd
+        if bet_amount_override_usd is not None and bet_amount_override_usd > 0:
+            bet_amount_usd = float(bet_amount_override_usd)
+
         exec_config = ExecutionConfig(
-            bet_amount_usd=self.config.entry.bet_amount_usd,
+            bet_amount_usd=bet_amount_usd,
             price_offset=self.config.entry.price_offset,
             max_retries=self.config.entry.max_retries,
             retry_delay_ms=self.config.entry.retry_delay_ms,
@@ -4019,7 +4037,19 @@ class LiveTradingBot:
     async def _safe_execute_entry(self, signal: str):
         """Execute entry in separate task with error handling."""
         try:
-            await self.execute_entry(signal)
+            side = signal
+            bet_override: Optional[float] = None
+            if "|amount=" in signal:
+                raw_side, raw_amt = signal.split("|amount=", 1)
+                side = raw_side.strip()
+                try:
+                    parsed_amt = float(raw_amt.strip())
+                    if parsed_amt > 0:
+                        bet_override = parsed_amt
+                except (TypeError, ValueError):
+                    bet_override = None
+
+            await self.execute_entry(side, bet_amount_override_usd=bet_override)
         except Exception as e:
             logger.error(f"Entry execution error: {e}")
             signal_logger.error(f"ENTRY ERROR: {e}")
