@@ -206,6 +206,36 @@ _HTML = """<!DOCTYPE html>
       r.send(JSON.stringify(payload));
     }
 
+    function manualBuy() {
+      var status = document.getElementById('buyStatus');
+      if (status) status.textContent = 'Submitting...';
+
+      var r = new XMLHttpRequest();
+      r.open('POST', '/api/manual-buy', true);
+      r.setRequestHeader('Content-Type', 'application/json');
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        var txt = '';
+        if (r.status === 200) {
+          try {
+            var out = JSON.parse(r.responseText);
+            txt = out.message || (out.signal ? ('Queued ' + out.signal) : 'Queued');
+          } catch (e) {
+            txt = 'Queued';
+          }
+        } else {
+          try {
+            var err = JSON.parse(r.responseText);
+            txt = (err && err.error) ? err.error : ('Request failed (HTTP ' + r.status + ')');
+          } catch (e2) {
+            txt = 'Request failed (HTTP ' + r.status + ')';
+          }
+        }
+        if (status) status.textContent = txt;
+      };
+      r.send('{}');
+    }
+
     function tick() {
       var errEl = document.getElementById("err");
       var r = new XMLHttpRequest();
@@ -225,6 +255,7 @@ _HTML = """<!DOCTYPE html>
             "Timer: " + (hdr.time_left_sec != null ? esc(Math.floor(hdr.time_left_sec) + "s left") : "\u2014"),
             "WS: " + (hdr.ws_connected ? "live" : "disconnected"),
             "Mode: " + (hdr.simulation ? "simulation" : "real"),
+            '<span><button class="btn" onclick="manualBuy()">Buy</button> <span id="buyStatus" class="status"></span></span>'
           ].join("<br/>");
           var st = d.strategy || {};
           var sig = st.signal_text || "\u2014";
@@ -411,6 +442,7 @@ def build_app(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  trigger_manual_buy: Optional[Callable[[], Dict[str, Any]]] = None,
 ) -> FastAPI:
     app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
 
@@ -440,6 +472,17 @@ def build_app(
       updated = update_late_modes(payload if isinstance(payload, dict) else {})
       return JSONResponse(_sanitize_for_json(updated))
 
+    @app.post("/api/manual-buy")
+    async def api_manual_buy():
+      if not trigger_manual_buy:
+        return JSONResponse({"error": "Manual buy unavailable"}, status_code=501)
+      result = trigger_manual_buy()
+      if not isinstance(result, dict):
+        return JSONResponse({"error": "Manual buy failed"}, status_code=500)
+      if result.get("ok"):
+        return JSONResponse(_sanitize_for_json(result))
+      return JSONResponse(_sanitize_for_json(result), status_code=400)
+
     return app
 
 
@@ -458,12 +501,18 @@ def start_web_dashboard(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  trigger_manual_buy: Optional[Callable[[], Dict[str, Any]]] = None,
 ) -> bool:
     """
     Start uvicorn in a daemon thread. Returns True if the port accepts connections
     shortly after start (False if bind failed or port is in use).
     """
-    app = build_app(holder, get_late_modes=get_late_modes, update_late_modes=update_late_modes)
+    app = build_app(
+        holder,
+        get_late_modes=get_late_modes,
+        update_late_modes=update_late_modes,
+        trigger_manual_buy=trigger_manual_buy,
+    )
 
     def run() -> None:
         try:
