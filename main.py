@@ -3958,9 +3958,12 @@ class LiveTradingBot:
                     time_left_now = max(0.0, self.state.end_time - time.time())
                     late_mode_active = self.dashboard._get_late_entry_mode(time_left_now) is not None
                     can_attempt_signal = self.stats.can_enter() or late_mode_active
-                    if can_attempt_signal and self.dashboard.last_signal:
+                    queued_signal = self.dashboard.last_signal
+                    is_manual_signal = bool(queued_signal and "|amount=" in queued_signal)
+                    should_dispatch = bool(queued_signal) and (can_attempt_signal or is_manual_signal)
+                    if should_dispatch:
                         if order_task is None or order_task.done():
-                            signal = self.dashboard.last_signal
+                            signal = queued_signal
                             if "|amount=" in signal:
                                 self.dashboard.manual_buy_live_status = "running: sending order"
                             self.dashboard.last_signal = ""
