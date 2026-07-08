@@ -67,7 +67,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
     <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
     <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
-    <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
+    <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
     <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
   </div>
@@ -327,7 +327,7 @@ _HTML = """<!DOCTYPE html>
           book(d.down, "down");
           var b = d.btc || {};
           var btcEl = document.getElementById("btc");
-          if (b.btc_connected && b.btc_current_price > 0) {
+          if ((b.btc_connected && b.btc_current_price > 0) || (b.binance_connected && b.binance_current_price > 0)) {
             var sourceMap = {
               "official_ptb": "official PTB",
               "fallback_tick": "fallback tick",
@@ -335,8 +335,20 @@ _HTML = """<!DOCTYPE html>
               "none": "pending"
             };
             var marketAnchorSource = sourceMap[b.btc_market_anchor_source] || (b.btc_market_anchor_source || "pending");
+            var selectedFeed = b.btc_feed_source || "chainlink";
+            var chainlinkLabel = selectedFeed === "chainlink" ? "Selected feed (Polymarket RTDS)" : "Polymarket RTDS";
+            var binanceLabel = selectedFeed === "binance" ? "Selected feed (Binance)" : "Binance";
+            var chainlinkPrice = (b.btc_current_price > 0) ? ("$" + esc(numFmt(b.btc_current_price, 2))) : "\u2014";
+            var binancePrice = (b.binance_current_price > 0) ? ("$" + esc(numFmt(b.binance_current_price, 2))) : "\u2014";
+            var chainlinkFeedLine = chainlinkLabel + ": " + chainlinkPrice +
+              " | " + (b.btc_connected ? "ok" : "off") +
+              (b.fresh_sec != null ? " \u00b7 " + Math.floor(b.fresh_sec) + "s" : "");
+            var binanceFeedLine = binanceLabel + ": " + binancePrice +
+              " | " + (b.binance_connected ? "ok" : "off") +
+              (b.binance_fresh_sec != null ? " \u00b7 " + Math.floor(b.binance_fresh_sec) + "s" : "");
             var btcBits = [
-              "$" + esc(numFmt(b.btc_current_price, 2)),
+              chainlinkFeedLine,
+              binanceFeedLine,
               "Anchor $" + (b.btc_anchor_price > 0 ? esc(numFmt(b.btc_anchor_price, 2)) : "\u2014"),
               "Market Anchor $" + (b.btc_market_anchor_price > 0 ? esc(numFmt(b.btc_market_anchor_price, 2)) : "\u2014") + " (" + esc(marketAnchorSource) + ")",
               esc(b.deviation_line || ""),
@@ -375,7 +387,7 @@ _HTML = """<!DOCTYPE html>
             ];
             btcEl.innerHTML = btcBits.join("<br/>");
           } else {
-            btcEl.textContent = "Waiting for Chainlink\u2026";
+            btcEl.textContent = "Waiting for BTC feeds\u2026";
           }
           
           var tr = d.trading || {};
