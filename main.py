@@ -2926,7 +2926,10 @@ class LiveTradingBot:
             self.dashboard.manual_buy_live_status = "blocked: amount must be > 0"
             return {"ok": False, "error": "Amount must be > 0"}
 
-        signal = "BUY_UP" if up_last >= down_last else "BUY_DOWN"
+        if self.stats.position is not None:
+            signal = "BUY_UP" if self.stats.position.token_name == "UP" else "BUY_DOWN"
+        else:
+            signal = "BUY_UP" if up_last >= down_last else "BUY_DOWN"
         self.dashboard.manual_signal_pending = f"{signal}|amount={amount_usd:.8f}"
         self.dashboard.manual_buy_live_status = f"queued: {signal} ${amount_usd:.2f}"
         logger.info(
