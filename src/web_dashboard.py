@@ -91,6 +91,12 @@ _HTML = """<!DOCTYPE html>
       if (n === null || n === undefined || typeof n !== "number" || isNaN(n)) return "\u2014";
       return n.toFixed(dec);
     }
+    function numFmtSigned(n, dec) {
+      if (n === null || n === undefined || typeof n !== "number" || isNaN(n)) return "\u2014";
+      var fixed = n.toFixed(dec);
+      if (n > 0) return "+" + fixed;
+      return fixed;
+    }
     function readNum(id, fallback) {
       var el = document.getElementById(id);
       if (!el) return fallback;
@@ -206,7 +212,7 @@ _HTML = """<!DOCTYPE html>
       r.send(JSON.stringify(payload));
     }
 
-    function manualBuy() {
+    function manualBuyWithDirection(direction) {
       var status = document.getElementById('buyStatus');
       var amount = readNum('buyAmount', 0);
       if (!(amount > 0)) {
@@ -238,7 +244,15 @@ _HTML = """<!DOCTYPE html>
         }
         if (status) status.textContent = txt;
       };
-      r.send(JSON.stringify({ amount_usd: amount }));
+      r.send(JSON.stringify({ amount_usd: amount, direction: direction }));
+    }
+
+    function manualBuyUp() {
+      manualBuyWithDirection('UP');
+    }
+
+    function manualBuyDown() {
+      manualBuyWithDirection('DOWN');
     }
 
     function tick() {
@@ -271,7 +285,7 @@ _HTML = """<!DOCTYPE html>
             "WS: " + (hdr.ws_connected ? "live" : "disconnected"),
             "Mode: " + (hdr.simulation ? "simulation" : "real"),
             'Live: ' + esc(liveStatusVal),
-            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="' + esc(buyAmountVal) + '" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn" onclick="manualBuy()">Buy</button> <span id="buyStatus" class="status">' + esc(buyStatusVal) + '</span></span>'
+            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="' + esc(buyAmountVal) + '" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn" onclick="manualBuyUp()">Buy UP</button> <button class="btn" onclick="manualBuyDown()">Buy DOWN</button> <span id="buyStatus" class="status">' + esc(buyStatusVal) + '</span></span>'
           ].join("<br/>");
           var st = d.strategy || {};
           var sig = st.signal_text || "\u2014";
@@ -392,12 +406,12 @@ _HTML = """<!DOCTYPE html>
           
           var tr = d.trading || {};
           var tHtml = "Markets " + esc(tr.markets_seen) + " \u00b7 Trades " + esc(tr.trade_count) +
-            " \u00b7 PnL $" + (tr.total_pnl != null ? numFmt(tr.total_pnl, 2) : "\u2014") + "<br/>";
+            " \u00b7 PnL $" + (tr.total_pnl != null ? numFmtSigned(tr.total_pnl, 2) : "\u2014") + "<br/>";
           if (tr.position) {
             var p = tr.position;
             tHtml += "LONG " + esc(p.token_name) + " @ " + esc(p.entry_price) +
               " \u00d7" + esc(p.contracts) + (p.hedged ? " hedged" : "") + "<br/>";
-            tHtml += "Unreal $" + (p.unrealized_pnl != null ? numFmt(p.unrealized_pnl, 2) : "\u2014") + "<br/>";
+            tHtml += "Unreal $" + (p.unrealized_pnl != null ? numFmtSigned(p.unrealized_pnl, 2) : "\u2014") + "<br/>";
           } else {
             tHtml += "No open position<br/>";
           }
