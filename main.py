@@ -1603,6 +1603,7 @@ class Dashboard:
         self.winrate_table = WinRateTable(str(win_rate_path))
         
         self.last_signal = ""
+        self.manual_signal_pending = ""
         self.manual_buy_live_status = "idle"
         self.entry_flash = False
         self.hedge_flash = False
@@ -2898,7 +2899,7 @@ class LiveTradingBot:
         if not self.dashboard:
             return {"ok": False, "error": "Dashboard not ready"}
 
-        if self.dashboard.last_signal:
+        if self.dashboard.last_signal or self.dashboard.manual_signal_pending:
             self.dashboard.manual_buy_live_status = "queued: waiting for previous signal"
             return {"ok": False, "error": "A signal is already queued"}
 
@@ -2932,7 +2933,7 @@ class LiveTradingBot:
             return {"ok": False, "error": "Amount must be > 0"}
 
         signal = "BUY_UP" if up_last >= down_last else "BUY_DOWN"
-        self.dashboard.last_signal = f"{signal}|amount={amount_usd:.8f}"
+        self.dashboard.manual_signal_pending = f"{signal}|amount={amount_usd:.8f}"
         self.dashboard.manual_buy_live_status = f"queued: {signal} ${amount_usd:.2f}"
         logger.info(
             f"Manual web buy queued: {signal} amount=${amount_usd:.2f} "
@@ -3962,15 +3963,19 @@ class LiveTradingBot:
                     time_left_now = max(0.0, self.state.end_time - time.time())
                     late_mode_active = self.dashboard._get_late_entry_mode(time_left_now) is not None
                     can_attempt_signal = self.stats.can_enter() or late_mode_active
-                    queued_signal = self.dashboard.last_signal
-                    is_manual_signal = bool(queued_signal and "|amount=" in queued_signal)
+                    queued_manual_signal = self.dashboard.manual_signal_pending
+                    queued_auto_signal = self.dashboard.last_signal
+                    queued_signal = queued_manual_signal or queued_auto_signal
+                    is_manual_signal = bool(queued_manual_signal)
                     should_dispatch = bool(queued_signal) and (can_attempt_signal or is_manual_signal)
                     if should_dispatch:
                         if order_task is None or order_task.done():
                             signal = queued_signal
-                            if "|amount=" in signal:
+                            if is_manual_signal:
                                 self.dashboard.manual_buy_live_status = "running: sending order"
-                            self.dashboard.last_signal = ""
+                                self.dashboard.manual_signal_pending = ""
+                            else:
+                                self.dashboard.last_signal = ""
                             order_task = asyncio.create_task(self._safe_execute_entry(signal))
                     
                     # Check if order completed
