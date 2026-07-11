@@ -3406,57 +3406,58 @@ class LiveTradingBot:
             min_price = self.config.strategy.min_price
             max_price = self.config.strategy.max_price
         price_ok = min_price <= token.last_price <= max_price
-        
+
         # Check price trend over last 10 seconds (UP should be trending up, DOWN should be trending down)
         token_trend = self.dashboard.calc.calc_price_trend(token.trades, window=10.0) if token and token.trades else None
         trend_ok = token_trend is None or (
             (side == "BUY_UP" and token_trend >= 0) or
             (side == "BUY_DOWN" and token_trend <= 0)
         )
-        
-        # Defensive time cutoff check (race condition guard)
+
+        # Defensive time cutoff / buffer / trend gating applies only to auto entries.
         no_entry_cutoff = self.config.strategy.no_entry_before_end_sec
         last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
         price_only_gate = late_mode is not None or last_20s_price_only
-        if price_only_gate:
-            if not price_ok:
+        btc_buffer = self.dashboard._get_btc_buffer_status()
+        if not manual_override:
+            if price_only_gate:
+                if not price_ok:
+                    signal_logger.info(
+                        f"SIGNAL BLOCKED: {side} - late-window price-only gate failed "
+                        f"({token.last_price:.4f} not in [{min_price}, {max_price}])"
+                    )
+                    return
+                if not trend_ok:
+                    signal_logger.info(
+                        f"SIGNAL BLOCKED: {side} - not trending in desired direction "
+                        f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
+                    )
+                    return
+            elif time_left < no_entry_cutoff:
                 signal_logger.info(
-                    f"SIGNAL BLOCKED: {side} - late-window price-only gate failed "
-                    f"({token.last_price:.4f} not in [{min_price}, {max_price}])"
+                    f"SIGNAL BLOCKED: {side} - too close to market end "
+                    f"({time_left:.0f}s left < {no_entry_cutoff}s cutoff)"
                 )
+                logger.warning(f"Entry blocked: {time_left:.0f}s left < {no_entry_cutoff}s cutoff")
                 return
+
             if not trend_ok:
                 signal_logger.info(
                     f"SIGNAL BLOCKED: {side} - not trending in desired direction "
                     f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
                 )
                 return
-        elif time_left < no_entry_cutoff:
-            signal_logger.info(
-                f"SIGNAL BLOCKED: {side} - too close to market end "
-                f"({time_left:.0f}s left < {no_entry_cutoff}s cutoff)"
-            )
-            logger.warning(f"Entry blocked: {time_left:.0f}s left < {no_entry_cutoff}s cutoff")
-            return
 
-        if not trend_ok:
-            signal_logger.info(
-                f"SIGNAL BLOCKED: {side} - not trending in desired direction "
-                f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
-            )
-            return
-
-        btc_buffer = self.dashboard._get_btc_buffer_status()
-        if btc_buffer and not btc_buffer["ok"]:
-            signal_logger.info(
-                f"SIGNAL BLOCKED: {side} - BTC absolute move ${btc_buffer['current_abs_usd']:,.2f} "
-                f"< buffer ${btc_buffer['buffer_abs_usd']:,.2f}"
-            )
-            logger.warning(
-                f"Entry blocked by BTC buffer: ${btc_buffer['current_abs_usd']:,.2f} "
-                f"< ${btc_buffer['buffer_abs_usd']:,.2f}"
-            )
-            return
+            if btc_buffer and not btc_buffer["ok"]:
+                signal_logger.info(
+                    f"SIGNAL BLOCKED: {side} - BTC absolute move ${btc_buffer['current_abs_usd']:,.2f} "
+                    f"< buffer ${btc_buffer['buffer_abs_usd']:,.2f}"
+                )
+                logger.warning(
+                    f"Entry blocked by BTC buffer: ${btc_buffer['current_abs_usd']:,.2f} "
+                    f"< ${btc_buffer['buffer_abs_usd']:,.2f}"
+                )
+                return
         
         # Log full signal snapshot
         signal_logger.info("=" * 60)
