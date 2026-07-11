@@ -2926,10 +2926,22 @@ class LiveTradingBot:
             self.dashboard.manual_buy_live_status = "blocked: amount must be > 0"
             return {"ok": False, "error": "Amount must be > 0"}
 
-        if self.stats.position is not None:
-            signal = "BUY_UP" if self.stats.position.token_name == "UP" else "BUY_DOWN"
-        else:
-            signal = "BUY_UP" if up_last >= down_last else "BUY_DOWN"
+        # Get direction from payload, or auto-determine if not specified
+        direction = None
+        if isinstance(payload, dict) and ("direction" in payload):
+            direction = str(payload.get("direction", "")).upper()
+            if direction not in ("UP", "DOWN"):
+                self.dashboard.manual_buy_live_status = "blocked: invalid direction"
+                return {"ok": False, "error": "Direction must be UP or DOWN"}
+
+        # If direction not specified, auto-determine based on current position or prices
+        if not direction:
+            if self.stats.position is not None:
+                direction = "UP" if self.stats.position.token_name == "UP" else "DOWN"
+            else:
+                direction = "UP" if up_last >= down_last else "DOWN"
+
+        signal = f"BUY_{direction}"
         self.dashboard.manual_signal_pending = f"{signal}|amount={amount_usd:.8f}"
         self.dashboard.manual_buy_live_status = f"queued: {signal} ${amount_usd:.2f}"
         logger.info(
@@ -3604,7 +3616,7 @@ class LiveTradingBot:
                     btc_price_at_entry=btc_price_at_entry,
                 )
 
-            if late_mode and mode_name:
+            if late_mode and mode_name and not manual_override:
                 self.stats.record_late_mode_entry(mode_name)
             
             # Log BTC price movement for this buy
