@@ -377,7 +377,7 @@ _HTML = """<!DOCTYPE html>
               for (var wi = 0; wi < b.buffer_windows.length; wi++) {
                 var w = b.buffer_windows[wi];
                 var wt = w.window_ts ? new Date(w.window_ts * 1000).toISOString().substr(11, 8) : "?";
-                btcBits.push(esc(wt) + " $" + esc(numFmt(w.abs_usd, 2)) + " (" + esc(numFmt(w.abs_pct, 4)) + "%)");
+                btcBits.push(esc(wt) + " $" + esc(numFmtSigned(w.abs_usd, 2)) + " (" + esc(numFmtSigned(w.abs_pct, 4)) + "%)");
               }
             }
             if (b.btc_anchor_history && b.btc_anchor_history.length) {
