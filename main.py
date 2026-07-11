@@ -2909,12 +2909,6 @@ class LiveTradingBot:
             self.dashboard.manual_buy_live_status = "blocked: market tokens not ready"
             return {"ok": False, "error": "Market tokens not ready"}
 
-        time_left_now = max(0.0, self.state.end_time - time.time())
-        late_mode_active = self.dashboard._get_late_entry_mode(time_left_now) is not None
-        if not (self.stats.can_enter() or late_mode_active):
-            self.dashboard.manual_buy_live_status = "blocked: entry not allowed now"
-            return {"ok": False, "error": "Cannot enter right now"}
-
         up_last = float(up.last_price or 0.0)
         down_last = float(down.last_price or 0.0)
         if up_last <= 0.0 and down_last <= 0.0:
@@ -3337,7 +3331,12 @@ class LiveTradingBot:
             f"cumulative ${s['total_pnl_usd']:+.4f} | WR {s['win_rate_pct']:.2f}% ({n} closed)"
         )
     
-    async def execute_entry(self, side: str, bet_amount_override_usd: Optional[float] = None):
+    async def execute_entry(
+        self,
+        side: str,
+        bet_amount_override_usd: Optional[float] = None,
+        manual_override: bool = False,
+    ):
         """Execute entry order (live CLOB or simulation)."""
         time_left = max(0, self.state.end_time - time.time())
         late_mode = self.dashboard._get_late_entry_mode(time_left)
@@ -3357,22 +3356,23 @@ class LiveTradingBot:
             mode_trade_count = 0
             mode_trade_cap_ok = True
 
-        if late_mode and not mode_trade_cap_ok:
-            signal_logger.info(
-                f"SIGNAL IGNORED: {side} - late mode '{mode_name}' trade cap reached "
-                f"({mode_trade_count}/{mode_max_trades})"
-            )
-            return
+        if not manual_override:
+            if late_mode and not mode_trade_cap_ok:
+                signal_logger.info(
+                    f"SIGNAL IGNORED: {side} - late mode '{mode_name}' trade cap reached "
+                    f"({mode_trade_count}/{mode_max_trades})"
+                )
+                return
 
-        if late_mode and not total_trade_cap_ok:
-            signal_logger.info(
-                f"SIGNAL IGNORED: {side} - total late-mode trade cap reached "
-                f"({total_late_mode_trade_count}/{total_late_mode_max_trades})"
-            )
-            return
+            if late_mode and not total_trade_cap_ok:
+                signal_logger.info(
+                    f"SIGNAL IGNORED: {side} - total late-mode trade cap reached "
+                    f"({total_late_mode_trade_count}/{total_late_mode_max_trades})"
+                )
+                return
 
         if self.stats.position is not None:
-            if not late_mode:
+            if not manual_override and not late_mode:
                 signal_logger.info(f"SIGNAL IGNORED: {side} - cannot enter (already in position)")
                 return
             expected_token_name = "UP" if side == "BUY_UP" else "DOWN"
@@ -3382,7 +3382,7 @@ class LiveTradingBot:
                     f"({self.stats.position.token_name})"
                 )
                 return
-        elif not self.stats.can_enter():
+        elif not manual_override and not self.stats.can_enter():
             signal_logger.info(f"SIGNAL IGNORED: {side} - cannot enter (entry blocked for this market)")
             return
 
@@ -4076,7 +4076,11 @@ class LiveTradingBot:
                 except (TypeError, ValueError):
                     bet_override = None
 
-            await self.execute_entry(side, bet_amount_override_usd=bet_override)
+            await self.execute_entry(
+                side,
+                bet_amount_override_usd=bet_override,
+                manual_override=is_manual,
+            )
             if is_manual:
                 after_contracts = self.stats.position.contracts if self.stats.position else 0
                 if after_contracts > before_contracts or self.stats.trade_count > before_trade_count:
