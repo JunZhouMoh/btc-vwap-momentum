@@ -69,6 +69,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
     <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
+    <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
@@ -407,6 +408,39 @@ _HTML = """<!DOCTYPE html>
           }
           
           var tr = d.trading || {};
+          var modePerfEl = document.getElementById("modePerf");
+          if (modePerfEl) {
+            var modePerfLines = [];
+            var modeMapForPanel = tr.win_rate_by_mode || {};
+            var panelHandledModes = {};
+            var panelModeOrder = ["normal", "manual", "mode_60s", "mode_40s", "mode_30s", "mode_20s", "unknown"];
+
+            function pushPanelModeLine(modeKey) {
+              if (!Object.prototype.hasOwnProperty.call(modeMapForPanel, modeKey)) return;
+              panelHandledModes[modeKey] = true;
+              var ms = modeMapForPanel[modeKey] || {};
+              var wrVal = (ms.win_rate_pct != null && typeof ms.win_rate_pct === "number" && !isNaN(ms.win_rate_pct)) ? (numFmt(ms.win_rate_pct, 1) + "%") : "\u2014";
+              var pnlVal = (ms.total_pnl_usd != null && typeof ms.total_pnl_usd === "number" && !isNaN(ms.total_pnl_usd)) ? ("$" + numFmtSigned(ms.total_pnl_usd, 2)) : "$\u2014";
+              var countVal = (ms.trade_count != null) ? String(ms.trade_count) : "0";
+              modePerfLines.push(
+                esc(modeKey) + " | PnL " + esc(pnlVal) + " | Triggers " + esc(countVal) + " | WR " + esc(wrVal)
+              );
+            }
+
+            for (var pmo = 0; pmo < panelModeOrder.length; pmo++) {
+              pushPanelModeLine(panelModeOrder[pmo]);
+            }
+            for (var pmk in modeMapForPanel) {
+              if (!Object.prototype.hasOwnProperty.call(modeMapForPanel, pmk)) continue;
+              if (panelHandledModes[pmk]) continue;
+              pushPanelModeLine(pmk);
+            }
+
+            modePerfEl.innerHTML = modePerfLines.length
+              ? modePerfLines.join("<br/>")
+              : "No mode stats yet";
+          }
+
           var tHtml = "Markets " + esc(tr.markets_seen) + " \u00b7 Trades " + esc(tr.trade_count) +
             " \u00b7 PnL $" + (tr.total_pnl != null ? numFmtSigned(tr.total_pnl, 2) : "\u2014") + "<br/>";
           if (tr.win_rate_by_mode) {
