@@ -377,7 +377,9 @@ _HTML = """<!DOCTYPE html>
               for (var wi = 0; wi < b.buffer_windows.length; wi++) {
                 var w = b.buffer_windows[wi];
                 var wt = w.window_ts ? new Date(w.window_ts * 1000).toISOString().substr(11, 8) : "?";
-                btcBits.push(esc(wt) + " $" + esc(numFmtSigned(w.abs_usd, 2)) + " (" + esc(numFmtSigned(w.abs_pct, 4)) + "%)");
+                var windowUsd = (w.signed_usd != null) ? w.signed_usd : w.abs_usd;
+                var windowPct = (w.signed_pct != null) ? w.signed_pct : w.abs_pct;
+                btcBits.push(esc(wt) + " $" + esc(numFmtSigned(windowUsd, 2)) + " (" + esc(numFmtSigned(windowPct, 4)) + "%)");
               }
             }
             if (b.btc_anchor_history && b.btc_anchor_history.length) {
@@ -407,6 +409,19 @@ _HTML = """<!DOCTYPE html>
           var tr = d.trading || {};
           var tHtml = "Markets " + esc(tr.markets_seen) + " \u00b7 Trades " + esc(tr.trade_count) +
             " \u00b7 PnL $" + (tr.total_pnl != null ? numFmtSigned(tr.total_pnl, 2) : "\u2014") + "<br/>";
+          if (tr.win_rate_by_mode) {
+            var modeWrParts = [];
+            for (var mk in tr.win_rate_by_mode) {
+              if (!Object.prototype.hasOwnProperty.call(tr.win_rate_by_mode, mk)) continue;
+              var ms = tr.win_rate_by_mode[mk] || {};
+              var mw = (ms.win_rate_pct != null && typeof ms.win_rate_pct === "number" && !isNaN(ms.win_rate_pct)) ? numFmt(ms.win_rate_pct, 1) + "%" : "\u2014";
+              var mt = (ms.trade_count != null) ? String(ms.trade_count) : "0";
+              modeWrParts.push(esc(mk) + " " + esc(mw) + " (" + esc(mt) + ")");
+            }
+            if (modeWrParts.length) {
+              tHtml += "WR by mode: " + modeWrParts.join(" | ") + "<br/>";
+            }
+          }
           if (tr.position) {
             var p = tr.position;
             tHtml += "LONG " + esc(p.token_name) + " @ " + esc(p.entry_price) +
@@ -418,7 +433,9 @@ _HTML = """<!DOCTYPE html>
           if (tr.recent_trades && tr.recent_trades.length) {
             var lines = [];
             for (var i = 0; i < tr.recent_trades.length; i++) {
-              lines.push(esc(tr.recent_trades[i].line));
+              var rt = tr.recent_trades[i] || {};
+              var modeTag = rt.entry_mode ? (" [" + rt.entry_mode + "]") : "";
+              lines.push(esc((rt.line || "") + modeTag));
             }
             tHtml += "<br/>Recent:<br/>" + lines.join("<br/>");
           }
