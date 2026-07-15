@@ -411,15 +411,30 @@ _HTML = """<!DOCTYPE html>
             " \u00b7 PnL $" + (tr.total_pnl != null ? numFmtSigned(tr.total_pnl, 2) : "\u2014") + "<br/>";
           if (tr.win_rate_by_mode) {
             var modeWrParts = [];
-            for (var mk in tr.win_rate_by_mode) {
-              if (!Object.prototype.hasOwnProperty.call(tr.win_rate_by_mode, mk)) continue;
-              var ms = tr.win_rate_by_mode[mk] || {};
+            var modeMap = tr.win_rate_by_mode;
+            var handledModes = {};
+            var modeOrder = ["normal", "manual", "mode_60s", "mode_40s", "mode_30s", "mode_20s", "unknown"];
+
+            function pushModeLine(modeKey) {
+              if (!Object.prototype.hasOwnProperty.call(modeMap, modeKey)) return;
+              handledModes[modeKey] = true;
+              var ms = modeMap[modeKey] || {};
               var mw = (ms.win_rate_pct != null && typeof ms.win_rate_pct === "number" && !isNaN(ms.win_rate_pct)) ? numFmt(ms.win_rate_pct, 1) + "%" : "\u2014";
               var mt = (ms.trade_count != null) ? String(ms.trade_count) : "0";
-              modeWrParts.push(esc(mk) + " " + esc(mw) + " (" + esc(mt) + ")");
+              var mp = (ms.total_pnl_usd != null && typeof ms.total_pnl_usd === "number" && !isNaN(ms.total_pnl_usd)) ? ("$" + numFmtSigned(ms.total_pnl_usd, 2)) : "$\u2014";
+              modeWrParts.push(esc(modeKey) + " WR " + esc(mw) + " | PnL " + esc(mp) + " (" + esc(mt) + ")");
+            }
+
+            for (var mo = 0; mo < modeOrder.length; mo++) {
+              pushModeLine(modeOrder[mo]);
+            }
+            for (var mk in modeMap) {
+              if (!Object.prototype.hasOwnProperty.call(modeMap, mk)) continue;
+              if (handledModes[mk]) continue;
+              pushModeLine(mk);
             }
             if (modeWrParts.length) {
-              tHtml += "WR by mode: " + modeWrParts.join(" | ") + "<br/>";
+              tHtml += "By mode:<br/>" + modeWrParts.join("<br/>") + "<br/>";
             }
           }
           if (tr.position) {
