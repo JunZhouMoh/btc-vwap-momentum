@@ -547,7 +547,13 @@ class TradingStats:
             entry_mode=(str(entry_mode).strip() or "normal"),
         )
 
-    def add_to_position(self, price: float, contracts: int, btc_price_at_entry: float = 0.0):
+    def add_to_position(
+        self,
+        price: float,
+        contracts: int,
+        btc_price_at_entry: float = 0.0,
+        entry_mode: str = "",
+    ):
         """Scale into an existing position by averaging entry price and contracts."""
         if not self.position or contracts <= 0:
             return
@@ -566,6 +572,11 @@ class TradingStats:
                 ) / total_contracts
             else:
                 self.position.btc_price_at_entry = btc_price_at_entry
+
+        # If user manually adds to an existing position, classify it as manual.
+        mode = str(entry_mode or "").strip().lower()
+        if mode == "manual":
+            self.position.entry_mode = "manual"
 
         self.position.contracts = total_contracts
     
@@ -3674,6 +3685,7 @@ class LiveTradingBot:
                     price=result.avg_price,
                     contracts=result.contracts_filled,
                     btc_price_at_entry=btc_price_at_entry,
+                    entry_mode=entry_mode,
                 )
 
             if late_mode and mode_name and not manual_override:
