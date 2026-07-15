@@ -190,6 +190,7 @@ class Position:
     min_price_seen: float = 0.0  # Lowest price after entry (for drawdown tracking)
     btc_price_at_entry: float = 0.0    # Chainlink BTC/USD when order was submitted
     btc_anchor_at_entry: float = 0.0   # BTC anchor (market-open price) at order submission
+    entry_mode: str = "normal"        # normal | mode_60s | mode_40s | mode_30s | mode_20s | manual
 
 
 @dataclass
@@ -209,6 +210,7 @@ class TradeRecord:
     btc_anchor_price_at_entry: float = 0.0 # BTC anchor (market-open price) at submission
     btc_price_at_close: float = 0.0        # Chainlink BTC/USD used at market close
     btc_diff_from_anchor: float = 0.0      # btc_price_at_close - btc_anchor_price_at_entry
+    entry_mode: str = "unknown"           # Copied from Position.entry_mode
 
 
 # =============================================================================
@@ -429,12 +431,39 @@ class TradingStats:
         total = sum(t.pnl for t in self.trades)
         pnls = [t.pnl for t in self.trades]
         wr = (wins / tc * 100.0) if tc else 0.0
+        by_mode: Dict[str, Dict[str, float]] = {}
+        for t in self.trades:
+            mode = str((getattr(t, "entry_mode", "") or "unknown")).strip() or "unknown"
+            bucket = by_mode.setdefault(
+                mode,
+                {
+                    "trade_count": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "win_rate_pct": 0.0,
+                    "total_pnl_usd": 0.0,
+                },
+            )
+            bucket["trade_count"] += 1
+            if t.won:
+                bucket["wins"] += 1
+            else:
+                bucket["losses"] += 1
+            bucket["total_pnl_usd"] += float(t.pnl)
+
+        for mode_stats in by_mode.values():
+            mt = int(mode_stats["trade_count"])
+            mw = int(mode_stats["wins"])
+            mode_stats["win_rate_pct"] = round((mw / mt * 100.0) if mt else 0.0, 4)
+            mode_stats["total_pnl_usd"] = round(float(mode_stats["total_pnl_usd"]), 6)
+
         return {
             "total_pnl_usd": round(total, 6),
             "trade_count": tc,
             "wins": wins,
             "losses": losses,
             "win_rate_pct": round(wr, 4),
+            "win_rate_by_mode": by_mode,
             "avg_trade_pnl_usd": round(total / tc, 6) if tc else 0.0,
             "best_trade_pnl_usd": round(max(pnls), 6) if pnls else None,
             "worst_trade_pnl_usd": round(min(pnls), 6) if pnls else None,
@@ -502,7 +531,8 @@ class TradingStats:
     
     def record_entry(self, token_name: str, token_id: str, opposite_token_id: str,
                      price: float, contracts: int, market_slug: str,
-                     btc_price_at_entry: float = 0.0, btc_anchor_at_entry: float = 0.0):
+                     btc_price_at_entry: float = 0.0, btc_anchor_at_entry: float = 0.0,
+                     entry_mode: str = "normal"):
         self.position = Position(
             token_name=token_name,
             token_id=token_id,
@@ -514,6 +544,7 @@ class TradingStats:
             min_price_seen=price,  # Start tracking from entry price
             btc_price_at_entry=btc_price_at_entry,
             btc_anchor_at_entry=btc_anchor_at_entry,
+            entry_mode=(str(entry_mode).strip() or "normal"),
         )
 
     def add_to_position(self, price: float, contracts: int, btc_price_at_entry: float = 0.0):
@@ -586,6 +617,7 @@ class TradingStats:
             btc_anchor_price_at_entry=btc_a,
             btc_price_at_close=btc_c,
             btc_diff_from_anchor=btc_diff,
+            entry_mode=(str(self.position.entry_mode).strip() or "unknown"),
         )
         
         self.trades.append(record)
@@ -1132,10 +1164,14 @@ class ChainlinkPriceClient:
                 # Finalize completed window movement before switching anchor.
                 old_close = self._last_price_before_boundary if self._last_price_before_boundary > 0 else price
                 if old_anchor > 0 and old_close > 0:
+                    signed_usd = old_close - old_anchor
+                    signed_pct = (signed_usd / old_anchor * 100)
                     self.state.btc_window_moves.append({
                         "window": old_window,
-                        "abs_usd": abs(old_close - old_anchor),
-                        "abs_pct": abs((old_close - old_anchor) / old_anchor * 100),
+                        "signed_usd": signed_usd,
+                        "signed_pct": signed_pct,
+                        "abs_usd": abs(signed_usd),
+                        "abs_pct": abs(signed_pct),
                     })
                 
                 self.state.btc_anchor_price = price  # First tick of new window
@@ -1699,10 +1735,14 @@ class Dashboard:
                 
                 abs_usd = abs(btc_entry - btc_anchor)
                 abs_pct = abs((btc_entry - btc_anchor) / btc_anchor * 100)
+                signed_usd = btc_entry - btc_anchor
+                signed_pct = (signed_usd / btc_anchor * 100)
                 
                 valid_trades.append({
                     "window_ts": window_ts,
                     "window": window_ts,
+                    "signed_usd": signed_usd,
+                    "signed_pct": signed_pct,
                     "abs_usd": abs_usd,
                     "abs_pct": abs_pct,
                     "source": "history",
@@ -1781,10 +1821,14 @@ class Dashboard:
                     opening_price = float(row["opening_price"])
                     btc_price = float(row["btc_price"])
                     window_ts = int(row["window_ts"])
+                    signed_usd = btc_price - opening_price
+                    signed_pct = float(row["btc_delta_pct"])
                     window_map[window_ts] = {
                         "window": int(row["window_ts"]),
-                        "abs_usd": abs(btc_price - opening_price),
-                        "abs_pct": abs(float(row["btc_delta_pct"])),
+                        "signed_usd": signed_usd,
+                        "signed_pct": signed_pct,
+                        "abs_usd": abs(signed_usd),
+                        "abs_pct": abs(signed_pct),
                         "source": "signals_csv",
                     }
 
@@ -1809,8 +1853,12 @@ class Dashboard:
 
                     abs_usd = abs(btc_entry - btc_anchor)
                     abs_pct = abs((btc_entry - btc_anchor) / btc_anchor * 100)
+                    signed_usd = btc_entry - btc_anchor
+                    signed_pct = (signed_usd / btc_anchor * 100)
                     window_map[window_ts] = {
                         "window": window_ts,
+                        "signed_usd": signed_usd,
+                        "signed_pct": signed_pct,
                         "abs_usd": abs_usd,
                         "abs_pct": abs_pct,
                         "source": "trade_log",
@@ -1831,6 +1879,8 @@ class Dashboard:
                     if window_ts not in window_map:
                         window_map[window_ts] = {
                             "window": window_ts,
+                            "signed_usd": 0.0,
+                            "signed_pct": 0.0,
                             "abs_usd": 0.0,
                             "abs_pct": 0.0,
                             "source": "bot_log",
@@ -2713,6 +2763,8 @@ class Dashboard:
         btc_block["buffer_windows"] = [
             {
                 "window_ts": int(r.get("window", 0)),
+                "signed_usd": round(float(r.get("signed_usd", r.get("abs_usd", 0.0))), 2),
+                "signed_pct": round(float(r.get("signed_pct", r.get("abs_pct", 0.0))), 4),
                 "abs_usd": round(float(r.get("abs_usd", 0.0)), 2),
                 "abs_pct": round(float(r.get("abs_pct", 0.0)), 4),
             }
@@ -2737,10 +2789,15 @@ class Dashboard:
             "markets_seen": st.markets_seen,
             "trade_count": st.trade_count,
             "win_rate_str": wr_str,
+            "win_rate_by_mode": {},
             "total_pnl": st.total_pnl,
             "position": None,
             "recent_trades": [],
         }
+        summary = st.summary_dict()
+        mode_stats = summary.get("win_rate_by_mode") if isinstance(summary, dict) else None
+        if isinstance(mode_stats, dict):
+            trading["win_rate_by_mode"] = mode_stats
         if st.position:
             pos = st.position
             if pos.token_name == "UP" and self.state.up_token:
@@ -2769,6 +2826,7 @@ class Dashboard:
             trade_time = datetime.fromtimestamp(trade.timestamp).strftime('%Y-%m-%d %H:%M:%S')
             trading["recent_trades"].append({
                 "line": f"{icon} {trade_time} | {trade.token_name} @ {trade.entry_price:.2f} -> ${trade.pnl:+.2f}",
+                "entry_mode": str(getattr(trade, "entry_mode", "unknown") or "unknown"),
             })
 
         return {
@@ -3590,6 +3648,7 @@ class LiveTradingBot:
         btc_price_at_entry = self.state.btc_current_price
         # Use rolling window anchor for all trading logic.
         btc_anchor_at_entry = self.state.btc_anchor_price
+        entry_mode = "manual" if manual_override else (mode_name if (late_mode and mode_name) else "normal")
         
         result = await self.executor.execute_entry(
             token_id=token.token_id,
@@ -3608,6 +3667,7 @@ class LiveTradingBot:
                     market_slug=self.state.slug,
                     btc_price_at_entry=btc_price_at_entry,
                     btc_anchor_at_entry=btc_anchor_at_entry,
+                    entry_mode=entry_mode,
                 )
             else:
                 self.stats.add_to_position(
@@ -3741,6 +3801,7 @@ class LiveTradingBot:
                             market_slug=self.state.slug,
                             btc_price_at_entry=btc_price_at_entry,
                             btc_anchor_at_entry=btc_anchor_at_entry,
+                            entry_mode=entry_mode,
                         )
                         self._simulation_log_entry(
                             token_name, rec_price, rec_contracts, rec_cost
