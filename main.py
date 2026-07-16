@@ -191,6 +191,7 @@ class Position:
     btc_price_at_entry: float = 0.0    # Chainlink BTC/USD when order was submitted
     btc_anchor_at_entry: float = 0.0   # BTC anchor (market-open price) at order submission
     entry_mode: str = "normal"        # normal | mode_60s | mode_40s | mode_30s | mode_20s | manual
+    mode_legs: List[Dict[str, Any]] = field(default_factory=list)  # [{mode, contracts, entry_price}]
 
 
 @dataclass
@@ -211,6 +212,7 @@ class TradeRecord:
     btc_price_at_close: float = 0.0        # Chainlink BTC/USD used at market close
     btc_diff_from_anchor: float = 0.0      # btc_price_at_close - btc_anchor_price_at_entry
     entry_mode: str = "unknown"           # Copied from Position.entry_mode
+    mode_breakdown: Dict[str, Dict[str, float]] = field(default_factory=dict)  # mode -> {trigger_count,wins,losses,total_pnl_usd}
 
 
 # =============================================================================
@@ -433,6 +435,31 @@ class TradingStats:
         wr = (wins / tc * 100.0) if tc else 0.0
         by_mode: Dict[str, Dict[str, float]] = {}
         for t in self.trades:
+            breakdown = getattr(t, "mode_breakdown", None)
+            if isinstance(breakdown, dict) and breakdown:
+                for mode_key, mode_data in breakdown.items():
+                    mode = str(mode_key or "unknown").strip() or "unknown"
+                    bucket = by_mode.setdefault(
+                        mode,
+                        {
+                            "trade_count": 0,
+                            "wins": 0,
+                            "losses": 0,
+                            "win_rate_pct": 0.0,
+                            "total_pnl_usd": 0.0,
+                        },
+                    )
+                    triggers = int(float(mode_data.get("trigger_count", 0.0) or 0.0))
+                    wins_i = int(float(mode_data.get("wins", 0.0) or 0.0))
+                    losses_i = int(float(mode_data.get("losses", 0.0) or 0.0))
+                    pnl_i = float(mode_data.get("total_pnl_usd", 0.0) or 0.0)
+                    bucket["trade_count"] += triggers
+                    bucket["wins"] += wins_i
+                    bucket["losses"] += losses_i
+                    bucket["total_pnl_usd"] += pnl_i
+                continue
+
+            # Backward compatibility for old records without per-mode breakdown.
             mode = str((getattr(t, "entry_mode", "") or "unknown")).strip() or "unknown"
             bucket = by_mode.setdefault(
                 mode,
@@ -533,6 +560,7 @@ class TradingStats:
                      price: float, contracts: int, market_slug: str,
                      btc_price_at_entry: float = 0.0, btc_anchor_at_entry: float = 0.0,
                      entry_mode: str = "normal"):
+        mode = (str(entry_mode).strip() or "normal")
         self.position = Position(
             token_name=token_name,
             token_id=token_id,
@@ -544,7 +572,12 @@ class TradingStats:
             min_price_seen=price,  # Start tracking from entry price
             btc_price_at_entry=btc_price_at_entry,
             btc_anchor_at_entry=btc_anchor_at_entry,
-            entry_mode=(str(entry_mode).strip() or "normal"),
+            entry_mode=mode,
+            mode_legs=[{
+                "mode": mode,
+                "contracts": int(contracts),
+                "entry_price": float(price),
+            }],
         )
 
     def add_to_position(
@@ -577,6 +610,12 @@ class TradingStats:
         mode = str(entry_mode or "").strip().lower()
         if mode == "manual":
             self.position.entry_mode = "manual"
+
+        self.position.mode_legs.append({
+            "mode": (str(entry_mode).strip() or self.position.entry_mode or "unknown"),
+            "contracts": int(contracts),
+            "entry_price": float(price),
+        })
 
         self.position.contracts = total_contracts
     
@@ -612,6 +651,49 @@ class TradingStats:
         btc_a = self.position.btc_anchor_at_entry
         btc_c = btc_price_at_close if btc_price_at_close > 0 else 0.0
         btc_diff = (btc_c - btc_a) if (btc_c > 0 and btc_a > 0) else 0.0
+
+        mode_breakdown: Dict[str, Dict[str, float]] = {}
+        legs = list(getattr(self.position, "mode_legs", []) or [])
+        if not legs:
+            legs = [{
+                "mode": (str(self.position.entry_mode).strip() or "unknown"),
+                "contracts": int(self.position.contracts),
+                "entry_price": float(self.position.entry_price),
+            }]
+
+        for leg in legs:
+            mode = str(leg.get("mode", "") or "unknown").strip() or "unknown"
+            leg_contracts = int(float(leg.get("contracts", 0) or 0))
+            leg_entry_price = float(leg.get("entry_price", 0.0) or 0.0)
+            if leg_contracts <= 0 or leg_entry_price <= 0:
+                continue
+
+            leg_cost = leg_contracts * leg_entry_price
+            leg_pnl = (leg_contracts - leg_cost) if won else (-leg_cost)
+
+            bucket = mode_breakdown.setdefault(
+                mode,
+                {
+                    "trigger_count": 0.0,
+                    "wins": 0.0,
+                    "losses": 0.0,
+                    "total_pnl_usd": 0.0,
+                },
+            )
+            bucket["trigger_count"] += 1.0
+            if won:
+                bucket["wins"] += 1.0
+            else:
+                bucket["losses"] += 1.0
+            bucket["total_pnl_usd"] += float(leg_pnl)
+
+        unique_modes = list(mode_breakdown.keys())
+        if len(unique_modes) == 1:
+            entry_mode_for_record = unique_modes[0]
+        elif len(unique_modes) > 1:
+            entry_mode_for_record = "mixed"
+        else:
+            entry_mode_for_record = (str(self.position.entry_mode).strip() or "unknown")
         
         record = TradeRecord(
             market_slug=self.position.market_slug,
@@ -628,7 +710,8 @@ class TradingStats:
             btc_anchor_price_at_entry=btc_a,
             btc_price_at_close=btc_c,
             btc_diff_from_anchor=btc_diff,
-            entry_mode=(str(self.position.entry_mode).strip() or "unknown"),
+            entry_mode=entry_mode_for_record,
+            mode_breakdown=mode_breakdown,
         )
         
         self.trades.append(record)
