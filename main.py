@@ -83,8 +83,34 @@ from src.btc_volume_feed import BTCVolumeFeed
 start_web_dashboard = getattr(_web_dashboard, "start_web_dashboard", None)
 build_app = getattr(_web_dashboard, "build_app", None)
 
-if start_web_dashboard is None or build_app is None:
-    raise ImportError("src.web_dashboard must define start_web_dashboard and build_app")
+if build_app is None:
+    logger.warning("src.web_dashboard.build_app missing; using fallback app factory from main.py")
+
+    def build_app(holder, *args, **kwargs):  # type: ignore[no-redef]
+        """Fallback minimal ASGI app for older runtime images."""
+        from fastapi import FastAPI
+
+        app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
+
+        @app.get("/")
+        async def _index():
+            return {"ok": True, "message": "dashboard fallback active"}
+
+        @app.get("/api/state")
+        async def _state():
+            try:
+                return holder.get()
+            except Exception:
+                return {"status": "fallback", "error": "state unavailable"}
+
+        return app
+
+if start_web_dashboard is None:
+    logger.warning("src.web_dashboard.start_web_dashboard missing; web UI thread disabled")
+
+    def start_web_dashboard(*args, **kwargs):  # type: ignore[no-redef]
+        """Fallback no-op starter for older runtime images."""
+        return False
 
 WebSnapshotHolder = getattr(_web_dashboard, "WebSnapshotHolder", None)
 if WebSnapshotHolder is None:
