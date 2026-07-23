@@ -25,42 +25,42 @@
       "mode_40s": {
         "enabled": true,
         "time_left_sec": 40,
-        "min_contracts": 10,
+        "min_contracts": 30,
         "max_trades": 1,
-        "buffer_avg_multiplier": 1.2,
+        "buffer_avg_multiplier": 1,
         "min_buffer_threshold_usd": 25.0,
         "min_price": 0.8,
-        "max_price": 0.99
+        "max_price": 0.97
       },
       "mode_30s": {
         "enabled": true,
         "time_left_sec": 30,
-        "min_contracts": 10,
+        "min_contracts": 30,
         "max_trades": 1,
         "buffer_avg_multiplier": 1.0,
         "min_buffer_threshold_usd": 25.0,
         "min_price": 0.85,
-        "max_price": 0.99
+        "max_price": 0.97
       },
       "mode_20s": {
         "enabled": true,
         "time_left_sec": 20,
-        "min_contracts": 20,
+        "min_contracts": 30,
         "max_trades": 1,
         "buffer_avg_multiplier": 0.5,
         "min_buffer_threshold_usd": 20.0,
         "min_price": 0.9,
-        "max_price": 0.99
+        "max_price": 0.97
       },
-      "mode_60s": {
+      "mode_70s": {
         "enabled": true,
-        "time_left_sec": 60,
-        "min_contracts": 5,
+        "time_left_sec": 70,
+        "min_contracts": 30,
         "max_trades": 1,
         "buffer_avg_multiplier": 1.0,
         "min_buffer_threshold_usd": 25.0,
         "min_price": 0.85,
-        "max_price": 0.99
+        "max_price": 0.97
       }
     }
   },
@@ -94,7 +94,7 @@
 
   "simulation": {
     "_comment": "Paper trading: live market data, no CLOB orders or redeemer. API keys optional when enabled.",
-    "enabled": false,
+    "enabled": true,
     "separate_trading_log": true,
     "trading_log_path": "logs/trading_log_sim.json",
     "history_csv_path": "logs/simulation_trades.csv",
