@@ -3350,35 +3350,57 @@ class LiveTradingBot:
                 wd.host = "0.0.0.0"
 
             self._web_snapshot_holder = WebSnapshotHolder()
-            ok = start_web_dashboard(
-                wd.host,
-                wd.port,
-                self._web_snapshot_holder,
-                get_late_modes=self._web_get_late_modes,
-                update_late_modes=self._web_update_late_modes,
-                trigger_manual_buy=self._web_trigger_manual_buy,
-            )
+            requested_port = int(wd.port)
+            selected_port = requested_port
+            env_port_set = bool(env_port)
+
+            # If PORT is provided by a platform/router, do not hop ports.
+            # Locally, try a few fallback ports when the default is busy.
+            candidate_ports = [requested_port]
+            if not env_port_set:
+                candidate_ports.extend([requested_port + i for i in range(1, 6)])
+
+            ok = False
+            for port_candidate in candidate_ports:
+                ok = start_web_dashboard(
+                    wd.host,
+                    port_candidate,
+                    self._web_snapshot_holder,
+                    get_late_modes=self._web_get_late_modes,
+                    update_late_modes=self._web_update_late_modes,
+                    trigger_manual_buy=self._web_trigger_manual_buy,
+                )
+                if ok:
+                    selected_port = port_candidate
+                    wd.port = port_candidate
+                    break
+
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
             railway_public = os.getenv("RAILWAY_PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
             if railway_public:
                 public_host = railway_public.replace("https://", "").replace("http://", "")
                 open_url = f"https://{public_host}/"
             elif wd.host in ("0.0.0.0", ""):
-                open_url = f"http://127.0.0.1:{wd.port}/"
+                open_url = f"http://127.0.0.1:{selected_port}/"
             elif wd.host in ("::", "[::]"):
-                open_url = f"http://[::1]:{wd.port}/"
+                open_url = f"http://[::1]:{selected_port}/"
             else:
-                open_url = f"http://{wd.host}:{wd.port}/"
+                open_url = f"http://{wd.host}:{selected_port}/"
             if ok:
+                if selected_port != requested_port:
+                    logger.warning(
+                        f"Web dashboard port {requested_port} busy; switched to {selected_port}"
+                    )
                 console.print(f"[green]✓ Web dashboard:[/green] [bold]{open_url}[/bold]")
                 console.print(
                     "[dim]  Use http:// not https://. On Windows, if the page fails in your browser, "
                     "open this exact URL (avoid typing only “localhost”, which may use IPv6).[/dim]"
                 )
             else:
+                attempted = ", ".join(str(p) for p in candidate_ports)
                 console.print(
-                    f"[yellow]⚠ Web dashboard did not start on port {wd.port} "
-                    f"(in use by another app, or bind failed). Check logs.[/yellow]"
+                    f"[yellow]⚠ Web dashboard did not start (attempted ports: {attempted}). "
+                    f"Port in use or bind failed. Check logs.[/yellow]"
                 )
         
         console.print("[green]✓ All components initialized[/green]\n")
