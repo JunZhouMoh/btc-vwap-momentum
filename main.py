@@ -71,7 +71,7 @@ signal_logger = NoOpLogger()
 
 # Project imports
 from src.config_loader import load_config, validate_config
-from src.web_dashboard import WebSnapshotHolder, start_web_dashboard, build_app
+from src import web_dashboard as _web_dashboard
 from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
@@ -79,6 +79,31 @@ from src.telegram_notifier import TelegramNotifier
 from src.user_websocket import UserWebSocket
 from src.simulation_history import SimulationHistoryLogger
 from src.btc_volume_feed import BTCVolumeFeed
+
+start_web_dashboard = getattr(_web_dashboard, "start_web_dashboard", None)
+build_app = getattr(_web_dashboard, "build_app", None)
+
+if start_web_dashboard is None or build_app is None:
+    raise ImportError("src.web_dashboard must define start_web_dashboard and build_app")
+
+WebSnapshotHolder = getattr(_web_dashboard, "WebSnapshotHolder", None)
+if WebSnapshotHolder is None:
+    logger.warning("src.web_dashboard.WebSnapshotHolder missing; using fallback holder from main.py")
+
+    class WebSnapshotHolder:  # type: ignore[no-redef]
+        """Thread-safe snapshot fallback for older web_dashboard modules."""
+
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+            self._data: Dict[str, Any] = {"status": "starting"}
+
+        def set(self, data: Dict[str, Any]) -> None:
+            with self._lock:
+                self._data = dict(data)
+
+        def get(self) -> Dict[str, Any]:
+            with self._lock:
+                return dict(self._data)
 
 # Constants
 GAMMA_API = "https://gamma-api.polymarket.com"
