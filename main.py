@@ -3305,7 +3305,7 @@ class LiveTradingBot:
             console.print("[yellow]Starting User WebSocket for order tracking...[/yellow]")
             self._user_ws_task = asyncio.create_task(self.user_ws.connect())
             await asyncio.sleep(1)
-            if self.user_ws.connected:
+            if self.user_ws.is_connected:
                 console.print("[green]User WebSocket connected - order tracking active[/green]")
                 logger.info("User WebSocket connected for order fill tracking")
             else:
@@ -3977,7 +3977,7 @@ class LiveTradingBot:
                 
                 recovered = False
                 
-                if self.user_ws and self.user_ws.connected:
+                if self.user_ws and self.user_ws.is_connected:
                     recovery_timeout = self.config.entry.ws_recovery_timeout_sec
                     
                     signal_logger.info(f"  Checking WS for fills on {token.token_id[:30]}...")
