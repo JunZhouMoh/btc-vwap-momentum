@@ -121,6 +121,7 @@ _HTML = """<!DOCTYPE html>
       h.push('<div class="row"><label>Max Trades</label><input type="number" id="' + esc(k) + '_max_trades" step="1" value="' + esc(mode.max_trades) + '"/></div>');
       h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="' + esc(k) + '_buffer_avg_multiplier" step="0.01" value="' + esc(mode.buffer_avg_multiplier) + '"/></div>');
       h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="' + esc(k) + '_min_buffer_threshold_usd" step="0.1" value="' + esc(mode.min_buffer_threshold_usd) + '"/></div>');
+      h.push('<div class="row"><label>Volume Check</label><input type="checkbox" id="' + esc(k) + '_volume_check_enabled" ' + (mode.volume_check_enabled !== false ? 'checked' : '') + '/></div>');
       h.push('<div class="row"><label>Min Price</label><input type="number" id="' + esc(k) + '_min_price" step="0.001" value="' + esc(mode.min_price) + '"/></div>');
       h.push('<div class="row"><label>Max Price</label><input type="number" id="' + esc(k) + '_max_price" step="0.001" value="' + esc(mode.max_price) + '"/></div>');
       h.push('</div>');
@@ -186,6 +187,7 @@ _HTML = """<!DOCTYPE html>
           max_trades: readInt(k + '_max_trades', 1),
           buffer_avg_multiplier: readNum(k + '_buffer_avg_multiplier', 1.0),
           min_buffer_threshold_usd: readNum(k + '_min_buffer_threshold_usd', 0.0),
+          volume_check_enabled: !!(document.getElementById(k + '_volume_check_enabled') && document.getElementById(k + '_volume_check_enabled').checked),
           min_price: readNum(k + '_min_price', 0.0),
           max_price: readNum(k + '_max_price', 1.0)
         });
@@ -298,11 +300,13 @@ _HTML = """<!DOCTYPE html>
           var sig = st.signal_text || "\u2014";
           function chk(x) { return x === true ? "\u2713" : x === false ? "\u2717" : "\u2014"; }
           var ck = st.checks || {};
+          var volumeEnabled = (ck.volume_enabled !== undefined) ? !!ck.volume_enabled : true;
           var volumeCheck = (ck.volume !== undefined) ? ck.volume : ck.vol_speed;
+          var volumeCheckLabel = volumeEnabled ? chk(volumeCheck) : "OFF";
           var strategyBits = [
             "Fav: " + esc(st.favorite) + " \u00b7 WR: " + esc(st.win_rate_str),
             "Checks: P=" + chk(ck.price) + " T=" + chk(ck.time) + " D=" + chk(ck.dev) +
-            " M=" + chk(ck.mom) + " Vol=" + chk(volumeCheck) + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
+            " M=" + chk(ck.mom) + " Vol=" + volumeCheckLabel + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
           ];
           var trend = st.trend || {};
           if (trend.window_sec != null) {
@@ -316,7 +320,7 @@ _HTML = """<!DOCTYPE html>
           }
           var vs = st.volume_speed || {};
           if (vs.window_sec != null) {
-            strategyBits.push("Volume check: " + chk(volumeCheck));
+            strategyBits.push("Volume check: " + volumeCheckLabel);
             strategyBits.push(
               "VolSpeed " + esc(vs.window_sec) + "s: " +
               esc(vs.favorite || "-") + " dV " +
