@@ -301,7 +301,7 @@ _HTML = """<!DOCTYPE html>
           var strategyBits = [
             "Fav: " + esc(st.favorite) + " \u00b7 WR: " + esc(st.win_rate_str),
             "Checks: P=" + chk(ck.price) + " T=" + chk(ck.time) + " D=" + chk(ck.dev) +
-            " M=" + chk(ck.mom) + " V=" + chk(ck.vol_speed) + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
+            " M=" + chk(ck.mom) + " V=" + chk((ck.volume !== undefined) ? ck.volume : ck.vol_speed) + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
           ];
           var trend = st.trend || {};
           if (trend.window_sec != null) {
