@@ -3303,7 +3303,7 @@ class LiveTradingBot:
                 return False
 
             console.print("[yellow]Starting User WebSocket for order tracking...[/yellow]")
-            self._user_ws_task = asyncio.create_task(self.user_ws.connect())
+            self._user_ws_task = asyncio.create_task(self.user_ws.run_loop())
             await asyncio.sleep(1)
             if self.user_ws.is_connected:
                 console.print("[green]User WebSocket connected - order tracking active[/green]")
