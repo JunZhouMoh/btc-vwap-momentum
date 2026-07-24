@@ -2889,6 +2889,7 @@ class Dashboard:
                     "time": time_ok,
                     "dev": dev_ok,
                     "mom": mom_ok,
+                    "volume": vol_speed_ok,
                     "trend": fav_trend_ok,
                     "vol_speed": vol_speed_ok,
                     "btc_buffer": btc_buffer_ok,
