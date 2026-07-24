@@ -12,6 +12,47 @@ logger = logging.getLogger("btc_live.websocket")
 MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 USER_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 
+
+def _ws_is_closed(ws) -> bool:
+    """Compatibility helper across websockets client implementations."""
+    if ws is None:
+        return True
+
+    closed = getattr(ws, "closed", None)
+    if isinstance(closed, bool):
+        return closed
+
+    state = getattr(ws, "state", None)
+    if state is not None:
+        state_text = str(state).upper()
+        if "CLOSED" in state_text:
+            return True
+
+    return False
+
+
+def _ws_is_open(ws) -> bool:
+    """Compatibility helper across websockets client implementations."""
+    if ws is None:
+        return False
+
+    opened = getattr(ws, "open", None)
+    if isinstance(opened, bool):
+        return opened
+
+    if _ws_is_closed(ws):
+        return False
+
+    state = getattr(ws, "state", None)
+    if state is not None:
+        state_text = str(state).upper()
+        if "OPEN" in state_text:
+            return True
+        if "CLOS" in state_text:
+            return False
+
+    return True
+
 class ConnectionState(Enum):
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
@@ -132,7 +173,7 @@ class MarketWebSocket:
                 self.messages_received += 1
                 await self._process_message(json.loads(msg))
             except asyncio.TimeoutError:
-                if self._ws and self._ws.open:
+                if self._ws and _ws_is_open(self._ws):
                     try:
                         await asyncio.wait_for(self._ws.ping(), timeout=5)
                     except:
@@ -170,7 +211,7 @@ class MarketWebSocket:
     async def close(self):
         self._running = False
         self._state = ConnectionState.CLOSED
-        if self._ws and not self._ws.closed:
+        if self._ws and not _ws_is_closed(self._ws):
             try:
                 await self._ws.close()
             except:
@@ -293,7 +334,7 @@ class UserWebSocket:
                 self.messages_received += 1
                 await self._process_message(json.loads(msg))
             except asyncio.TimeoutError:
-                if self._ws and self._ws.open:
+                if self._ws and _ws_is_open(self._ws):
                     try:
                         await asyncio.wait_for(self._ws.ping(), timeout=5)
                     except:
@@ -325,7 +366,7 @@ class UserWebSocket:
     async def close(self):
         self._running = False
         self._state = ConnectionState.CLOSED
-        if self._ws and not self._ws.closed:
+        if self._ws and not _ws_is_closed(self._ws):
             try:
                 await self._ws.close()
             except:
