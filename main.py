@@ -71,7 +71,7 @@ signal_logger = NoOpLogger()
 
 # Project imports
 from src.config_loader import load_config, validate_config
-from src import web_dashboard as _web_dashboard
+from src.web_dashboard import WebSnapshotHolder, start_web_dashboard, build_app
 from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
@@ -79,57 +79,6 @@ from src.telegram_notifier import TelegramNotifier
 from src.user_websocket import UserWebSocket
 from src.simulation_history import SimulationHistoryLogger
 from src.btc_volume_feed import BTCVolumeFeed
-
-start_web_dashboard = getattr(_web_dashboard, "start_web_dashboard", None)
-build_app = getattr(_web_dashboard, "build_app", None)
-
-if build_app is None:
-    logger.warning("src.web_dashboard.build_app missing; using fallback app factory from main.py")
-
-    def build_app(holder, *args, **kwargs):  # type: ignore[no-redef]
-        """Fallback minimal ASGI app for older runtime images."""
-        from fastapi import FastAPI
-
-        app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
-
-        @app.get("/")
-        async def _index():
-            return {"ok": True, "message": "dashboard fallback active"}
-
-        @app.get("/api/state")
-        async def _state():
-            try:
-                return holder.get()
-            except Exception:
-                return {"status": "fallback", "error": "state unavailable"}
-
-        return app
-
-if start_web_dashboard is None:
-    logger.warning("src.web_dashboard.start_web_dashboard missing; web UI thread disabled")
-
-    def start_web_dashboard(*args, **kwargs):  # type: ignore[no-redef]
-        """Fallback no-op starter for older runtime images."""
-        return False
-
-WebSnapshotHolder = getattr(_web_dashboard, "WebSnapshotHolder", None)
-if WebSnapshotHolder is None:
-    logger.warning("src.web_dashboard.WebSnapshotHolder missing; using fallback holder from main.py")
-
-    class WebSnapshotHolder:  # type: ignore[no-redef]
-        """Thread-safe snapshot fallback for older web_dashboard modules."""
-
-        def __init__(self) -> None:
-            self._lock = threading.Lock()
-            self._data: Dict[str, Any] = {"status": "starting"}
-
-        def set(self, data: Dict[str, Any]) -> None:
-            with self._lock:
-                self._data = dict(data)
-
-        def get(self) -> Dict[str, Any]:
-            with self._lock:
-                return dict(self._data)
 
 # Constants
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -214,7 +163,7 @@ class MarketState:
     btc_market_anchor_source: str = "none"  # none | fallback_tick | feed_tick | official_ptb
     btc_current_price: float = 0.0   # Latest Chainlink price
     btc_last_update: float = 0.0     # Timestamp of last price update
-    btc_anchor_history: deque = field(default_factory=lambda: deque(maxlen=15))  # Recent BTC/anchor samples
+    btc_anchor_history: deque = field(default_factory=lambda: deque(maxlen=5))  # Recent BTC/anchor samples
     btc_connected: bool = False      # RTDS connection status
     btc_feed_source: str = "chainlink"  # chainlink | binance
     btc_window_moves: deque = field(default_factory=lambda: deque(maxlen=50))  # Completed window abs moves
@@ -2293,6 +2242,71 @@ class Dashboard:
         elif m < 0:
             return f"[red]{m:.2f}%[/red]"
         return f"[cyan]0.00%[/cyan]"
+
+    def _sum_volume_in_window(self, trades: deque, start_ts: float, end_ts: float) -> float:
+        if not trades:
+            return 0.0
+        return float(sum(float(t.size) for t in trades if start_ts <= float(t.timestamp) < end_ts))
+
+    def _get_favorite_volume_speed_check(
+        self,
+        fav_name: str,
+        up: TokenData,
+        down: TokenData,
+        window_sec: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Compare volume acceleration between favored and opposite side."""
+        vac_cfg = getattr(self.config.strategy, "volume_acceleration_check", None)
+        enabled = bool(getattr(vac_cfg, "enabled", True))
+        if window_sec is None:
+            window_sec = float(getattr(vac_cfg, "window_sec", 10.0) or 10.0)
+        require_curr_lead = bool(getattr(vac_cfg, "require_current_volume_lead", True))
+        min_accel_diff = float(getattr(vac_cfg, "min_accel_diff", 0.0) or 0.0)
+        threshold = float(getattr(vac_cfg, "threshold", 5000.0) or 5000.0)
+        min_curr_diff = float(getattr(vac_cfg, "min_current_volume_diff", threshold) or threshold)
+
+        now = time.time()
+        curr_start = now - float(window_sec)
+        prev_start = now - (2.0 * float(window_sec))
+
+        fav_token = up if fav_name == "UP" else down
+        other_token = down if fav_name == "UP" else up
+
+        fav_curr = self._sum_volume_in_window(fav_token.trades, curr_start, now)
+        fav_prev = self._sum_volume_in_window(fav_token.trades, prev_start, curr_start)
+        other_curr = self._sum_volume_in_window(other_token.trades, curr_start, now)
+        other_prev = self._sum_volume_in_window(other_token.trades, prev_start, curr_start)
+
+        fav_accel = fav_curr - fav_prev
+        other_accel = other_curr - other_prev
+        has_data = (fav_curr + fav_prev + other_curr + other_prev) > 0.0
+
+        curr_lead_ok = (fav_curr - other_curr) >= min_curr_diff
+        accel_ok = (fav_accel - other_accel) >= min_accel_diff
+        if require_curr_lead:
+            rule_ok = curr_lead_ok and accel_ok
+        else:
+            rule_ok = accel_ok
+
+        ok = True if not enabled else bool(has_data and rule_ok)
+
+        return {
+            "window_sec": float(window_sec),
+            "enabled": enabled,
+            "fav_name": fav_name,
+            "fav_curr": fav_curr,
+            "fav_prev": fav_prev,
+            "other_curr": other_curr,
+            "other_prev": other_prev,
+            "fav_accel": fav_accel,
+            "other_accel": other_accel,
+            "has_data": has_data,
+            "require_current_volume_lead": require_curr_lead,
+            "min_accel_diff": min_accel_diff,
+            "threshold": threshold,
+            "min_current_volume_diff": min_curr_diff,
+            "ok": ok,
+        }
     
     def create_indicators_panel(self, token: TokenData, label: str) -> Panel:
         if not token or not token.trades:
@@ -2416,6 +2430,8 @@ class Dashboard:
         up_trend_ok = up_trend is None or up_trend >= 0
         down_trend_ok = down_trend is None or down_trend <= 0
         fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
+        vol_speed = self._get_favorite_volume_speed_check(fav_name, up, down)
+        vol_speed_ok = bool(vol_speed["ok"])
         
         signal = "⏳ WAIT"
         signal_color = "yellow"
@@ -2425,7 +2441,7 @@ class Dashboard:
         price_only_gate = late_window_price_only or last_20s_price_only
         
         if price_only_gate:
-            if price_ok and btc_buffer_ok:
+            if price_ok and btc_buffer_ok and vol_speed_ok:
                 if late_mode:
                     signal = (
                         f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s: "
@@ -2440,6 +2456,10 @@ class Dashboard:
                 label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
                 signal = f"⏳ WAIT ({label}: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
                 self.last_signal = ""
+            elif not vol_speed_ok:
+                label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
+                signal = f"⏳ WAIT ({label}: {fav_name} volume not accelerating faster)"
+                self.last_signal = ""
             else:
                 label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
                 signal = f"⏳ WAIT ({label}: P not in range)"
@@ -2448,7 +2468,7 @@ class Dashboard:
             signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
             signal_color = "red"
             self.last_signal = ""
-        elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok:
+        elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok and vol_speed_ok:
             signal = f"✅ BUY {fav_name}"
             signal_color = "bold green"
             self.last_signal = f"BUY_{fav_name}"
@@ -2457,6 +2477,8 @@ class Dashboard:
                 signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
             elif not mom_ok:
                 signal = "🟡 ALMOST (need Mom>0%)"
+            elif not vol_speed_ok:
+                signal = f"🟡 ALMOST (need {fav_name} volume accelerating faster)"
             elif not btc_buffer_ok:
                 if btc_buffer:
                     signal = f"🟡 ALMOST (need BTC buffer >= ${btc_buffer['buffer_abs_usd']:.2f})"
@@ -2480,6 +2502,8 @@ class Dashboard:
                     signal = f"⏳ WAIT (Dev<{min_dev}%)"
             elif not mom_ok:
                 signal = f"⏳ WAIT (Mom≤0%)"
+            elif not vol_speed_ok:
+                signal = f"⏳ WAIT ({fav_name} volume not accelerating faster)"
             elif not fav_trend_ok:
                 signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
             elif not btc_buffer_ok and btc_buffer:
@@ -2492,6 +2516,8 @@ class Dashboard:
             f"Price:       {self._fmt_price(fav_price)} (range: {min_price}-{max_price})",
             f"Deviation:   {self._fmt_dev(fav_dev)} (need {min_dev}%–{max_dev}%)",
             f"Momentum:    {self._fmt_momentum(fav_mom)}",
+            f"Vol Speed:   {'OFF' if not vol_speed.get('enabled', True) else ('OK' if vol_speed_ok else 'WAIT')} "
+            f"({fav_name} dV{int(vol_speed['window_sec'])}={vol_speed['fav_accel']:+.0f}, other={vol_speed['other_accel']:+.0f})",
             f"Elapsed:     {int(elapsed_sec)}s (need ≥{min_elapsed}s)  [bin {time_bin}]",
             "",
             f"Up:          {self._fmt_price(up.last_price)} | Dev: {self._fmt_dev(up_dev)} | Mom: {self._fmt_momentum(up_mom)}",
@@ -2792,13 +2818,15 @@ class Dashboard:
             up_trend_ok = up_trend is None or up_trend >= 0
             down_trend_ok = down_trend is None or down_trend <= 0
             fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
+            vol_speed = self._get_favorite_volume_speed_check(fav_name, up, down)
+            vol_speed_ok = bool(vol_speed["ok"])
 
             late_window_price_only = late_mode is not None
             last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
             price_only_gate = late_window_price_only or last_20s_price_only
 
             if price_only_gate:
-                if price_ok and btc_buffer_ok:
+                if price_ok and btc_buffer_ok and vol_speed_ok:
                     signal = (
                         f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s mode)"
                         if late_mode
@@ -2807,18 +2835,23 @@ class Dashboard:
                 elif not btc_buffer_ok and btc_buffer:
                     label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
                     signal = f"⏳ WAIT ({label}: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
+                elif not vol_speed_ok:
+                    label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
+                    signal = f"⏳ WAIT ({label}: {fav_name} volume not accelerating faster)"
                 else:
                     label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
                     signal = f"⏳ WAIT ({label}: P not in range)"
             elif not time_cutoff_ok:
                 signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
-            elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok:
+            elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok and vol_speed_ok:
                 signal = f"✅ BUY {fav_name}"
             elif fav_price >= 0.70 and time_ok:
                 if not fav_trend_ok:
                     signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
                 elif not mom_ok:
                     signal = "🟡 ALMOST (need Mom>0%)"
+                elif not vol_speed_ok:
+                    signal = f"🟡 ALMOST (need {fav_name} volume accelerating faster)"
                 elif not btc_buffer_ok and btc_buffer:
                     signal = f"🟡 ALMOST (need BTC buffer >= ${btc_buffer['buffer_abs_usd']:.2f})"
                 elif fav_dev >= max_dev:
@@ -2837,6 +2870,8 @@ class Dashboard:
                 )
             elif not mom_ok:
                 signal = "⏳ WAIT (Mom≤0%)"
+            elif not vol_speed_ok:
+                signal = f"⏳ WAIT ({fav_name} volume not accelerating faster)"
             elif not fav_trend_ok:
                 signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
             elif not btc_buffer_ok and btc_buffer:
@@ -2855,6 +2890,7 @@ class Dashboard:
                     "dev": dev_ok,
                     "mom": mom_ok,
                     "trend": fav_trend_ok,
+                    "vol_speed": vol_speed_ok,
                     "btc_buffer": btc_buffer_ok,
                     "time_cutoff": time_cutoff_ok,
                     "last_20s_price_only": price_only_gate,
@@ -2870,6 +2906,18 @@ class Dashboard:
                     "up_ok": up_trend_ok,
                     "down_ok": down_trend_ok,
                     "favorite_ok": fav_trend_ok,
+                },
+                "volume_speed": {
+                    "window_sec": vol_speed["window_sec"],
+                    "enabled": bool(vol_speed.get("enabled", True)),
+                    "favorite": fav_name,
+                    "fav_curr": round(float(vol_speed["fav_curr"]), 6),
+                    "fav_prev": round(float(vol_speed["fav_prev"]), 6),
+                    "other_curr": round(float(vol_speed["other_curr"]), 6),
+                    "other_prev": round(float(vol_speed["other_prev"]), 6),
+                    "fav_accel": round(float(vol_speed["fav_accel"]), 6),
+                    "other_accel": round(float(vol_speed["other_accel"]), 6),
+                    "ok": vol_speed_ok,
                 },
                 "up_line": f"{up.last_price:.3f} | Dev {up_dev:+.1f}% | Mom {up_mom if up_mom is not None else 0:.2f}% | Trend {up_trend if up_trend is not None else 0:+.4f}",
                 "down_line": f"{down.last_price:.3f} | Dev {down_dev:+.1f}% | Mom {down_mom if down_mom is not None else 0:.2f}% | Trend {down_trend if down_trend is not None else 0:+.4f}",
@@ -3350,57 +3398,35 @@ class LiveTradingBot:
                 wd.host = "0.0.0.0"
 
             self._web_snapshot_holder = WebSnapshotHolder()
-            requested_port = int(wd.port)
-            selected_port = requested_port
-            env_port_set = bool(env_port)
-
-            # If PORT is provided by a platform/router, do not hop ports.
-            # Locally, try a few fallback ports when the default is busy.
-            candidate_ports = [requested_port]
-            if not env_port_set:
-                candidate_ports.extend([requested_port + i for i in range(1, 6)])
-
-            ok = False
-            for port_candidate in candidate_ports:
-                ok = start_web_dashboard(
-                    wd.host,
-                    port_candidate,
-                    self._web_snapshot_holder,
-                    get_late_modes=self._web_get_late_modes,
-                    update_late_modes=self._web_update_late_modes,
-                    trigger_manual_buy=self._web_trigger_manual_buy,
-                )
-                if ok:
-                    selected_port = port_candidate
-                    wd.port = port_candidate
-                    break
-
+            ok = start_web_dashboard(
+                wd.host,
+                wd.port,
+                self._web_snapshot_holder,
+                get_late_modes=self._web_get_late_modes,
+                update_late_modes=self._web_update_late_modes,
+                trigger_manual_buy=self._web_trigger_manual_buy,
+            )
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
             railway_public = os.getenv("RAILWAY_PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
             if railway_public:
                 public_host = railway_public.replace("https://", "").replace("http://", "")
                 open_url = f"https://{public_host}/"
             elif wd.host in ("0.0.0.0", ""):
-                open_url = f"http://127.0.0.1:{selected_port}/"
+                open_url = f"http://127.0.0.1:{wd.port}/"
             elif wd.host in ("::", "[::]"):
-                open_url = f"http://[::1]:{selected_port}/"
+                open_url = f"http://[::1]:{wd.port}/"
             else:
-                open_url = f"http://{wd.host}:{selected_port}/"
+                open_url = f"http://{wd.host}:{wd.port}/"
             if ok:
-                if selected_port != requested_port:
-                    logger.warning(
-                        f"Web dashboard port {requested_port} busy; switched to {selected_port}"
-                    )
                 console.print(f"[green]✓ Web dashboard:[/green] [bold]{open_url}[/bold]")
                 console.print(
                     "[dim]  Use http:// not https://. On Windows, if the page fails in your browser, "
                     "open this exact URL (avoid typing only “localhost”, which may use IPv6).[/dim]"
                 )
             else:
-                attempted = ", ".join(str(p) for p in candidate_ports)
                 console.print(
-                    f"[yellow]⚠ Web dashboard did not start (attempted ports: {attempted}). "
-                    f"Port in use or bind failed. Check logs.[/yellow]"
+                    f"[yellow]⚠ Web dashboard did not start on port {wd.port} "
+                    f"(in use by another app, or bind failed). Check logs.[/yellow]"
                 )
         
         console.print("[green]✓ All components initialized[/green]\n")
@@ -3653,6 +3679,13 @@ class LiveTradingBot:
             (side == "BUY_UP" and token_trend >= 0) or
             (side == "BUY_DOWN" and token_trend <= 0)
         )
+        fav_name = "UP" if side == "BUY_UP" else "DOWN"
+        vol_speed = self.dashboard._get_favorite_volume_speed_check(
+            fav_name,
+            self.state.up_token,
+            self.state.down_token,
+        )
+        vol_speed_ok = bool(vol_speed["ok"])
 
         # Defensive time cutoff / buffer / trend gating applies only to auto entries.
         no_entry_cutoff = self.config.strategy.no_entry_before_end_sec
@@ -3685,6 +3718,15 @@ class LiveTradingBot:
                 signal_logger.info(
                     f"SIGNAL BLOCKED: {side} - not trending in desired direction "
                     f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
+                )
+                return
+
+            if not vol_speed_ok:
+                signal_logger.info(
+                    f"SIGNAL BLOCKED: {side} - volume speed check failed "
+                    f"({fav_name} dV{int(vol_speed['window_sec'])}={vol_speed['fav_accel']:+.2f}, "
+                    f"other dV{int(vol_speed['window_sec'])}={vol_speed['other_accel']:+.2f}; "
+                    f"curr={vol_speed['fav_curr']:.2f} vs {vol_speed['other_curr']:.2f})"
                 )
                 return
 
