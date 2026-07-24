@@ -298,10 +298,11 @@ _HTML = """<!DOCTYPE html>
           var sig = st.signal_text || "\u2014";
           function chk(x) { return x === true ? "\u2713" : x === false ? "\u2717" : "\u2014"; }
           var ck = st.checks || {};
+          var volumeCheck = (ck.volume !== undefined) ? ck.volume : ck.vol_speed;
           var strategyBits = [
             "Fav: " + esc(st.favorite) + " \u00b7 WR: " + esc(st.win_rate_str),
             "Checks: P=" + chk(ck.price) + " T=" + chk(ck.time) + " D=" + chk(ck.dev) +
-            " M=" + chk(ck.mom) + " V=" + chk((ck.volume !== undefined) ? ck.volume : ck.vol_speed) + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
+            " M=" + chk(ck.mom) + " Vol=" + chk(volumeCheck) + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
           ];
           var trend = st.trend || {};
           if (trend.window_sec != null) {
@@ -315,6 +316,7 @@ _HTML = """<!DOCTYPE html>
           }
           var vs = st.volume_speed || {};
           if (vs.window_sec != null) {
+            strategyBits.push("Volume check: " + chk(volumeCheck));
             strategyBits.push(
               "VolSpeed " + esc(vs.window_sec) + "s: " +
               esc(vs.favorite || "-") + " dV " +
