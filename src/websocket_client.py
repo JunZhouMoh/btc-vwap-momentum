@@ -190,16 +190,24 @@ class UserWebSocket:
         self.api_passphrase = api_passphrase
         self.on_order = on_order
         self.on_trade = on_trade
+        self._on_order = on_order
+        self._on_trade = on_trade
         self._ws = None
         self._state = ConnectionState.DISCONNECTED
         self._running = False
         self._reconnect_count = 0
         self._pending_orders: Dict[str, OrderUpdate] = {}
+        self._token_fills: Dict[str, List[Dict]] = {}
+        self._pending_token_fills: Dict[str, asyncio.Event] = {}
         self.messages_received = 0
     
     @property
     def is_connected(self) -> bool:
         return self._state == ConnectionState.CONNECTED
+
+    @property
+    def connected(self) -> bool:
+        return self.is_connected
     
     async def connect(self) -> bool:
         self._state = ConnectionState.CONNECTING
@@ -211,7 +219,7 @@ class UserWebSocket:
             msg = {
                 "type": "user",
                 "markets": [],
-                "auth": {"apikey": self.api_key, "secret": self.api_secret, "passphrase": self.api_passphrase}
+                "auth": {"apiKey": self.api_key, "secret": self.api_secret, "passphrase": self.api_passphrase}
             }
             await self._ws.send(json.dumps(msg))
             self._state = ConnectionState.CONNECTED
@@ -239,26 +247,42 @@ class UserWebSocket:
                     status=data.get("status", ""),
                 )
                 self._pending_orders[order.order_id] = order
-                if self.on_order:
-                    if asyncio.iscoroutinefunction(self.on_order):
-                        await self.on_order(order)
+                cb_order = self._on_order or self.on_order
+                if cb_order:
+                    if asyncio.iscoroutinefunction(cb_order):
+                        await cb_order(order)
                     else:
-                        self.on_order(order)
+                        cb_order(order)
             elif event_type == "trade" or msg_type == "TRADE":
+                asset_id = data.get("asset_id", "")
+                status = data.get("status", "")
                 trade = TradeUpdate(
                     trade_id=data.get("id", ""),
-                    asset_id=data.get("asset_id", ""),
+                    asset_id=asset_id,
                     price=float(data.get("price", 0)),
                     size=float(data.get("size", 0)),
                     side=data.get("side", ""),
-                    status=data.get("status", ""),
+                    status=status,
                     taker_order_id=data.get("taker_order_id", ""),
                 )
-                if self.on_trade:
-                    if asyncio.iscoroutinefunction(self.on_trade):
-                        await self.on_trade(trade)
+
+                if asset_id and str(status).upper() == "MATCHED":
+                    self._token_fills.setdefault(asset_id, []).append({
+                        "size": int(float(data.get("size", 0) or 0)),
+                        "price": float(data.get("price", 0) or 0.0),
+                        "order_id": data.get("taker_order_id", "") or data.get("maker_order_id", ""),
+                        "timestamp": time.time(),
+                    })
+                    evt = self._pending_token_fills.get(asset_id)
+                    if evt:
+                        evt.set()
+
+                cb_trade = self._on_trade or self.on_trade
+                if cb_trade:
+                    if asyncio.iscoroutinefunction(cb_trade):
+                        await cb_trade(data)
                     else:
-                        self.on_trade(trade)
+                        cb_trade(data)
         except Exception as e:
             logger.error(f"User msg error: {e}")
     
@@ -300,18 +324,60 @@ class UserWebSocket:
     
     async def close(self):
         self._running = False
+        self._state = ConnectionState.CLOSED
         if self._ws and not self._ws.closed:
             try:
                 await self._ws.close()
             except:
                 pass
         self._ws = None
+
+    async def disconnect(self):
+        await self.close()
     
     def stop(self):
         self._running = False
     
     def get_order(self, order_id: str) -> Optional[OrderUpdate]:
         return self._pending_orders.get(order_id)
+
+    @staticmethod
+    def _aggregate_fills(fills: List[Dict]) -> Dict:
+        total_contracts = sum(int(f.get("size", 0) or 0) for f in fills)
+        total_cost = sum(
+            int(f.get("size", 0) or 0) * float(f.get("price", 0) or 0.0)
+            for f in fills
+        )
+        avg_price = (total_cost / total_contracts) if total_contracts > 0 else 0.0
+        return {
+            "contracts": total_contracts,
+            "avg_price": avg_price,
+            "total_cost": total_cost,
+            "fills": fills,
+        }
+
+    async def wait_for_fills_on_token(self, token_id: str, timeout: float = 10.0) -> Optional[Dict]:
+        fills = self._token_fills.get(token_id, [])
+        if fills:
+            return self._aggregate_fills(fills)
+
+        evt = asyncio.Event()
+        self._pending_token_fills[token_id] = evt
+        try:
+            await asyncio.wait_for(evt.wait(), timeout=timeout)
+            fills = self._token_fills.get(token_id, [])
+            if not fills:
+                return None
+            await asyncio.sleep(1.0)
+            fills = self._token_fills.get(token_id, [])
+            return self._aggregate_fills(fills) if fills else None
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._pending_token_fills.pop(token_id, None)
+
+    def clear_token_fills(self):
+        self._token_fills.clear()
     
     async def wait_for_fill(self, order_id: str, timeout: float = 5.0) -> Optional[OrderUpdate]:
         start = time.time()
