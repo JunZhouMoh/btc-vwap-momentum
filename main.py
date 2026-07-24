@@ -2103,6 +2103,7 @@ class Dashboard:
                         "max_trades": float(mode_cfg.max_trades),
                         "buffer_avg_multiplier": float(mode_cfg.buffer_avg_multiplier),
                         "min_buffer_threshold_usd": float(getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer)),
+                        "volume_check_enabled": bool(getattr(mode_cfg, "volume_check_enabled", True)),
                         "min_price": float(mode_cfg.min_price),
                         "max_price": float(mode_cfg.max_price),
                         "name": f"mode_{int(window_sec)}s",
@@ -2437,6 +2438,8 @@ class Dashboard:
         fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
         vol_speed = self._get_favorite_volume_speed_check(fav_name, up, down)
         vol_speed_ok = bool(vol_speed["ok"])
+        vol_check_enabled = bool(late_mode.get("volume_check_enabled", True)) if late_mode else True
+        vol_gate_ok = vol_speed_ok if vol_check_enabled else True
         
         signal = "⏳ WAIT"
         signal_color = "yellow"
@@ -2446,7 +2449,7 @@ class Dashboard:
         price_only_gate = late_window_price_only or last_20s_price_only
         
         if price_only_gate:
-            if price_ok and btc_buffer_ok and vol_speed_ok:
+            if price_ok and btc_buffer_ok and vol_gate_ok:
                 if late_mode:
                     signal = (
                         f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s: "
@@ -2461,7 +2464,7 @@ class Dashboard:
                 label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
                 signal = f"⏳ WAIT ({label}: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
                 self.last_signal = ""
-            elif not vol_speed_ok:
+            elif vol_check_enabled and not vol_speed_ok:
                 label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
                 signal = f"⏳ WAIT ({label}: {fav_name} volume not accelerating faster)"
                 self.last_signal = ""
@@ -2473,7 +2476,7 @@ class Dashboard:
             signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
             signal_color = "red"
             self.last_signal = ""
-        elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok and vol_speed_ok:
+        elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok and vol_gate_ok:
             signal = f"✅ BUY {fav_name}"
             signal_color = "bold green"
             self.last_signal = f"BUY_{fav_name}"
@@ -2482,7 +2485,7 @@ class Dashboard:
                 signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
             elif not mom_ok:
                 signal = "🟡 ALMOST (need Mom>0%)"
-            elif not vol_speed_ok:
+            elif vol_check_enabled and not vol_speed_ok:
                 signal = f"🟡 ALMOST (need {fav_name} volume accelerating faster)"
             elif not btc_buffer_ok:
                 if btc_buffer:
@@ -2507,7 +2510,7 @@ class Dashboard:
                     signal = f"⏳ WAIT (Dev<{min_dev}%)"
             elif not mom_ok:
                 signal = f"⏳ WAIT (Mom≤0%)"
-            elif not vol_speed_ok:
+            elif vol_check_enabled and not vol_speed_ok:
                 signal = f"⏳ WAIT ({fav_name} volume not accelerating faster)"
             elif not fav_trend_ok:
                 signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
@@ -2521,7 +2524,7 @@ class Dashboard:
             f"Price:       {self._fmt_price(fav_price)} (range: {min_price}-{max_price})",
             f"Deviation:   {self._fmt_dev(fav_dev)} (need {min_dev}%–{max_dev}%)",
             f"Momentum:    {self._fmt_momentum(fav_mom)}",
-            f"Vol Speed:   {'OFF' if not vol_speed.get('enabled', True) else ('OK' if vol_speed_ok else 'WAIT')} "
+            f"Vol Speed:   {'OFF' if (not vol_speed.get('enabled', True) or not vol_check_enabled) else ('OK' if vol_speed_ok else 'WAIT')} "
             f"({fav_name} dV{int(vol_speed['window_sec'])}={vol_speed['fav_accel']:+.0f}, other={vol_speed['other_accel']:+.0f})",
             f"Elapsed:     {int(elapsed_sec)}s (need ≥{min_elapsed}s)  [bin {time_bin}]",
             "",
@@ -2539,7 +2542,8 @@ class Dashboard:
                 7,
                 f"Late mode:   last {int(late_mode['window_sec'])}s | "
                 f"minC={int(late_mode['min_contracts'])} | "
-                f"buffer x{late_mode['buffer_avg_multiplier']:.2f}",
+                f"buffer x{late_mode['buffer_avg_multiplier']:.2f} | "
+                f"vol {'ON' if vol_check_enabled else 'OFF'}",
             )
         elif last_20s_price_only:
             lines.insert(7, "Last 20s:   DANGEROUS BTC buffer = max($20.00, 50% of avg buffer)")
@@ -2825,13 +2829,15 @@ class Dashboard:
             fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
             vol_speed = self._get_favorite_volume_speed_check(fav_name, up, down)
             vol_speed_ok = bool(vol_speed["ok"])
+            vol_check_enabled = bool(late_mode.get("volume_check_enabled", True)) if late_mode else True
+            vol_gate_ok = vol_speed_ok if vol_check_enabled else True
 
             late_window_price_only = late_mode is not None
             last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
             price_only_gate = late_window_price_only or last_20s_price_only
 
             if price_only_gate:
-                if price_ok and btc_buffer_ok and vol_speed_ok:
+                if price_ok and btc_buffer_ok and vol_gate_ok:
                     signal = (
                         f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s mode)"
                         if late_mode
@@ -2840,7 +2846,7 @@ class Dashboard:
                 elif not btc_buffer_ok and btc_buffer:
                     label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
                     signal = f"⏳ WAIT ({label}: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
-                elif not vol_speed_ok:
+                elif vol_check_enabled and not vol_speed_ok:
                     label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
                     signal = f"⏳ WAIT ({label}: {fav_name} volume not accelerating faster)"
                 else:
@@ -2848,14 +2854,14 @@ class Dashboard:
                     signal = f"⏳ WAIT ({label}: P not in range)"
             elif not time_cutoff_ok:
                 signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
-            elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok and vol_speed_ok:
+            elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok and vol_gate_ok:
                 signal = f"✅ BUY {fav_name}"
             elif fav_price >= 0.70 and time_ok:
                 if not fav_trend_ok:
                     signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
                 elif not mom_ok:
                     signal = "🟡 ALMOST (need Mom>0%)"
-                elif not vol_speed_ok:
+                elif vol_check_enabled and not vol_speed_ok:
                     signal = f"🟡 ALMOST (need {fav_name} volume accelerating faster)"
                 elif not btc_buffer_ok and btc_buffer:
                     signal = f"🟡 ALMOST (need BTC buffer >= ${btc_buffer['buffer_abs_usd']:.2f})"
@@ -2875,7 +2881,7 @@ class Dashboard:
                 )
             elif not mom_ok:
                 signal = "⏳ WAIT (Mom≤0%)"
-            elif not vol_speed_ok:
+            elif vol_check_enabled and not vol_speed_ok:
                 signal = f"⏳ WAIT ({fav_name} volume not accelerating faster)"
             elif not fav_trend_ok:
                 signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
@@ -2894,9 +2900,10 @@ class Dashboard:
                     "time": time_ok,
                     "dev": dev_ok,
                     "mom": mom_ok,
-                    "volume": vol_speed_ok,
+                    "volume": vol_gate_ok,
+                    "volume_enabled": vol_check_enabled,
                     "trend": fav_trend_ok,
-                    "vol_speed": vol_speed_ok,
+                    "vol_speed": vol_gate_ok,
                     "btc_buffer": btc_buffer_ok,
                     "time_cutoff": time_cutoff_ok,
                     "last_20s_price_only": price_only_gate,
@@ -2915,7 +2922,8 @@ class Dashboard:
                 },
                 "volume_speed": {
                     "window_sec": vol_speed["window_sec"],
-                    "enabled": bool(vol_speed.get("enabled", True)),
+                    "enabled": bool(vol_speed.get("enabled", True)) and vol_check_enabled,
+                    "rule_enabled": vol_check_enabled,
                     "favorite": fav_name,
                     "fav_curr": round(float(vol_speed["fav_curr"]), 6),
                     "fav_prev": round(float(vol_speed["fav_prev"]), 6),
@@ -3100,6 +3108,7 @@ class LiveTradingBot:
                     "max_trades": int(getattr(m, "max_trades", 1)),
                     "buffer_avg_multiplier": float(getattr(m, "buffer_avg_multiplier", 1.0)),
                     "min_buffer_threshold_usd": float(getattr(m, "min_buffer_threshold_usd", self.config.buffer)),
+                    "volume_check_enabled": bool(getattr(m, "volume_check_enabled", True)),
                     "min_price": float(getattr(m, "min_price", 0.0)),
                     "max_price": float(getattr(m, "max_price", 1.0)),
                 })
@@ -3141,6 +3150,7 @@ class LiveTradingBot:
                         mode_cfg.max_trades = max(1, int(row.get("max_trades", mode_cfg.max_trades)))
                         mode_cfg.buffer_avg_multiplier = max(0.0, float(row.get("buffer_avg_multiplier", mode_cfg.buffer_avg_multiplier)))
                         mode_cfg.min_buffer_threshold_usd = max(0.0, float(row.get("min_buffer_threshold_usd", getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer))))
+                        mode_cfg.volume_check_enabled = bool(row.get("volume_check_enabled", getattr(mode_cfg, "volume_check_enabled", True)))
                         mode_cfg.min_price = float(row.get("min_price", mode_cfg.min_price))
                         mode_cfg.max_price = float(row.get("max_price", mode_cfg.max_price))
                     except (TypeError, ValueError):
@@ -3692,6 +3702,8 @@ class LiveTradingBot:
             self.state.down_token,
         )
         vol_speed_ok = bool(vol_speed["ok"])
+        vol_check_enabled = bool(late_mode.get("volume_check_enabled", True)) if late_mode else True
+        vol_gate_ok = vol_speed_ok if vol_check_enabled else True
 
         # Defensive time cutoff / buffer / trend gating applies only to auto entries.
         no_entry_cutoff = self.config.strategy.no_entry_before_end_sec
@@ -3727,7 +3739,7 @@ class LiveTradingBot:
                 )
                 return
 
-            if not vol_speed_ok:
+            if vol_check_enabled and not vol_speed_ok:
                 signal_logger.info(
                     f"SIGNAL BLOCKED: {side} - volume speed check failed "
                     f"({fav_name} dV{int(vol_speed['window_sec'])}={vol_speed['fav_accel']:+.2f}, "
