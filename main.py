@@ -76,7 +76,12 @@ from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
 from src.telegram_notifier import TelegramNotifier
-from src.user_websocket import UserWebSocket
+try:
+    # Current layout: UserWebSocket lives in websocket_client.
+    from src.websocket_client import UserWebSocket
+except ImportError:
+    # Backward compatibility with older layouts.
+    from src.user_websocket import UserWebSocket
 from src.simulation_history import SimulationHistoryLogger
 from src.btc_volume_feed import BTCVolumeFeed
 
