@@ -65,8 +65,6 @@ _HTML = """<!DOCTYPE html>
   <div class="grid">
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
-    <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
-    <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
     <div class="card controls"><h2>Volume Accel Check</h2><div id="volumeAccelCheck" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalMode" class="mono">Loading…</div></div>
@@ -165,6 +163,9 @@ _HTML = """<!DOCTYPE html>
       var levels = (cfg.entry_min_current_volume_diffs && cfg.entry_min_current_volume_diffs.length)
         ? cfg.entry_min_current_volume_diffs
         : [1000, 2000, 3000];
+      var entryTradeLimits = (cfg.entry_trade_limits && cfg.entry_trade_limits.length)
+        ? cfg.entry_trade_limits
+        : [1, 1, 1];
       html.push('<div class="mode-box">');
       html.push('<div class="mode-title">volume_eval_mode</div>');
       html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="vem_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
@@ -175,8 +176,11 @@ _HTML = """<!DOCTYPE html>
       html.push('<div class="row"><label>Min Buffer $</label><input type="number" id="vem_min_buffer_threshold_usd" step="0.1" value="' + esc(cfg.min_buffer_threshold_usd) + '"/></div>');
       html.push('<div class="row"><label>Volume Check</label><input type="checkbox" id="vem_volume_check_enabled" ' + (cfg.volume_check_enabled !== false ? 'checked' : '') + '/></div>');
       html.push('<div class="row"><label>Entry 1 MinVol</label><input type="number" id="vem_mcvd_1" step="1" value="' + esc(levels[0] != null ? levels[0] : 1000) + '"/></div>');
+      html.push('<div class="row"><label>Entry 1 Trades</label><input type="number" id="vem_entry_trades_1" step="1" value="' + esc(entryTradeLimits[0] != null ? entryTradeLimits[0] : 1) + '"/></div>');
       html.push('<div class="row"><label>Entry 2 MinVol</label><input type="number" id="vem_mcvd_2" step="1" value="' + esc(levels[1] != null ? levels[1] : levels[0]) + '"/></div>');
+      html.push('<div class="row"><label>Entry 2 Trades</label><input type="number" id="vem_entry_trades_2" step="1" value="' + esc(entryTradeLimits[1] != null ? entryTradeLimits[1] : entryTradeLimits[0]) + '"/></div>');
       html.push('<div class="row"><label>Entry 3 MinVol</label><input type="number" id="vem_mcvd_3" step="1" value="' + esc(levels[2] != null ? levels[2] : levels[1]) + '"/></div>');
+      html.push('<div class="row"><label>Entry 3 Trades</label><input type="number" id="vem_entry_trades_3" step="1" value="' + esc(entryTradeLimits[2] != null ? entryTradeLimits[2] : entryTradeLimits[1]) + '"/></div>');
       html.push('<div class="row"><label>Min Price</label><input type="number" id="vem_min_price" step="0.001" value="' + esc(cfg.min_price) + '"/></div>');
       html.push('<div class="row"><label>Max Price</label><input type="number" id="vem_max_price" step="0.001" value="' + esc(cfg.max_price) + '"/></div>');
       html.push('</div>');
@@ -288,6 +292,11 @@ _HTML = """<!DOCTYPE html>
           readNum('vem_mcvd_1', 1000),
           readNum('vem_mcvd_2', 2000),
           readNum('vem_mcvd_3', 3000)
+        ],
+        entry_trade_limits: [
+          readInt('vem_entry_trades_1', 1),
+          readInt('vem_entry_trades_2', 1),
+          readInt('vem_entry_trades_3', 1)
         ],
         min_price: readNum('vem_min_price', 0.0),
         max_price: readNum('vem_max_price', 1.0)
@@ -506,25 +515,6 @@ _HTML = """<!DOCTYPE html>
             '<div class="mono" style="margin-top:0.4rem">' +
             strategyBits.join("<br/>") +
             "</div>";
-          function book(x, id) {
-            var el = document.getElementById(id);
-            if (!x) { el.textContent = "No data"; return; }
-            var bk = x.book || {};
-            var ind = x.indicators || {};
-            el.innerHTML = [
-              "Last " + esc(bk.last_price),
-              "Bid " + esc(bk.best_bid) + " / Ask " + esc(bk.best_ask),
-              "PM VWAP " + numFmt(ind.pm_vwap, 4) +
-                " \u00b7 BTC VWAP " + (ind.btc_vwap_weighted != null ? numFmt(ind.btc_vwap_weighted, 4) : "\u2014"),
-              "Dev " + (ind.deviation_pct != null ? numFmt(ind.deviation_pct, 2) + "%" : "\u2014") +
-                " \u00b7 BTC Vol Bias " + (ind.btc_vol_ratio != null ? numFmt(ind.btc_vol_ratio, 1) + "%" : "\u2014"),
-              "Z " + numFmt(ind.zscore, 2) +
-                " \u00b7 Mom " + (ind.momentum_pct != null ? numFmt(ind.momentum_pct, 2) + "%" : "\u2014"),
-              "Vol " + (bk.volume_total != null ? esc(Math.round(bk.volume_total)) : "\u2014"),
-            ].join("<br/>");
-          }
-          book(d.up, "up");
-          book(d.down, "down");
           var b = d.btc || {};
           var btcEl = document.getElementById("btc");
           if ((b.btc_connected && b.btc_current_price > 0) || (b.binance_connected && b.binance_current_price > 0)) {
