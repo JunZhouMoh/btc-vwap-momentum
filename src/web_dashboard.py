@@ -68,6 +68,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
     <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
+    <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalMode" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
   </div>
@@ -150,6 +151,85 @@ _HTML = """<!DOCTYPE html>
       html.push('</div>');
       html.push('<div id="lateStatus" class="status"></div>');
       box.innerHTML = html.join('');
+    }
+
+    function renderVolumeEvalMode(cfg) {
+      var box = document.getElementById('volumeEvalMode');
+      if (!box) return;
+      if (!cfg) {
+        box.textContent = 'Volume eval mode config unavailable';
+        return;
+      }
+
+      var html = [];
+      html.push('<div class="mode-box">');
+      html.push('<div class="mode-title">volume_eval_mode</div>');
+      html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="vem_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
+      html.push('<div class="row"><label>Time Left</label><input type="number" id="vem_time_left_sec" step="1" value="' + esc(cfg.time_left_sec) + '"/></div>');
+      html.push('<div class="row"><label>Min Contracts</label><input type="number" id="vem_min_contracts" step="1" value="' + esc(cfg.min_contracts) + '"/></div>');
+      html.push('<div class="row"><label>Max Trades</label><input type="number" id="vem_max_trades" step="1" value="' + esc(cfg.max_trades) + '"/></div>');
+      html.push('<div class="row"><label>Buffer Mult</label><input type="number" id="vem_buffer_avg_multiplier" step="0.01" value="' + esc(cfg.buffer_avg_multiplier) + '"/></div>');
+      html.push('<div class="row"><label>Min Buffer $</label><input type="number" id="vem_min_buffer_threshold_usd" step="0.1" value="' + esc(cfg.min_buffer_threshold_usd) + '"/></div>');
+      html.push('<div class="row"><label>Volume Check</label><input type="checkbox" id="vem_volume_check_enabled" ' + (cfg.volume_check_enabled !== false ? 'checked' : '') + '/></div>');
+      html.push('<div class="row"><label>Min Price</label><input type="number" id="vem_min_price" step="0.001" value="' + esc(cfg.min_price) + '"/></div>');
+      html.push('<div class="row"><label>Max Price</label><input type="number" id="vem_max_price" step="0.001" value="' + esc(cfg.max_price) + '"/></div>');
+      html.push('</div>');
+      html.push('<div style="margin-top:0.5rem" class="row">');
+      html.push('<button class="btn" onclick="saveVolumeEvalMode()">Apply</button>');
+      html.push('<button class="btn secondary" onclick="loadVolumeEvalMode()">Reload</button>');
+      html.push('</div>');
+      html.push('<div id="vemStatus" class="status"></div>');
+      box.innerHTML = html.join('');
+    }
+
+    function loadVolumeEvalMode() {
+      var r = new XMLHttpRequest();
+      r.open('GET', '/api/volume-eval-mode', true);
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status !== 200) {
+          var box = document.getElementById('volumeEvalMode');
+          if (box) box.textContent = 'Could not load volume eval mode (HTTP ' + r.status + ')';
+          return;
+        }
+        try {
+          var cfg = JSON.parse(r.responseText);
+          renderVolumeEvalMode(cfg);
+        } catch (e) {
+          var box2 = document.getElementById('volumeEvalMode');
+          if (box2) box2.textContent = 'Volume eval mode parse error';
+        }
+      };
+      r.send();
+    }
+
+    function saveVolumeEvalMode() {
+      var status = document.getElementById('vemStatus');
+      var payload = {
+        enabled: !!(document.getElementById('vem_enabled') && document.getElementById('vem_enabled').checked),
+        time_left_sec: readInt('vem_time_left_sec', 0),
+        min_contracts: readInt('vem_min_contracts', 1),
+        max_trades: readInt('vem_max_trades', 1),
+        buffer_avg_multiplier: readNum('vem_buffer_avg_multiplier', 1.0),
+        min_buffer_threshold_usd: readNum('vem_min_buffer_threshold_usd', 0.0),
+        volume_check_enabled: !!(document.getElementById('vem_volume_check_enabled') && document.getElementById('vem_volume_check_enabled').checked),
+        min_price: readNum('vem_min_price', 0.0),
+        max_price: readNum('vem_max_price', 1.0)
+      };
+
+      var r = new XMLHttpRequest();
+      r.open('POST', '/api/volume-eval-mode', true);
+      r.setRequestHeader('Content-Type', 'application/json');
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status === 200) {
+          if (status) status.textContent = 'Applied';
+          loadVolumeEvalMode();
+        } else {
+          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
+        }
+      };
+      r.send(JSON.stringify(payload));
     }
 
     function loadLateModes() {
@@ -496,6 +576,7 @@ _HTML = """<!DOCTYPE html>
       };
       r.send();
     }
+    loadVolumeEvalMode();
     loadLateModes();
     tick();
     setInterval(tick, 1000);
@@ -548,6 +629,8 @@ def build_app(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> FastAPI:
     app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
@@ -576,6 +659,20 @@ def build_app(
         return JSONResponse({"error": "Late mode controls unavailable"}, status_code=501)
       payload = await req.json()
       updated = update_late_modes(payload if isinstance(payload, dict) else {})
+      return JSONResponse(_sanitize_for_json(updated))
+
+    @app.get("/api/volume-eval-mode")
+    async def api_volume_eval_mode_get():
+      if not get_volume_eval_mode:
+        return JSONResponse({"error": "Volume eval mode controls unavailable"}, status_code=501)
+      return JSONResponse(_sanitize_for_json(get_volume_eval_mode()))
+
+    @app.post("/api/volume-eval-mode")
+    async def api_volume_eval_mode_post(req: Request):
+      if not update_volume_eval_mode:
+        return JSONResponse({"error": "Volume eval mode controls unavailable"}, status_code=501)
+      payload = await req.json()
+      updated = update_volume_eval_mode(payload if isinstance(payload, dict) else {})
       return JSONResponse(_sanitize_for_json(updated))
 
     @app.post("/api/manual-buy")
@@ -614,6 +711,8 @@ def start_web_dashboard(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> bool:
     """
@@ -624,6 +723,8 @@ def start_web_dashboard(
         holder,
         get_late_modes=get_late_modes,
         update_late_modes=update_late_modes,
+        get_volume_eval_mode=get_volume_eval_mode,
+        update_volume_eval_mode=update_volume_eval_mode,
         trigger_manual_buy=trigger_manual_buy,
     )
 
