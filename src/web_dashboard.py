@@ -428,12 +428,40 @@ _HTML = """<!DOCTYPE html>
       input.focus();
     }
 
+    var pollTimer = null;
+    var pollInFlight = false;
+    var lastPanelReloadMs = 0;
+
+    function scheduleTick(delayMs) {
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+      var d = (typeof delayMs === 'number' && delayMs >= 0) ? delayMs : 0;
+      pollTimer = setTimeout(function() {
+        pollTimer = null;
+        tick();
+      }, d);
+    }
+
+    function maybeReloadControlPanels(force) {
+      var nowMs = Date.now();
+      if (!force && (nowMs - lastPanelReloadMs) < 15000) return;
+      lastPanelReloadMs = nowMs;
+      loadVolumeAccelCheck();
+      loadVolumeEvalMode();
+      loadLateModes();
+    }
+
     function tick() {
+      if (pollInFlight) return;
+      pollInFlight = true;
       var errEl = document.getElementById("err");
       var r = new XMLHttpRequest();
       r.open("GET", "/api/state", true);
       r.onreadystatechange = function () {
         if (r.readyState !== 4) return;
+        pollInFlight = false;
         try {
           if (r.status !== 200) throw new Error("HTTP " + r.status);
           var d = JSON.parse(r.responseText);
@@ -635,17 +663,30 @@ _HTML = """<!DOCTYPE html>
         } catch (e) {
           errEl.textContent = "Poll error: " + (e && e.message ? e.message : e);
         }
-      };
-      r.onerror = function () {
-        errEl.textContent = "Network error (is the bot running?)";
+        scheduleTick(document.hidden ? 5000 : 1000);
       };
       r.send();
     }
-    loadVolumeAccelCheck();
-    loadVolumeEvalMode();
-    loadLateModes();
-    tick();
-    setInterval(tick, 1000);
+
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) {
+        maybeReloadControlPanels(false);
+        scheduleTick(0);
+      }
+    });
+
+    window.addEventListener("pageshow", function () {
+      maybeReloadControlPanels(true);
+      scheduleTick(0);
+    });
+
+    window.addEventListener("focus", function () {
+      maybeReloadControlPanels(false);
+      scheduleTick(0);
+    });
+
+    maybeReloadControlPanels(true);
+    scheduleTick(0);
   </script>
 </body>
 </html>
