@@ -81,6 +81,7 @@ class VolumeEvalModeConfig:
     min_buffer_threshold_usd: float = 30.0
     volume_check_enabled: bool = True
     entry_min_current_volume_diffs: list[float] = field(default_factory=lambda: [1000.0, 2000.0, 3000.0])
+    entry_trade_limits: list[int] = field(default_factory=lambda: [1, 1, 1])
     min_price: float = 0.84
     max_price: float = 0.96
 
@@ -319,6 +320,16 @@ def load_config(config_path: Optional[str] = None) -> Config:
     if not entry_min_current_volume_diffs:
         entry_min_current_volume_diffs = [1000.0, 2000.0, 3000.0]
 
+    raw_entry_limits = volume_eval_data.get("entry_trade_limits", [1, 1, 1])
+    entry_trade_limits: list[int] = []
+    if isinstance(raw_entry_limits, list):
+        for raw in raw_entry_limits:
+            val = _to_int(raw, 0)
+            if val > 0:
+                entry_trade_limits.append(val)
+    if not entry_trade_limits:
+        entry_trade_limits = [1, 1, 1]
+
     volume_eval_mode = VolumeEvalModeConfig(
         enabled=bool(volume_eval_data.get("enabled", False)),
         time_left_sec=_to_int(volume_eval_data.get("time_left_sec", 50), 50),
@@ -328,6 +339,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         min_buffer_threshold_usd=_to_float(volume_eval_data.get("min_buffer_threshold_usd", 30.0), 30.0),
         volume_check_enabled=bool(volume_eval_data.get("volume_check_enabled", True)),
         entry_min_current_volume_diffs=entry_min_current_volume_diffs,
+        entry_trade_limits=entry_trade_limits,
         min_price=_to_float(volume_eval_data.get("min_price", 0.84), 0.84),
         max_price=_to_float(volume_eval_data.get("max_price", 0.96), 0.96),
     )
