@@ -1,548 +1,653 @@
-#!/usr/bin/env python3
 """
-Configuration Loader
-
-Loads settings from config.json and .env file.
+Local web dashboard: FastAPI + single-page UI, JSON at /api/state.
+Runs in a daemon thread; state is updated from the bot's main loop.
 """
 
-import os
-import json
-import re
-from pathlib import Path
-from typing import Dict, Any, Optional
-from dataclasses import dataclass, field
-from dotenv import load_dotenv
+from __future__ import annotations
 
-# Load .env from project root
-PROJECT_ROOT = Path(__file__).parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
+import logging
+import math
+import socket
+import threading
+import time
+from typing import Any, Callable, Dict, Optional
+
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+import uvicorn
+
+logger = logging.getLogger("btc_live")
+
+_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>BTC Live Bot</title>
+  <style>
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --green: #3fb950; --red: #f85149;
+      --yellow: #d29922; --blue: #58a6ff; --violet: #a371f7;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text);
+      margin: 0; padding: 1rem; line-height: 1.45; }
+    h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 0.75rem; }
+    .meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 1rem; }
+    .grid { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.85rem; }
+    .card h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
+      margin: 0 0 0.5rem; }
+    .controls .row { margin-bottom: 0.35rem; align-items: center; }
+    .controls label { min-width: 105px; color: var(--muted); font-size: 0.8rem; }
+    .controls input[type="number"] { width: 86px; background: #0d1117; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 0.25rem 0.35rem; }
+    .controls input[type="checkbox"] { transform: scale(1.05); }
+    .mode-grid { display: grid; gap: 0.55rem; }
+    .mode-box { border: 1px solid var(--border); border-radius: 8px; padding: 0.55rem; }
+    .mode-title { color: var(--blue); font-size: 0.8rem; margin-bottom: 0.35rem; }
+    .btn { background: #1f6feb; color: #fff; border: 0; border-radius: 7px; padding: 0.35rem 0.6rem; cursor: pointer; font-size: 0.8rem; }
+    .btn.secondary { background: #30363d; }
+    .status { color: var(--muted); font-size: 0.78rem; }
+    .row { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.9rem; }
+    .sig { font-size: 1rem; font-weight: 600; }
+    .sig.wait { color: var(--yellow); }
+    .sig.buy { color: var(--green); }
+    .sig.block { color: var(--red); }
+    .mono { font-family: ui-monospace, monospace; font-size: 0.82rem; }
+    .btc { border-color: #d29922; }
+    footer { margin-top: 1rem; color: var(--muted); font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <h1>BTC up/down — live</h1>
+  <div class="meta" id="meta">Loading…</div>
+  <div class="grid">
+    <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
+    <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
+    <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
+    <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
+    <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
+    <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
+    <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
+  </div>
+  <footer>Refreshes every second · <span id="err"></span></footer>
+  <script>
+    /* No optional chaining (?.) — must run in older browsers / Edge legacy. */
+    function esc(s) {
+      if (s === null || s === undefined) return "";
+      var el = document.createElement("div");
+      el.textContent = String(s);
+      return el.innerHTML;
+    }
+    function sigClass(t) {
+      if (!t) return "wait";
+      if (t.indexOf("BUY") >= 0) return "buy";
+      /* Do not use \\uD83D\\uDEAB here: Python treats \\u.... in the template as escapes and emits invalid UTF-8 surrogates. */
+      if (t.indexOf("NO ENTRY") >= 0) return "block";
+      return "wait";
+    }
+    function numFmt(n, dec) {
+      if (n === null || n === undefined || typeof n !== "number" || isNaN(n)) return "\u2014";
+      return n.toFixed(dec);
+    }
+    function numFmtSigned(n, dec) {
+      if (n === null || n === undefined || typeof n !== "number" || isNaN(n)) return "\u2014";
+      var fixed = n.toFixed(dec);
+      if (n > 0) return "+" + fixed;
+      return fixed;
+    }
+    function readNum(id, fallback) {
+      var el = document.getElementById(id);
+      if (!el) return fallback;
+      var v = parseFloat(el.value);
+      return isNaN(v) ? fallback : v;
+    }
+    function readInt(id, fallback) {
+      var el = document.getElementById(id);
+      if (!el) return fallback;
+      var v = parseInt(el.value, 10);
+      return isNaN(v) ? fallback : v;
+    }
+
+    function buildModeEditor(mode) {
+      var k = mode.key;
+      var h = [];
+      h.push('<div class="mode-box">');
+      h.push('<div class="mode-title">' + esc(k) + '</div>');
+      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="' + esc(k) + '_enabled" ' + (mode.enabled ? 'checked' : '') + '/></div>');
+      h.push('<div class="row"><label>Time Left</label><input type="number" id="' + esc(k) + '_time_left_sec" step="1" value="' + esc(mode.time_left_sec) + '"/></div>');
+      h.push('<div class="row"><label>Min Contracts</label><input type="number" id="' + esc(k) + '_min_contracts" step="1" value="' + esc(mode.min_contracts) + '"/></div>');
+      h.push('<div class="row"><label>Max Trades</label><input type="number" id="' + esc(k) + '_max_trades" step="1" value="' + esc(mode.max_trades) + '"/></div>');
+      h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="' + esc(k) + '_buffer_avg_multiplier" step="0.01" value="' + esc(mode.buffer_avg_multiplier) + '"/></div>');
+      h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="' + esc(k) + '_min_buffer_threshold_usd" step="0.1" value="' + esc(mode.min_buffer_threshold_usd) + '"/></div>');
+      h.push('<div class="row"><label>Volume Check</label><input type="checkbox" id="' + esc(k) + '_volume_check_enabled" ' + (mode.volume_check_enabled !== false ? 'checked' : '') + '/></div>');
+      h.push('<div class="row"><label>Min Price</label><input type="number" id="' + esc(k) + '_min_price" step="0.001" value="' + esc(mode.min_price) + '"/></div>');
+      h.push('<div class="row"><label>Max Price</label><input type="number" id="' + esc(k) + '_max_price" step="0.001" value="' + esc(mode.max_price) + '"/></div>');
+      h.push('</div>');
+      return h.join('');
+    }
+
+    function renderLateModes(cfg) {
+      var box = document.getElementById('lateModes');
+      if (!box) return;
+      if (!cfg || !cfg.modes) {
+        box.textContent = 'Late mode config unavailable';
+        return;
+      }
+
+      var html = [];
+      html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="late_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
+      html.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="' + esc(cfg.total_max_trades) + '"/></div>');
+      html.push('<div class="mode-grid">');
+      for (var i = 0; i < cfg.modes.length; i++) {
+        html.push(buildModeEditor(cfg.modes[i]));
+      }
+      html.push('</div>');
+      html.push('<div style="margin-top:0.5rem" class="row">');
+      html.push('<button class="btn" onclick="saveLateModes()">Apply</button>');
+      html.push('<button class="btn secondary" onclick="loadLateModes()">Reload</button>');
+      html.push('</div>');
+      html.push('<div id="lateStatus" class="status"></div>');
+      box.innerHTML = html.join('');
+    }
+
+    function loadLateModes() {
+      var r = new XMLHttpRequest();
+      r.open('GET', '/api/late-modes', true);
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status !== 200) {
+          var box = document.getElementById('lateModes');
+          if (box) box.textContent = 'Could not load late mode config (HTTP ' + r.status + ')';
+          return;
+        }
+        try {
+          var cfg = JSON.parse(r.responseText);
+          renderLateModes(cfg);
+        } catch (e) {
+          var box2 = document.getElementById('lateModes');
+          if (box2) box2.textContent = 'Late mode parse error';
+        }
+      };
+      r.send();
+    }
+
+    function saveLateModes() {
+      var status = document.getElementById('lateStatus');
+      var keys = ['mode_60s', 'mode_40s', 'mode_30s', 'mode_20s'];
+      var modes = [];
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        modes.push({
+          key: k,
+          enabled: !!(document.getElementById(k + '_enabled') && document.getElementById(k + '_enabled').checked),
+          time_left_sec: readInt(k + '_time_left_sec', 0),
+          min_contracts: readInt(k + '_min_contracts', 1),
+          max_trades: readInt(k + '_max_trades', 1),
+          buffer_avg_multiplier: readNum(k + '_buffer_avg_multiplier', 1.0),
+          min_buffer_threshold_usd: readNum(k + '_min_buffer_threshold_usd', 0.0),
+          volume_check_enabled: !!(document.getElementById(k + '_volume_check_enabled') && document.getElementById(k + '_volume_check_enabled').checked),
+          min_price: readNum(k + '_min_price', 0.0),
+          max_price: readNum(k + '_max_price', 1.0)
+        });
+      }
+
+      var payload = {
+        enabled: !!(document.getElementById('late_enabled') && document.getElementById('late_enabled').checked),
+        total_max_trades: readInt('late_total_max_trades', 1),
+        modes: modes
+      };
+
+      var r = new XMLHttpRequest();
+      r.open('POST', '/api/late-modes', true);
+      r.setRequestHeader('Content-Type', 'application/json');
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status === 200) {
+          if (status) status.textContent = 'Applied';
+          loadLateModes();
+        } else {
+          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
+        }
+      };
+      r.send(JSON.stringify(payload));
+    }
+
+    function manualBuyWithDirection(direction) {
+      var status = document.getElementById('buyStatus');
+      var amount = readNum('buyAmount', 0);
+      if (!(amount > 0)) {
+        if (status) status.textContent = 'Amount must be > 0';
+        return;
+      }
+      if (status) status.textContent = 'Submitting...';
+
+      var r = new XMLHttpRequest();
+      r.open('POST', '/api/manual-buy', true);
+      r.setRequestHeader('Content-Type', 'application/json');
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        var txt = '';
+        if (r.status === 200) {
+          try {
+            var out = JSON.parse(r.responseText);
+            txt = out.message || (out.signal ? ('Queued ' + out.signal) : 'Queued');
+          } catch (e) {
+            txt = 'Queued';
+          }
+        } else {
+          try {
+            var err = JSON.parse(r.responseText);
+            txt = (err && err.error) ? err.error : ('Request failed (HTTP ' + r.status + ')');
+          } catch (e2) {
+            txt = 'Request failed (HTTP ' + r.status + ')';
+          }
+        }
+        if (status) status.textContent = txt;
+      };
+      r.send(JSON.stringify({ amount_usd: amount, direction: direction }));
+    }
+
+    function manualBuyUp() {
+      manualBuyWithDirection('UP');
+    }
+
+    function manualBuyDown() {
+      manualBuyWithDirection('DOWN');
+    }
+
+    function setManualAmount(amount) {
+      var input = document.getElementById('buyAmount');
+      if (!input) return;
+      input.value = String(amount);
+      input.focus();
+    }
+
+    function tick() {
+      var errEl = document.getElementById("err");
+      var r = new XMLHttpRequest();
+      r.open("GET", "/api/state", true);
+      r.onreadystatechange = function () {
+        if (r.readyState !== 4) return;
+        try {
+          if (r.status !== 200) throw new Error("HTTP " + r.status);
+          var d = JSON.parse(r.responseText);
+          errEl.textContent = "";
+          var hdr = d.header || {};
+          var slug = hdr.slug != null ? String(hdr.slug) : "\u2014";
+          var ts = "";
+          if (d.ts) ts = new Date(d.ts * 1000).toISOString();
+          document.getElementById("meta").innerHTML = esc(slug) + " \u00b7 " + esc(ts);
+          var existingAmountEl = document.getElementById("buyAmount");
+          var buyAmountVal = existingAmountEl ? existingAmountEl.value : "";
+          var existingBuyStatusEl = document.getElementById("buyStatus");
+          var buyStatusVal = existingBuyStatusEl ? existingBuyStatusEl.textContent : "";
+          var liveStatusVal = d.manual_buy_live_status ? String(d.manual_buy_live_status) : "idle";
+          var defaultBuyAmount = (d.trading && typeof d.trading.bet_usd === "number" && !isNaN(d.trading.bet_usd))
+            ? d.trading.bet_usd
+            : 1;
+          if (!buyAmountVal) buyAmountVal = String(defaultBuyAmount);
+
+          document.getElementById("session").innerHTML = [
+            "Timer: " + (hdr.time_left_sec != null ? esc(Math.floor(hdr.time_left_sec) + "s left") : "\u2014"),
+            "WS: " + (hdr.ws_connected ? "live" : "disconnected"),
+            "Mode: " + (hdr.simulation ? "simulation" : "real"),
+            'Live: ' + esc(liveStatusVal),
+            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="' + esc(buyAmountVal) + '" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setManualAmount(29)">$29</button> <button class="btn secondary" onclick="setManualAmount(39)">$39</button> <button class="btn secondary" onclick="setManualAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">Buy UP</button> <button class="btn" onclick="manualBuyDown()">Buy DOWN</button> <span id="buyStatus" class="status">' + esc(buyStatusVal) + '</span></span>'
+          ].join("<br/>");
+          var st = d.strategy || {};
+          var sig = st.signal_text || "\u2014";
+          function chk(x) { return x === true ? "\u2713" : x === false ? "\u2717" : "\u2014"; }
+          var ck = st.checks || {};
+          var volumeEnabled = (ck.volume_enabled !== undefined) ? !!ck.volume_enabled : true;
+          var volumeCheck = (ck.volume !== undefined) ? ck.volume : ck.vol_speed;
+          var volumeCheckLabel = volumeEnabled ? chk(volumeCheck) : "OFF";
+          var strategyBits = [
+            "Fav: " + esc(st.favorite) + " \u00b7 WR: " + esc(st.win_rate_str),
+            "Checks: P=" + chk(ck.price) + " T=" + chk(ck.time) + " D=" + chk(ck.dev) +
+            " M=" + chk(ck.mom) + " Vol=" + volumeCheckLabel + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
+          ];
+          var trend = st.trend || {};
+          if (trend.window_sec != null) {
+            strategyBits.push(
+              "Trend " + esc(trend.window_sec) + "s: " +
+              "UP " + (trend.up_delta != null ? esc(numFmt(trend.up_delta, 4)) : "\u2014") +
+              " (" + chk(trend.up_ok) + ")" +
+              " | DOWN " + (trend.down_delta != null ? esc(numFmt(trend.down_delta, 4)) : "\u2014") +
+              " (" + chk(trend.down_ok) + ")"
+            );
+          }
+          var vs = st.volume_speed || {};
+          if (vs.window_sec != null) {
+            strategyBits.push("Volume check: " + volumeCheckLabel);
+            strategyBits.push(
+              "VolSpeed " + esc(vs.window_sec) + "s: " +
+              esc(vs.favorite || "-") + " dV " +
+              (vs.fav_accel != null ? esc(numFmt(vs.fav_accel, 2)) : "\u2014") +
+              " | Other dV " +
+              (vs.other_accel != null ? esc(numFmt(vs.other_accel, 2)) : "\u2014") +
+              " (" + chk(vs.ok) + ")"
+            );
+            strategyBits.push(
+              "Vol Curr: " +
+              esc(vs.favorite || "Fav") + " " +
+              (vs.fav_curr != null ? esc(numFmt(vs.fav_curr, 2)) : "\u2014") +
+              " | Other " +
+              (vs.other_curr != null ? esc(numFmt(vs.other_curr, 2)) : "\u2014")
+            );
+          }
+            if (st.up_line) {
+              strategyBits.push("UP: " + esc(st.up_line));
+            }
+            if (st.down_line) {
+              strategyBits.push("DOWN: " + esc(st.down_line));
+            }
+          if (st.btc_buffer_line) {
+            strategyBits.push("BTC Buffer: " + esc(st.btc_buffer_line));
+          }
+          document.getElementById("strategy").innerHTML =
+            '<div class="sig ' + sigClass(sig) + '">' + esc(sig) + "</div>" +
+            '<div class="mono" style="margin-top:0.4rem">' +
+            strategyBits.join("<br/>") +
+            "</div>";
+          function book(x, id) {
+            var el = document.getElementById(id);
+            if (!x) { el.textContent = "No data"; return; }
+            var bk = x.book || {};
+            var ind = x.indicators || {};
+            el.innerHTML = [
+              "Last " + esc(bk.last_price),
+              "Bid " + esc(bk.best_bid) + " / Ask " + esc(bk.best_ask),
+              "PM VWAP " + numFmt(ind.pm_vwap, 4) +
+                " \u00b7 BTC VWAP " + (ind.btc_vwap_weighted != null ? numFmt(ind.btc_vwap_weighted, 4) : "\u2014"),
+              "Dev " + (ind.deviation_pct != null ? numFmt(ind.deviation_pct, 2) + "%" : "\u2014") +
+                " \u00b7 BTC Vol Bias " + (ind.btc_vol_ratio != null ? numFmt(ind.btc_vol_ratio, 1) + "%" : "\u2014"),
+              "Z " + numFmt(ind.zscore, 2) +
+                " \u00b7 Mom " + (ind.momentum_pct != null ? numFmt(ind.momentum_pct, 2) + "%" : "\u2014"),
+              "Vol " + (bk.volume_total != null ? esc(Math.round(bk.volume_total)) : "\u2014"),
+            ].join("<br/>");
+          }
+          book(d.up, "up");
+          book(d.down, "down");
+          var b = d.btc || {};
+          var btcEl = document.getElementById("btc");
+          if ((b.btc_connected && b.btc_current_price > 0) || (b.binance_connected && b.binance_current_price > 0)) {
+            var sourceMap = {
+              "official_ptb": "official PTB",
+              "fallback_tick": "fallback tick",
+              "feed_tick": "feed tick",
+              "none": "pending"
+            };
+            var marketAnchorSource = sourceMap[b.btc_market_anchor_source] || (b.btc_market_anchor_source || "pending");
+            var selectedFeed = b.btc_feed_source || "chainlink";
+            var chainlinkLabel = selectedFeed === "chainlink" ? "Selected feed (Polymarket RTDS)" : "Polymarket RTDS";
+            var binanceLabel = selectedFeed === "binance" ? "Selected feed (Binance)" : "Binance";
+            var chainlinkPrice = (b.btc_current_price > 0) ? ("$" + esc(numFmt(b.btc_current_price, 2))) : "\u2014";
+            var binancePrice = (b.binance_current_price > 0) ? ("$" + esc(numFmt(b.binance_current_price, 2))) : "\u2014";
+            var chainlinkFeedLine = chainlinkLabel + ": " + chainlinkPrice +
+              " | " + (b.btc_connected ? "ok" : "off") +
+              (b.fresh_sec != null ? " \u00b7 " + Math.floor(b.fresh_sec) + "s" : "");
+            var binanceFeedLine = binanceLabel + ": " + binancePrice +
+              " | " + (b.binance_connected ? "ok" : "off") +
+              (b.binance_fresh_sec != null ? " \u00b7 " + Math.floor(b.binance_fresh_sec) + "s" : "");
+            var btcBits = [
+              chainlinkFeedLine,
+              binanceFeedLine,
+              "Anchor $" + (b.btc_anchor_price > 0 ? esc(numFmt(b.btc_anchor_price, 2)) : "\u2014"),
+              "Market Anchor $" + (b.btc_market_anchor_price > 0 ? esc(numFmt(b.btc_market_anchor_price, 2)) : "\u2014") + " (" + esc(marketAnchorSource) + ")",
+              esc(b.deviation_line || ""),
+            ];
+            if (b.buffer_avg_abs_usd != null || b.buffer_avg_abs_pct != null) {
+              var usdPart = b.buffer_avg_abs_usd != null ? "$" + esc(numFmt(b.buffer_avg_abs_usd, 2)) : "\u2014";
+              var pctPart = b.buffer_avg_abs_pct != null ? esc(numFmt(b.buffer_avg_abs_pct, 3)) + "%" : "\u2014";
+              btcBits.push("Buffer avg(5): +/-" + usdPart + " (+/-" + pctPart + ")");
+            }
+            if (b.buffer_windows && b.buffer_windows.length) {
+              btcBits.push("\u2014 last 5 windows \u2014");
+              for (var wi = 0; wi < b.buffer_windows.length; wi++) {
+                var w = b.buffer_windows[wi];
+                var wt = w.window_ts ? new Date(w.window_ts * 1000).toISOString().substr(11, 8) : "?";
+                var windowUsd = (w.signed_usd != null) ? w.signed_usd : w.abs_usd;
+                var windowPct = (w.signed_pct != null) ? w.signed_pct : w.abs_pct;
+                btcBits.push(esc(wt) + " $" + esc(numFmtSigned(windowUsd, 2)) + " (" + esc(numFmtSigned(windowPct, 4)) + "%)");
+              }
+            }
+            if (b.btc_anchor_history && b.btc_anchor_history.length) {
+              btcBits.push("\u2014 recent BTC / anchor \u2014");
+              for (var hi = b.btc_anchor_history.length - 1; hi >= 0; hi--) {
+                var h = b.btc_anchor_history[hi];
+                var ht = h.window_ts ? new Date(h.window_ts * 1000).toISOString().substr(11, 8) : (h.ts ? new Date(h.ts * 1000).toISOString().substr(11, 8) : "?");
+                btcBits.push(
+                  esc(ht) +
+                  " BTC $" + esc(numFmt(h.btc_price, 2)) +
+                  " | A $" + esc(numFmt(h.anchor_price, 2))
+                );
+              }
+            }
+            btcBits.push(
+              "Feed: " + (b.btc_connected ? "ok" : "off") +
+                (b.fresh_sec != null ? " \u00b7 " + Math.floor(b.fresh_sec) + "s" : "")
+            );
+            btcEl.innerHTML = [
+              btcBits.join("<br/>")
+            ];
+            btcEl.innerHTML = btcBits.join("<br/>");
+          } else {
+            btcEl.textContent = "Waiting for BTC feeds\u2026";
+          }
+          
+          var tr = d.trading || {};
+
+          var tHtml = "Markets " + esc(tr.markets_seen) + " \u00b7 Trades " + esc(tr.trade_count) +
+            " \u00b7 PnL $" + (tr.total_pnl != null ? numFmtSigned(tr.total_pnl, 2) : "\u2014") + "<br/>";
+          if (tr.win_rate_by_mode) {
+            var modeWrParts = [];
+            var modeMap = tr.win_rate_by_mode;
+            var handledModes = {};
+            var modeOrder = ["normal", "manual", "mode_60s", "mode_40s", "mode_30s", "mode_20s", "unknown"];
+
+            function pushModeLine(modeKey) {
+              if (!Object.prototype.hasOwnProperty.call(modeMap, modeKey)) return;
+              handledModes[modeKey] = true;
+              var ms = modeMap[modeKey] || {};
+              var mw = (ms.win_rate_pct != null && typeof ms.win_rate_pct === "number" && !isNaN(ms.win_rate_pct)) ? numFmt(ms.win_rate_pct, 1) + "%" : "\u2014";
+              var mt = (ms.trade_count != null) ? String(ms.trade_count) : "0";
+              var mp = (ms.total_pnl_usd != null && typeof ms.total_pnl_usd === "number" && !isNaN(ms.total_pnl_usd)) ? ("$" + numFmtSigned(ms.total_pnl_usd, 2)) : "$\u2014";
+              modeWrParts.push(esc(modeKey) + " WR " + esc(mw) + " | PnL " + esc(mp) + " (" + esc(mt) + ")");
+            }
+
+            for (var mo = 0; mo < modeOrder.length; mo++) {
+              pushModeLine(modeOrder[mo]);
+            }
+            for (var mk in modeMap) {
+              if (!Object.prototype.hasOwnProperty.call(modeMap, mk)) continue;
+              if (handledModes[mk]) continue;
+              pushModeLine(mk);
+            }
+            if (modeWrParts.length) {
+              tHtml += "By mode:<br/>" + modeWrParts.join("<br/>") + "<br/>";
+            }
+          }
+          if (tr.position) {
+            var p = tr.position;
+            tHtml += "LONG " + esc(p.token_name) + " @ " + esc(p.entry_price) +
+              " \u00d7" + esc(p.contracts) + (p.hedged ? " hedged" : "") + "<br/>";
+            tHtml += "Unreal $" + (p.unrealized_pnl != null ? numFmtSigned(p.unrealized_pnl, 2) : "\u2014") + "<br/>";
+          } else {
+            tHtml += "No open position<br/>";
+          }
+          if (tr.recent_trades && tr.recent_trades.length) {
+            var lines = [];
+            for (var i = 0; i < tr.recent_trades.length; i++) {
+              var rt = tr.recent_trades[i] || {};
+              var modeTag = rt.entry_mode ? (" [" + rt.entry_mode + "]") : "";
+              lines.push(esc((rt.line || "") + modeTag));
+            }
+            tHtml += "<br/>Recent:<br/>" + lines.join("<br/>");
+          }
+          document.getElementById("trading").innerHTML = tHtml;
+        } catch (e) {
+          errEl.textContent = "Poll error: " + (e && e.message ? e.message : e);
+        }
+      };
+      r.onerror = function () {
+        errEl.textContent = "Network error (is the bot running?)";
+      };
+      r.send();
+    }
+    loadLateModes();
+    tick();
+    setInterval(tick, 1000);
+  </script>
+</body>
+</html>
+"""
 
 
-def _get_env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-
-    value = raw.strip().strip('"').strip("'")
-    if value.startswith("$"):
-        value = value[1:]
-
-    return int(value or str(default))
-
-
-@dataclass
-class MarketConfig:
-    """Which Polymarket BTC up/down interval to trade (slug: btc-updown-{5|15}m-<epoch>)."""
-    interval_minutes: int = 15
-
-    @property
-    def duration_sec(self) -> int:
-        return self.interval_minutes * 60
-
-    @property
-    def slug_infix(self) -> str:
-        """e.g. '5m' or '15m' for btc-updown-5m-..."""
-        return f"{self.interval_minutes}m"
-
-
-@dataclass
-class LateEntryModeConfig:
-    """Single late-entry mode settings."""
-    name: str = ""
-    enabled: bool = True
-    time_left_sec: int = 60
-    min_contracts: int = 5
-    max_trades: int = 1
-    buffer_avg_multiplier: float = 1.0
-    min_buffer_threshold_usd: float = 25.0
-    volume_check_enabled: bool = True
-    volume_eval_only: bool = False
-    min_price: float = 0.0
-    max_price: float = 1.0
-
-
-@dataclass
-class LateEntryModesConfig:
-    """Predefined late-entry windows; tightest active window wins."""
-    enabled: bool = False
-    total_max_trades: int = 3
-    mode_60s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_60s", enabled=True, time_left_sec=60, min_contracts=5, max_trades=1, buffer_avg_multiplier=1.0, min_buffer_threshold_usd=25.0, min_price=0.8, max_price=0.99))
-    mode_40s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_40s", enabled=True, time_left_sec=40, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
-    mode_30s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_30s", enabled=True, time_left_sec=30, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
-    mode_20s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_20s", enabled=True, time_left_sec=20, min_contracts=12, max_trades=1, buffer_avg_multiplier=0.5, min_buffer_threshold_usd=20.0, min_price=0.9, max_price=0.99))
-    mode_volume_eval: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_volume_eval", enabled=False, time_left_sec=50, min_contracts=20, max_trades=1, buffer_avg_multiplier=1.0, min_buffer_threshold_usd=20.0, volume_check_enabled=True, volume_eval_only=True, min_price=0.8, max_price=0.99))
-    extra_modes: Dict[str, LateEntryModeConfig] = field(default_factory=dict)
-
-
-@dataclass
-class VolumeAccelerationCheckConfig:
-    """Favored-side volume acceleration gate settings."""
-    enabled: bool = True
-    window_sec: float = 10.0
-    threshold: float = 5000.0
-    require_current_volume_lead: bool = True
-    min_accel_diff: float = 0.0
-    min_current_volume_diff: float = 5000.0
-
-
-@dataclass
-class StrategyConfig:
-    """Strategy parameters."""
-    min_price: float = 0.65
-    max_price: float = 0.91
-    dangerous: bool = False
-    min_elapsed_sec: int = 480
-    min_deviation_pct: float = 5.0
-    max_deviation_pct: float = 100.0
-    no_entry_before_end_sec: int = 90
-    momentum_window_sec: int = 120
-    momentum_min_pct: float = 0.0
-    vwap_window_sec: int = 30
-    win_rate_csv: str = "data/win_rate.csv"
-    volume_acceleration_check: VolumeAccelerationCheckConfig = field(default_factory=VolumeAccelerationCheckConfig)
-    late_entry_modes: LateEntryModesConfig = field(default_factory=LateEntryModesConfig)
-
-
-@dataclass
-class EntryConfig:
-    """Entry execution parameters."""
-    bet_amount_usd: float = 10.0
-    price_offset: float = 0.01
-    order_type: str = "FAK"
-    max_retries: int = 5
-    retry_delay_ms: int = 300
-    fill_timeout_ms: int = 2000
-    min_contracts: int = 5
-    min_order_usd: float = 1.0
-    max_entry_price: float = 0.91
-    ws_recovery_timeout_sec: int = 10
-
-
-@dataclass
-class HedgeConfig:
-    """Hedge execution parameters."""
-    enabled: bool = True
-    hedge_price: float = 0.02
-    order_type: str = "GTD"
-    max_retries: int = 3
-    retry_delay_ms: int = 1000
-
-
-@dataclass
-class RedeemConfig:
-    """Auto-redeem parameters."""
-    enabled: bool = True
-    interval_seconds: int = 180
-    auto_confirm: bool = True
-
-
-@dataclass
-class TelegramConfig:
-    """Telegram notification parameters."""
-    enabled: bool = True
-    bot_token: str = ""
-    chat_id: str = ""
-    chart_every_n_trades: int = 10
-
-
-@dataclass
-class SimulationConfig:
+def _sanitize_for_json(obj: Any) -> Any:
     """
-    Paper-trading mode: same WebSockets, signals, and dashboard; no real orders or redeemer.
-    When enabled, API keys and private key are optional (not validated).
+    Starlette JSONResponse serializes with allow_nan=False; NaN/Inf break the ASGI handler.
     """
-    enabled: bool = False
-    separate_trading_log: bool = True
-    trading_log_path: str = "logs/trading_log_sim.json"
-    # Analysis exports (OPEN/CLOSE rows, cumulative PnL). Set jsonl path to "" to disable JSONL.
-    history_csv_path: str = "logs/simulation_trades.csv"
-    history_jsonl_path: str = "logs/simulation_history.jsonl"
-    history_summary_path: str = "logs/simulation_summary.json"
+    if obj is None:
+        return None
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, int) and not isinstance(obj, bool):
+        return obj
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
 
 
-@dataclass
-class WebDashboardConfig:
-    """Optional local web UI (FastAPI). Bind to 127.0.0.1 unless you trust your network."""
-    enabled: bool = False
-    host: str = "127.0.0.1"
-    port: int = 8765
+class WebSnapshotHolder:
+    """Thread-safe snapshot for /api/state."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._data: Dict[str, Any] = {"status": "starting"}
+
+    def set(self, data: Dict[str, Any]) -> None:
+        with self._lock:
+            self._data = dict(data)
+
+    def get(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._data)
 
 
-@dataclass
-class BTCPriceFeedConfig:
-    """BTC price feed source configuration."""
-    provider: str = "chainlink"  # chainlink | binance
-    ws_url: str = ""
+def build_app(
+  holder: WebSnapshotHolder,
+  get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+) -> FastAPI:
+    app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index() -> str:
+        return _HTML
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)
+
+    @app.get("/api/state")
+    async def api_state():
+        return JSONResponse(_sanitize_for_json(holder.get()))
+
+    @app.get("/api/late-modes")
+    async def api_late_modes_get():
+      if not get_late_modes:
+        return JSONResponse({"error": "Late mode controls unavailable"}, status_code=501)
+      return JSONResponse(_sanitize_for_json(get_late_modes()))
+
+    @app.post("/api/late-modes")
+    async def api_late_modes_post(req: Request):
+      if not update_late_modes:
+        return JSONResponse({"error": "Late mode controls unavailable"}, status_code=501)
+      payload = await req.json()
+      updated = update_late_modes(payload if isinstance(payload, dict) else {})
+      return JSONResponse(_sanitize_for_json(updated))
+
+    @app.post("/api/manual-buy")
+    async def api_manual_buy(req: Request):
+      if not trigger_manual_buy:
+        return JSONResponse({"error": "Manual buy unavailable"}, status_code=501)
+      payload: Dict[str, Any] = {}
+      try:
+        parsed = await req.json()
+        if isinstance(parsed, dict):
+          payload = parsed
+      except Exception:
+        payload = {}
+      result = trigger_manual_buy(payload)
+      if not isinstance(result, dict):
+        return JSONResponse({"error": "Manual buy failed"}, status_code=500)
+      if result.get("ok"):
+        return JSONResponse(_sanitize_for_json(result))
+      return JSONResponse(_sanitize_for_json(result), status_code=400)
+
+    return app
 
 
-@dataclass
-class PolymarketConfig:
-    """Polymarket API credentials."""
-    private_key: str = ""
-    funder_address: str = ""
-    signature_type: int = 0
-    rpc_url: str = "https://polygon-rpc.com"
-    chain_id: int = 137
-    clob_host: str = "https://clob.polymarket.com"
-    api_key: str = ""
-    api_secret: str = ""
-    api_passphrase: str = ""
+def _client_probe_address(bind_host: str) -> str:
+    """Address to test with socket.connect(); 0.0.0.0 / :: are not valid client targets."""
+    if bind_host in ("0.0.0.0", ""):
+        return "127.0.0.1"
+    if bind_host in ("::", "[::]"):
+        return "::1"
+    return bind_host
 
 
-@dataclass
-class Config:
-    """Main configuration."""
-    market: MarketConfig
-    simulation: SimulationConfig
-    strategy: StrategyConfig
-    buffer: float
-    entry: EntryConfig
-    hedge: HedgeConfig
-    redeem: RedeemConfig
-    telegram: TelegramConfig
-    web_dashboard: WebDashboardConfig
-    btc_price_feed: BTCPriceFeedConfig
-    polymarket: PolymarketConfig
-
-
-def load_config(config_path: Optional[str] = None) -> Config:
+def start_web_dashboard(
+  host: str,
+  port: int,
+  holder: WebSnapshotHolder,
+  get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+) -> bool:
     """
-    Load configuration from JSON file and environment variables.
-    
-    Args:
-        config_path: Path to config.json (default: PROJECT_ROOT/config.json)
-    
-    Returns:
-        Config object with all settings
+    Start uvicorn in a daemon thread. Returns True if the port accepts connections
+    shortly after start (False if bind failed or port is in use).
     """
-    if config_path is None:
-        config_path = PROJECT_ROOT / "config.json"
-    
-    # Load JSON config
-    with open(config_path, "r") as f:
-        data = json.load(f)
-    
-    # Market interval (5 or 15 minutes)
-    market_data = data.get("market", {})
-    market = MarketConfig(
-        interval_minutes=int(market_data.get("interval_minutes", 15)),
+    app = build_app(
+        holder,
+        get_late_modes=get_late_modes,
+        update_late_modes=update_late_modes,
+        trigger_manual_buy=trigger_manual_buy,
     )
 
-    sim_data = data.get("simulation", {})
-    simulation = SimulationConfig(
-        enabled=bool(sim_data.get("enabled", False)),
-        separate_trading_log=bool(sim_data.get("separate_trading_log", True)),
-        trading_log_path=str(sim_data.get("trading_log_path", "logs/trading_log_sim.json")),
-        history_csv_path=str(sim_data.get("history_csv_path", "logs/simulation_trades.csv")),
-        history_jsonl_path=str(sim_data.get("history_jsonl_path", "logs/simulation_history.jsonl")),
-        history_summary_path=str(sim_data.get("history_summary_path", "logs/simulation_summary.json")),
-    )
-
-    # Strategy
-    strategy_data = data.get("strategy", {})
-    late_modes_data = strategy_data.get("late_entry_modes", {})
-
-    def _to_int(raw: Any, default: int) -> int:
-        if raw is None:
-            return int(default)
+    def run() -> None:
         try:
-            txt = str(raw).strip().lower()
-            if txt in {"", "tbd", "todo", "na", "n/a", "null", "none", "-"}:
-                return int(default)
-            return int(float(txt))
-        except (TypeError, ValueError):
-            return int(default)
+            uvicorn.run(
+                app,
+                host=host,
+                port=port,
+                log_level="warning",
+                access_log=False,
+            )
+        except Exception:
+            logger.exception("Web dashboard: uvicorn exited with an error")
 
-    def _to_float(raw: Any, default: float) -> float:
-        if raw is None:
-            return float(default)
+    t = threading.Thread(target=run, name="web-dashboard", daemon=True)
+    t.start()
+
+    probe = _client_probe_address(host)
+    for _ in range(60):
+        time.sleep(0.1)
         try:
-            txt = str(raw).strip().lower()
-            if txt in {"", "tbd", "todo", "na", "n/a", "null", "none", "-"}:
-                return float(default)
-            return float(txt)
-        except (TypeError, ValueError):
-            return float(default)
-
-    def _load_late_mode(raw: Dict[str, Any], default_time_left: int, default_contracts: int, default_max_trades: int, default_multiplier: float, default_min_buffer_threshold_usd: float, default_min_price: float = 0.0, default_max_price: float = 1.0) -> LateEntryModeConfig:
-        return LateEntryModeConfig(
-            name=str(raw.get("name", "") or "").strip(),
-            enabled=bool(raw.get("enabled", True)),
-            time_left_sec=_to_int(raw.get("time_left_sec", default_time_left), default_time_left),
-            min_contracts=_to_int(raw.get("min_contracts", default_contracts), default_contracts),
-            max_trades=_to_int(raw.get("max_trades", default_max_trades), default_max_trades),
-            buffer_avg_multiplier=_to_float(raw.get("buffer_avg_multiplier", default_multiplier), default_multiplier),
-            min_buffer_threshold_usd=_to_float(raw.get("min_buffer_threshold_usd", default_min_buffer_threshold_usd), default_min_buffer_threshold_usd),
-            volume_check_enabled=bool(raw.get("volume_check_enabled", True)),
-            volume_eval_only=bool(raw.get("volume_eval_only", False)),
-            min_price=_to_float(raw.get("min_price", default_min_price), default_min_price),
-            max_price=_to_float(raw.get("max_price", default_max_price), default_max_price),
-        )
-
-    def _default_window_from_mode_key(mode_key: str, fallback: int = 60) -> int:
-        m = re.search(r"(\d+)", mode_key)
-        if not m:
-            return fallback
-        try:
-            return int(m.group(1))
-        except (TypeError, ValueError):
-            return fallback
-
-    late_entry_modes = LateEntryModesConfig(
-        enabled=bool(late_modes_data.get("enabled", False)),
-        total_max_trades=_to_int(late_modes_data.get("total_max_trades", 3), 3),
-        mode_60s=_load_late_mode(late_modes_data.get("mode_60s", {}), 60, 5, 1, 1.0, 25.0, 0.8, 0.99),
-        mode_40s=_load_late_mode(late_modes_data.get("mode_40s", {}), 40, 8, 1, 0.8, 25.0, 0.85, 0.99),
-        mode_30s=_load_late_mode(late_modes_data.get("mode_30s", {}), 30, 8, 1, 0.8, 25.0, 0.85, 0.99),
-        mode_20s=_load_late_mode(late_modes_data.get("mode_20s", {}), 20, 12, 1, 0.5, 20.0, 0.9, 0.99),
-        mode_volume_eval=_load_late_mode(late_modes_data.get("mode_volume_eval", {}), 50, 20, 1, 1.0, 20.0, 0.8, 0.99),
-    )
-
-    known_mode_keys = {"mode_60s", "mode_40s", "mode_30s", "mode_20s", "mode_volume_eval"}
-    for mode_key, mode_raw in late_modes_data.items():
-        if mode_key in known_mode_keys:
+            with socket.create_connection((probe, port), timeout=0.4):
+                return True
+        except OSError:
             continue
-        if not (isinstance(mode_key, str) and mode_key.startswith("mode_")):
-            continue
-        if not isinstance(mode_raw, dict):
-            continue
-        default_time_left = _default_window_from_mode_key(mode_key, 60)
-        late_entry_modes.extra_modes[mode_key] = _load_late_mode(
-            mode_raw,
-            default_time_left,
-            10,
-            1,
-            1.0,
-            20.0,
-            0.8,
-            0.99,
-        )
-
-    for fallback_name, mode_cfg in [
-        ("mode_60s", late_entry_modes.mode_60s),
-        ("mode_40s", late_entry_modes.mode_40s),
-        ("mode_30s", late_entry_modes.mode_30s),
-        ("mode_20s", late_entry_modes.mode_20s),
-        ("mode_volume_eval", late_entry_modes.mode_volume_eval),
-    ]:
-        if not mode_cfg.name:
-            mode_cfg.name = fallback_name
-
-    for extra_name, mode_cfg in late_entry_modes.extra_modes.items():
-        if not mode_cfg.name:
-            mode_cfg.name = extra_name
-
-    vac_data = strategy_data.get("volume_acceleration_check", {})
-    threshold = _to_float(
-        vac_data.get("threshold", vac_data.get("min_current_volume_diff", 5000.0)),
-        5000.0,
-    )
-
-    strategy = StrategyConfig(
-        min_price=strategy_data.get("min_price", 0.65),
-        max_price=strategy_data.get("max_price", 0.91),
-        dangerous=bool(strategy_data.get("dangerous", False)),
-        min_elapsed_sec=strategy_data.get("min_elapsed_sec", 480),
-        min_deviation_pct=strategy_data.get("min_deviation_pct", 5.0),
-        max_deviation_pct=strategy_data.get("max_deviation_pct", 100.0),
-        no_entry_before_end_sec=strategy_data.get("no_entry_before_end_sec", 90),
-        momentum_window_sec=strategy_data.get("momentum_window_sec", 120),
-        momentum_min_pct=float(strategy_data.get("momentum_min_pct", 0.0)),
-        vwap_window_sec=strategy_data.get("vwap_window_sec", 30),
-        win_rate_csv=strategy_data.get("win_rate_csv", "data/win_rate.csv"),
-        volume_acceleration_check=VolumeAccelerationCheckConfig(
-            enabled=bool(vac_data.get("enabled", True)),
-            window_sec=_to_float(vac_data.get("window_sec", 10.0), 10.0),
-            threshold=threshold,
-            require_current_volume_lead=bool(vac_data.get("require_current_volume_lead", True)),
-            min_accel_diff=_to_float(vac_data.get("min_accel_diff", 0.0), 0.0),
-            min_current_volume_diff=_to_float(vac_data.get("min_current_volume_diff", threshold), threshold),
-        ),
-        late_entry_modes=late_entry_modes,
-    )
-
-    # Entry
-    entry_data = data.get("entry", {})
-    entry = EntryConfig(
-        bet_amount_usd=entry_data.get("bet_amount_usd", 10.0),
-        price_offset=entry_data.get("price_offset", 0.01),
-        order_type=entry_data.get("order_type", "FAK"),
-        max_retries=entry_data.get("max_retries", 5),
-        retry_delay_ms=entry_data.get("retry_delay_ms", 300),
-        fill_timeout_ms=entry_data.get("fill_timeout_ms", 2000),
-        min_contracts=entry_data.get("min_contracts", 5),
-        min_order_usd=entry_data.get("min_order_usd", 1.0),
-        max_entry_price=entry_data.get("max_entry_price", 0.91),
-        ws_recovery_timeout_sec=entry_data.get("ws_recovery_timeout_sec", 10),
-    )
-    
-    # Hedge
-    hedge_data = data.get("hedge", {})
-    hedge = HedgeConfig(
-        enabled=hedge_data.get("enabled", True),
-        hedge_price=hedge_data.get("hedge_price", 0.02),
-        order_type=hedge_data.get("order_type", "GTD"),
-        max_retries=hedge_data.get("max_retries", 3),
-        retry_delay_ms=hedge_data.get("retry_delay_ms", 1000),
-    )
-    
-    # Redeem
-    redeem_data = data.get("redeem", {})
-    redeem = RedeemConfig(
-        enabled=redeem_data.get("enabled", True),
-        interval_seconds=redeem_data.get("interval_seconds", 180),
-        auto_confirm=redeem_data.get("auto_confirm", True),
-    )
-    
-    # Telegram (merge JSON + env)
-    telegram_data = data.get("telegram", {})
-    telegram = TelegramConfig(
-        enabled=telegram_data.get("enabled", True),
-        bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-        chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-        chart_every_n_trades=telegram_data.get("chart_every_n_trades", 10),
-    )
-
-    web_data = data.get("web_dashboard", {})
-    web_dashboard = WebDashboardConfig(
-        enabled=bool(web_data.get("enabled", False)),
-        host=str(web_data.get("host", "127.0.0.1")),
-        port=int(web_data.get("port", 8765)),
-    )
-
-    btc_feed_data = data.get("btc_price_feed", {})
-    btc_price_feed = BTCPriceFeedConfig(
-        provider=str(btc_feed_data.get("provider", "chainlink")).strip().lower(),
-        ws_url=str(btc_feed_data.get("ws_url", "")).strip(),
-    )
-    
-    # Polymarket (from env only - secrets)
-    polymarket = PolymarketConfig(
-        private_key=os.getenv("PRIVATE_KEY", ""),
-        funder_address=os.getenv("FUNDER_ADDRESS", ""),
-        signature_type=_get_env_int("SIGNATURE_TYPE", 0),
-        rpc_url=os.getenv("RPC_URL", "https://polygon-rpc.com"),
-        chain_id=_get_env_int("CHAIN_ID", 137),
-        clob_host=os.getenv("CLOB_HOST", "https://clob.polymarket.com"),
-        api_key=os.getenv("POLY_API_KEY", ""),
-        api_secret=os.getenv("POLY_API_SECRET", ""),
-        api_passphrase=os.getenv("POLY_API_PASSPHRASE", ""),
-    )
-    
-    return Config(
-        market=market,
-        simulation=simulation,
-        strategy=strategy,
-        buffer=float(data.get("buffer", 25.0)),
-        entry=entry,
-        hedge=hedge,
-        redeem=redeem,
-        telegram=telegram,
-        web_dashboard=web_dashboard,
-        btc_price_feed=btc_price_feed,
-        polymarket=polymarket,
-    )
-
-
-def validate_config(config: Config) -> list:
-    """
-    Validate configuration.
-    
-    Returns:
-        List of error messages (empty if valid)
-    """
-    errors = []
-
-    if config.market.interval_minutes not in (5, 15):
-        errors.append(
-            'market.interval_minutes must be 5 or 15 (Polymarket BTC up/down markets)'
-        )
-
-    dur = config.market.duration_sec
-    if config.strategy.min_elapsed_sec >= dur:
-        errors.append(
-            f"strategy.min_elapsed_sec ({config.strategy.min_elapsed_sec}s) must be less than "
-            f"market duration ({dur}s for {config.market.interval_minutes}m)"
-        )
-    if config.strategy.no_entry_before_end_sec >= dur:
-        errors.append(
-            f"strategy.no_entry_before_end_sec ({config.strategy.no_entry_before_end_sec}s) "
-            f"must be less than market duration ({dur}s)"
-        )
-
-    live_trading = not config.simulation.enabled
-
-    if live_trading:
-        # Required: private key
-        if not config.polymarket.private_key:
-            errors.append("PRIVATE_KEY not set in .env")
-        elif not config.polymarket.private_key.startswith("0x"):
-            errors.append("PRIVATE_KEY must start with 0x")
-
-        # Proxy wallet check
-        if config.polymarket.signature_type in [1, 2]:
-            if not config.polymarket.funder_address:
-                errors.append(f"SIGNATURE_TYPE={config.polymarket.signature_type} requires FUNDER_ADDRESS")
-
-        # API credentials
-        if not config.polymarket.api_key:
-            errors.append("POLY_API_KEY not set")
-        if not config.polymarket.api_secret:
-            errors.append("POLY_API_SECRET not set")
-        if not config.polymarket.api_passphrase:
-            errors.append("POLY_API_PASSPHRASE not set")
-    
-    # Strategy bounds
-    if config.strategy.min_price >= config.strategy.max_price:
-        errors.append("min_price must be less than max_price")
-    
-    if config.entry.max_entry_price > config.strategy.max_price:
-        errors.append("max_entry_price should not exceed strategy max_price")
-    
-    if config.strategy.max_deviation_pct <= config.strategy.min_deviation_pct:
-        errors.append(
-            f"max_deviation_pct ({config.strategy.max_deviation_pct}) "
-            f"must be greater than min_deviation_pct ({config.strategy.min_deviation_pct})"
-        )
-
-    vac = config.strategy.volume_acceleration_check
-    if vac.window_sec <= 0:
-        errors.append("strategy.volume_acceleration_check.window_sec must be > 0")
-    if vac.threshold < 0:
-        errors.append("strategy.volume_acceleration_check.threshold must be >= 0")
-    if vac.min_accel_diff < 0:
-        errors.append("strategy.volume_acceleration_check.min_accel_diff must be >= 0")
-    if vac.min_current_volume_diff < 0:
-        errors.append("strategy.volume_acceleration_check.min_current_volume_diff must be >= 0")
-
-    mode_items = [
-        ("mode_60s", config.strategy.late_entry_modes.mode_60s),
-        ("mode_40s", config.strategy.late_entry_modes.mode_40s),
-        ("mode_30s", config.strategy.late_entry_modes.mode_30s),
-        ("mode_20s", config.strategy.late_entry_modes.mode_20s),
-        ("mode_volume_eval", config.strategy.late_entry_modes.mode_volume_eval),
-    ]
-    for extra_key, extra_mode in config.strategy.late_entry_modes.extra_modes.items():
-        mode_items.append((extra_key, extra_mode))
-
-    for mode_name, mode_cfg in mode_items:
-        if mode_cfg.min_contracts <= 0:
-            errors.append(f"strategy.late_entry_modes.{mode_name}.min_contracts must be > 0")
-        if mode_cfg.max_trades <= 0:
-            errors.append(f"strategy.late_entry_modes.{mode_name}.max_trades must be > 0")
-        if mode_cfg.buffer_avg_multiplier <= 0:
-            errors.append(f"strategy.late_entry_modes.{mode_name}.buffer_avg_multiplier must be > 0")
-        if mode_cfg.min_buffer_threshold_usd < 0:
-            errors.append(f"strategy.late_entry_modes.{mode_name}.min_buffer_threshold_usd must be >= 0")
-
-    if config.buffer < 0:
-        errors.append("buffer must be >= 0")
-
-    if config.btc_price_feed.provider not in {"chainlink", "binance"}:
-        errors.append("btc_price_feed.provider must be 'chainlink' or 'binance'")
-
-    if config.web_dashboard.enabled:
-        if not (1 <= config.web_dashboard.port <= 65535):
-            errors.append("web_dashboard.port must be between 1 and 65535")
-    
-    return errors
+    return False
