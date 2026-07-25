@@ -2126,7 +2126,6 @@ class Dashboard:
 
         return {
             "window_sec": window_sec,
-            "min_contracts": float(getattr(mode_cfg, "min_contracts", 1)),
             "max_trades": float(getattr(mode_cfg, "max_trades", 1)),
             "buffer_avg_multiplier": float(getattr(mode_cfg, "buffer_avg_multiplier", 1.0)),
             "min_buffer_threshold_usd": float(getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer)),
@@ -2215,7 +2214,7 @@ class Dashboard:
             "ok": current_abs_usd >= buffer_abs_usd,
             "late_mode_name": late_mode["name"] if late_mode else "",
             "late_mode_window_sec": late_mode["window_sec"] if late_mode else 0.0,
-            "late_mode_min_contracts": late_mode["min_contracts"] if late_mode else 0.0,
+            "late_mode_min_contracts": float(late_mode.get("min_contracts", self.config.entry.min_contracts)) if late_mode else 0.0,
             "late_mode_buffer_multiplier": late_mode["buffer_avg_multiplier"] if late_mode else 0.0,
             "late_mode_min_buffer_threshold_usd": late_mode.get("min_buffer_threshold_usd", 0.0) if late_mode else 0.0,
         }
@@ -2523,10 +2522,13 @@ class Dashboard:
         if price_only_gate:
             if price_ok and btc_buffer_ok and vol_gate_ok:
                 if late_mode:
+                    mcvd_hint = ""
+                    if str(late_mode.get("name", "")) == "volume_eval_mode":
+                        mcvd_hint = f", minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f}"
                     signal = (
                         f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s: "
                         f"x{late_mode['buffer_avg_multiplier']:.2f} buffer, "
-                        f"minC={int(late_mode['min_contracts'])})"
+                        f"vol {'ON' if vol_check_enabled else 'OFF'}{mcvd_hint})"
                     )
                 else:
                     signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
@@ -2610,12 +2612,24 @@ class Dashboard:
                 f"({'OK' if btc_buffer_ok else 'WAIT'})"
             )
         if late_mode:
+            mode_name_for_line = str(late_mode.get("name", ""))
+            if mode_name_for_line == "volume_eval_mode":
+                mode_line = (
+                    f"Volume mode: last {int(late_mode['window_sec'])}s | "
+                    f"minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f} | "
+                    f"buffer x{late_mode['buffer_avg_multiplier']:.2f} | "
+                    f"vol {'ON' if vol_check_enabled else 'OFF'}"
+                )
+            else:
+                mode_line = (
+                    f"Late mode:   last {int(late_mode['window_sec'])}s | "
+                    f"minC={int(late_mode['min_contracts'])} | "
+                    f"buffer x{late_mode['buffer_avg_multiplier']:.2f} | "
+                    f"vol {'ON' if vol_check_enabled else 'OFF'}"
+                )
             lines.insert(
                 7,
-                f"Late mode:   last {int(late_mode['window_sec'])}s | "
-                f"minC={int(late_mode['min_contracts'])} | "
-                f"buffer x{late_mode['buffer_avg_multiplier']:.2f} | "
-                f"vol {'ON' if vol_check_enabled else 'OFF'}",
+                mode_line,
             )
         elif last_20s_price_only:
             lines.insert(7, "Last 20s:   DANGEROUS BTC buffer = max($20.00, 50% of avg buffer)")
@@ -3269,7 +3283,6 @@ class LiveTradingBot:
             return {
                 "enabled": bool(getattr(mode, "enabled", False)),
                 "time_left_sec": int(getattr(mode, "time_left_sec", 0)),
-                "min_contracts": int(getattr(mode, "min_contracts", 1)),
                 "max_trades": int(getattr(mode, "max_trades", 1)),
                 "buffer_avg_multiplier": float(getattr(mode, "buffer_avg_multiplier", 1.0)),
                 "min_buffer_threshold_usd": float(getattr(mode, "min_buffer_threshold_usd", self.config.buffer)),
@@ -3291,7 +3304,6 @@ class LiveTradingBot:
             try:
                 mode.enabled = bool(payload.get("enabled", mode.enabled))
                 mode.time_left_sec = max(0, int(payload.get("time_left_sec", mode.time_left_sec)))
-                mode.min_contracts = max(1, int(payload.get("min_contracts", mode.min_contracts)))
                 mode.max_trades = max(1, int(payload.get("max_trades", mode.max_trades)))
                 mode.buffer_avg_multiplier = max(0.0, float(payload.get("buffer_avg_multiplier", mode.buffer_avg_multiplier)))
                 mode.min_buffer_threshold_usd = max(0.0, float(payload.get("min_buffer_threshold_usd", mode.min_buffer_threshold_usd)))
@@ -4008,16 +4020,19 @@ class LiveTradingBot:
 
         selected_min_contracts = (
             int(late_mode["min_contracts"])
-            if late_mode
+            if late_mode and str(late_mode.get("name", "")) != "volume_eval_mode" and ("min_contracts" in late_mode)
             else int(self.config.entry.min_contracts)
         )
         if late_mode:
+            mode_hint = ""
+            if str(late_mode.get("name", "")) == "volume_eval_mode":
+                mode_hint = f"minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f} | "
             signal_logger.info(
                 f"  Late mode active: last {int(late_mode['window_sec'])}s | "
                 f"mode={mode_name} | "
                 f"trades={mode_trade_count + 1}/{mode_max_trades} | "
                 f"late_total={total_late_mode_trade_count + 1}/{total_late_mode_max_trades} | "
-                f"min_contracts={selected_min_contracts} | "
+                f"{mode_hint}min_contracts={selected_min_contracts} | "
                 f"buffer_mult={late_mode['buffer_avg_multiplier']:.2f}"
             )
         
