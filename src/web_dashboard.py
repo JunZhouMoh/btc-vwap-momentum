@@ -445,7 +445,7 @@ _HTML = """<!DOCTYPE html>
             var modeWrParts = [];
             var modeMap = tr.win_rate_by_mode;
             var handledModes = {};
-            var modeOrder = ["normal", "manual", "mode_60s", "mode_40s", "mode_30s", "mode_20s", "unknown"];
+            var modeOrder = ["normal", "manual", "volume_eval_mode", "mode_60s", "mode_40s", "mode_30s", "mode_20s", "unknown"];
 
             function pushModeLine(modeKey) {
               if (!Object.prototype.hasOwnProperty.call(modeMap, modeKey)) return;
