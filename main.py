@@ -2155,6 +2155,30 @@ class Dashboard:
         fallback = float(getattr(vac_cfg, "min_current_volume_diff", 5000.0) or 5000.0)
         return [max(0.0, fallback)]
 
+    def _get_volume_eval_entry_trade_limits(self) -> List[int]:
+        mode_cfg = getattr(self.config.strategy, "volume_eval_mode", None)
+        raw = getattr(mode_cfg, "entry_trade_limits", None) if mode_cfg else None
+        limits: List[int] = []
+        if isinstance(raw, list):
+            for item in raw:
+                try:
+                    val = int(float(item))
+                except (TypeError, ValueError):
+                    continue
+                if val > 0:
+                    limits.append(val)
+
+        levels = self._get_volume_eval_threshold_levels()
+        level_count = len(levels) if levels else 1
+        if not limits:
+            return [1 for _ in range(level_count)]
+
+        if len(limits) < level_count:
+            limits.extend([limits[-1]] * (level_count - len(limits)))
+        elif len(limits) > level_count:
+            limits = limits[:level_count]
+        return limits
+
     def _get_volume_eval_next_min_current_diff(self, time_left: Optional[float] = None) -> Optional[float]:
         if time_left is None:
             time_left = max(0, self.state.end_time - time.time())
@@ -2167,7 +2191,15 @@ class Dashboard:
             return None
 
         used_count = self.stats.late_mode_trade_count("volume_eval_mode")
-        idx = min(max(used_count, 0), len(levels) - 1)
+        limits = self._get_volume_eval_entry_trade_limits()
+        remaining = max(used_count, 0)
+        idx = len(levels) - 1
+        for i, cap in enumerate(limits):
+            if remaining < cap:
+                idx = i
+                break
+            remaining -= cap
+        idx = min(max(idx, 0), len(levels) - 1)
         return float(levels[idx])
 
     def _is_volume_check_enabled_for_active_mode(self, active_mode: Optional[Dict[str, float]]) -> bool:
@@ -3294,6 +3326,7 @@ class LiveTradingBot:
                 "min_buffer_threshold_usd": float(getattr(mode, "min_buffer_threshold_usd", self.config.buffer)),
                 "volume_check_enabled": bool(getattr(mode, "volume_check_enabled", True)),
                 "entry_min_current_volume_diffs": list(getattr(mode, "entry_min_current_volume_diffs", [1000.0, 2000.0, 3000.0])),
+                "entry_trade_limits": list(getattr(mode, "entry_trade_limits", [1, 1, 1])),
                 "min_price": float(getattr(mode, "min_price", self.config.strategy.min_price)),
                 "max_price": float(getattr(mode, "max_price", self.config.strategy.max_price)),
             }
@@ -3327,6 +3360,18 @@ class LiveTradingBot:
                             levels.append(v)
                 if levels:
                     mode.entry_min_current_volume_diffs = levels
+                raw_limits = payload.get("entry_trade_limits", getattr(mode, "entry_trade_limits", []))
+                limits = []
+                if isinstance(raw_limits, list):
+                    for raw in raw_limits:
+                        try:
+                            v = int(float(raw))
+                        except (TypeError, ValueError):
+                            continue
+                        if v > 0:
+                            limits.append(v)
+                if limits:
+                    mode.entry_trade_limits = limits
                 mode.min_price = float(payload.get("min_price", mode.min_price))
                 mode.max_price = float(payload.get("max_price", mode.max_price))
             except (TypeError, ValueError):
@@ -3817,7 +3862,11 @@ class LiveTradingBot:
             mode_name = active_mode_name
             mode_max_trades = int(late_mode.get("max_trades", 1))
             if is_volume_eval_mode and volume_threshold_levels:
-                mode_max_trades = len(volume_threshold_levels)
+                entry_trade_limits = self.dashboard._get_volume_eval_entry_trade_limits()
+                if entry_trade_limits:
+                    mode_max_trades = sum(entry_trade_limits)
+                else:
+                    mode_max_trades = len(volume_threshold_levels)
             mode_trade_count = self.stats.late_mode_trade_count(mode_name)
             mode_trade_cap_ok = self.stats.can_enter_late_mode(mode_name, mode_max_trades)
         else:
