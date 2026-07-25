@@ -68,6 +68,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
     <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
+    <div class="card controls"><h2>Volume Accel Check</h2><div id="volumeAccelCheck" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalMode" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
@@ -122,7 +123,6 @@ _HTML = """<!DOCTYPE html>
       h.push('<div class="row"><label>Max Trades</label><input type="number" id="' + esc(k) + '_max_trades" step="1" value="' + esc(mode.max_trades) + '"/></div>');
       h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="' + esc(k) + '_buffer_avg_multiplier" step="0.01" value="' + esc(mode.buffer_avg_multiplier) + '"/></div>');
       h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="' + esc(k) + '_min_buffer_threshold_usd" step="0.1" value="' + esc(mode.min_buffer_threshold_usd) + '"/></div>');
-      h.push('<div class="row"><label>Volume Check</label><input type="checkbox" id="' + esc(k) + '_volume_check_enabled" ' + (mode.volume_check_enabled !== false ? 'checked' : '') + '/></div>');
       h.push('<div class="row"><label>Min Price</label><input type="number" id="' + esc(k) + '_min_price" step="0.001" value="' + esc(mode.min_price) + '"/></div>');
       h.push('<div class="row"><label>Max Price</label><input type="number" id="' + esc(k) + '_max_price" step="0.001" value="' + esc(mode.max_price) + '"/></div>');
       h.push('</div>');
@@ -180,6 +180,71 @@ _HTML = """<!DOCTYPE html>
       html.push('</div>');
       html.push('<div id="vemStatus" class="status"></div>');
       box.innerHTML = html.join('');
+    }
+
+    function renderVolumeAccelCheck(cfg) {
+      var box = document.getElementById('volumeAccelCheck');
+      if (!box) return;
+      if (!cfg) {
+        box.textContent = 'Volume accel check config unavailable';
+        return;
+      }
+
+      var html = [];
+      html.push('<div class="mode-box">');
+      html.push('<div class="mode-title">volume_acceleration_check</div>');
+      html.push('<div class="row"><label>Min Curr Diff</label><input type="number" id="vac_min_current_volume_diff" step="1" value="' + esc(cfg.min_current_volume_diff) + '"/></div>');
+      html.push('<div class="row"><label>Min Accel Diff</label><input type="number" id="vac_min_accel_diff" step="1" value="' + esc(cfg.min_accel_diff) + '"/></div>');
+      html.push('</div>');
+      html.push('<div style="margin-top:0.5rem" class="row">');
+      html.push('<button class="btn" onclick="saveVolumeAccelCheck()">Apply</button>');
+      html.push('<button class="btn secondary" onclick="loadVolumeAccelCheck()">Reload</button>');
+      html.push('</div>');
+      html.push('<div id="vacStatus" class="status"></div>');
+      box.innerHTML = html.join('');
+    }
+
+    function loadVolumeAccelCheck() {
+      var r = new XMLHttpRequest();
+      r.open('GET', '/api/volume-accel-check', true);
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status !== 200) {
+          var box = document.getElementById('volumeAccelCheck');
+          if (box) box.textContent = 'Could not load volume accel check (HTTP ' + r.status + ')';
+          return;
+        }
+        try {
+          var cfg = JSON.parse(r.responseText);
+          renderVolumeAccelCheck(cfg);
+        } catch (e) {
+          var box2 = document.getElementById('volumeAccelCheck');
+          if (box2) box2.textContent = 'Volume accel check parse error';
+        }
+      };
+      r.send();
+    }
+
+    function saveVolumeAccelCheck() {
+      var status = document.getElementById('vacStatus');
+      var payload = {
+        min_current_volume_diff: readNum('vac_min_current_volume_diff', 0.0),
+        min_accel_diff: readNum('vac_min_accel_diff', 0.0)
+      };
+
+      var r = new XMLHttpRequest();
+      r.open('POST', '/api/volume-accel-check', true);
+      r.setRequestHeader('Content-Type', 'application/json');
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status === 200) {
+          if (status) status.textContent = 'Applied';
+          loadVolumeAccelCheck();
+        } else {
+          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
+        }
+      };
+      r.send(JSON.stringify(payload));
     }
 
     function loadVolumeEvalMode() {
@@ -267,7 +332,6 @@ _HTML = """<!DOCTYPE html>
           max_trades: readInt(k + '_max_trades', 1),
           buffer_avg_multiplier: readNum(k + '_buffer_avg_multiplier', 1.0),
           min_buffer_threshold_usd: readNum(k + '_min_buffer_threshold_usd', 0.0),
-          volume_check_enabled: !!(document.getElementById(k + '_volume_check_enabled') && document.getElementById(k + '_volume_check_enabled').checked),
           min_price: readNum(k + '_min_price', 0.0),
           max_price: readNum(k + '_max_price', 1.0)
         });
@@ -576,6 +640,7 @@ _HTML = """<!DOCTYPE html>
       };
       r.send();
     }
+    loadVolumeAccelCheck();
     loadVolumeEvalMode();
     loadLateModes();
     tick();
@@ -629,6 +694,8 @@ def build_app(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_volume_accel_check: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -659,6 +726,20 @@ def build_app(
         return JSONResponse({"error": "Late mode controls unavailable"}, status_code=501)
       payload = await req.json()
       updated = update_late_modes(payload if isinstance(payload, dict) else {})
+      return JSONResponse(_sanitize_for_json(updated))
+
+    @app.get("/api/volume-accel-check")
+    async def api_volume_accel_check_get():
+      if not get_volume_accel_check:
+        return JSONResponse({"error": "Volume accel check controls unavailable"}, status_code=501)
+      return JSONResponse(_sanitize_for_json(get_volume_accel_check()))
+
+    @app.post("/api/volume-accel-check")
+    async def api_volume_accel_check_post(req: Request):
+      if not update_volume_accel_check:
+        return JSONResponse({"error": "Volume accel check controls unavailable"}, status_code=501)
+      payload = await req.json()
+      updated = update_volume_accel_check(payload if isinstance(payload, dict) else {})
       return JSONResponse(_sanitize_for_json(updated))
 
     @app.get("/api/volume-eval-mode")
@@ -711,6 +792,8 @@ def start_web_dashboard(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_volume_accel_check: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -723,6 +806,8 @@ def start_web_dashboard(
         holder,
         get_late_modes=get_late_modes,
         update_late_modes=update_late_modes,
+        get_volume_accel_check=get_volume_accel_check,
+        update_volume_accel_check=update_volume_accel_check,
         get_volume_eval_mode=get_volume_eval_mode,
         update_volume_eval_mode=update_volume_eval_mode,
         trigger_manual_buy=trigger_manual_buy,
