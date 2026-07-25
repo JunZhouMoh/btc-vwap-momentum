@@ -30,6 +30,7 @@
     "volume_eval_mode": {
       "enabled": true,
       "time_left_sec": 50,
+      "min_contracts": 1,
       "max_trades": 1,
       "buffer_avg_multiplier": 1.25,
       "min_buffer_threshold_usd": 30.0,
