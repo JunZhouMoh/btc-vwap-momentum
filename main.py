@@ -2136,6 +2136,40 @@ class Dashboard:
             "name": "volume_eval_mode",
         }
 
+    def _get_volume_eval_threshold_levels(self) -> List[float]:
+        mode_cfg = getattr(self.config.strategy, "volume_eval_mode", None)
+        raw = getattr(mode_cfg, "entry_min_current_volume_diffs", None) if mode_cfg else None
+        levels: List[float] = []
+        if isinstance(raw, list):
+            for item in raw:
+                try:
+                    val = float(item)
+                except (TypeError, ValueError):
+                    continue
+                if val >= 0.0:
+                    levels.append(val)
+        if levels:
+            return levels
+
+        vac_cfg = getattr(self.config.strategy, "volume_acceleration_check", None)
+        fallback = float(getattr(vac_cfg, "min_current_volume_diff", 5000.0) or 5000.0)
+        return [max(0.0, fallback)]
+
+    def _get_volume_eval_next_min_current_diff(self, time_left: Optional[float] = None) -> Optional[float]:
+        if time_left is None:
+            time_left = max(0, self.state.end_time - time.time())
+
+        if not self._get_volume_eval_mode(time_left):
+            return None
+
+        levels = self._get_volume_eval_threshold_levels()
+        if not levels:
+            return None
+
+        used_count = self.stats.late_mode_trade_count("volume_eval_mode")
+        idx = min(max(used_count, 0), len(levels) - 1)
+        return float(levels[idx])
+
     def _is_volume_check_enabled_for_active_mode(self, active_mode: Optional[Dict[str, float]]) -> bool:
         """Late-entry modes do not use volume gate; standalone volume_eval_mode can use it."""
         if not active_mode:
@@ -2288,6 +2322,7 @@ class Dashboard:
         up: TokenData,
         down: TokenData,
         window_sec: Optional[float] = None,
+        min_current_volume_diff_override: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Compare volume acceleration between favored and opposite side."""
         vac_cfg = getattr(self.config.strategy, "volume_acceleration_check", None)
@@ -2297,7 +2332,10 @@ class Dashboard:
         require_curr_lead = bool(getattr(vac_cfg, "require_current_volume_lead", True))
         min_accel_diff = float(getattr(vac_cfg, "min_accel_diff", 0.0) or 0.0)
         threshold = float(getattr(vac_cfg, "threshold", 5000.0) or 5000.0)
-        min_curr_diff = float(getattr(vac_cfg, "min_current_volume_diff", threshold) or threshold)
+        if min_current_volume_diff_override is None:
+            min_curr_diff = float(getattr(vac_cfg, "min_current_volume_diff", threshold) or threshold)
+        else:
+            min_curr_diff = float(min_current_volume_diff_override)
 
         now = time.time()
         curr_start = now - float(window_sec)
@@ -2464,7 +2502,13 @@ class Dashboard:
         up_trend_ok = up_trend is None or up_trend >= 0
         down_trend_ok = down_trend is None or down_trend <= 0
         fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
-        vol_speed = self._get_favorite_volume_speed_check(fav_name, up, down)
+        next_min_curr_diff = self._get_volume_eval_next_min_current_diff(time_left)
+        vol_speed = self._get_favorite_volume_speed_check(
+            fav_name,
+            up,
+            down,
+            min_current_volume_diff_override=next_min_curr_diff,
+        )
         vol_speed_ok = bool(vol_speed["ok"])
         vol_check_enabled = self._is_volume_check_enabled_for_active_mode(late_mode)
         vol_gate_ok = vol_speed_ok if vol_check_enabled else True
@@ -2855,7 +2899,13 @@ class Dashboard:
             up_trend_ok = up_trend is None or up_trend >= 0
             down_trend_ok = down_trend is None or down_trend <= 0
             fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
-            vol_speed = self._get_favorite_volume_speed_check(fav_name, up, down)
+            next_min_curr_diff = self._get_volume_eval_next_min_current_diff(time_left)
+            vol_speed = self._get_favorite_volume_speed_check(
+                fav_name,
+                up,
+                down,
+                min_current_volume_diff_override=next_min_curr_diff,
+            )
             vol_speed_ok = bool(vol_speed["ok"])
             vol_check_enabled = self._is_volume_check_enabled_for_active_mode(late_mode)
             vol_gate_ok = vol_speed_ok if vol_check_enabled else True
@@ -3224,6 +3274,7 @@ class LiveTradingBot:
                 "buffer_avg_multiplier": float(getattr(mode, "buffer_avg_multiplier", 1.0)),
                 "min_buffer_threshold_usd": float(getattr(mode, "min_buffer_threshold_usd", self.config.buffer)),
                 "volume_check_enabled": bool(getattr(mode, "volume_check_enabled", True)),
+                "entry_min_current_volume_diffs": list(getattr(mode, "entry_min_current_volume_diffs", [1000.0, 2000.0, 3000.0])),
                 "min_price": float(getattr(mode, "min_price", self.config.strategy.min_price)),
                 "max_price": float(getattr(mode, "max_price", self.config.strategy.max_price)),
             }
@@ -3245,6 +3296,18 @@ class LiveTradingBot:
                 mode.buffer_avg_multiplier = max(0.0, float(payload.get("buffer_avg_multiplier", mode.buffer_avg_multiplier)))
                 mode.min_buffer_threshold_usd = max(0.0, float(payload.get("min_buffer_threshold_usd", mode.min_buffer_threshold_usd)))
                 mode.volume_check_enabled = bool(payload.get("volume_check_enabled", mode.volume_check_enabled))
+                raw_levels = payload.get("entry_min_current_volume_diffs", getattr(mode, "entry_min_current_volume_diffs", []))
+                levels = []
+                if isinstance(raw_levels, list):
+                    for raw in raw_levels:
+                        try:
+                            v = float(raw)
+                        except (TypeError, ValueError):
+                            continue
+                        if v >= 0.0:
+                            levels.append(v)
+                if levels:
+                    mode.entry_min_current_volume_diffs = levels
                 mode.min_price = float(payload.get("min_price", mode.min_price))
                 mode.max_price = float(payload.get("max_price", mode.max_price))
             except (TypeError, ValueError):
@@ -3720,14 +3783,22 @@ class LiveTradingBot:
         """Execute entry order (live CLOB or simulation)."""
         time_left = max(0, self.state.end_time - time.time())
         late_mode = self.dashboard._get_volume_eval_mode(time_left) or self.dashboard._get_late_entry_mode(time_left)
+        active_mode_name = str(late_mode.get("name", "")) if late_mode else ""
+        is_volume_eval_mode = active_mode_name == "volume_eval_mode"
         late_modes_cfg = getattr(self.config.strategy, "late_entry_modes", None)
         total_late_mode_max_trades = int(getattr(late_modes_cfg, "total_max_trades", 3))
-        total_late_mode_trade_count = self.stats.total_late_mode_trade_count()
-        total_trade_cap_ok = self.stats.can_enter_late_mode_total(total_late_mode_max_trades)
+        total_late_mode_trade_count = sum(
+            self.stats.late_mode_trade_count(mode_key)
+            for mode_key in ["mode_60s", "mode_40s", "mode_30s", "mode_20s"]
+        )
+        total_trade_cap_ok = total_late_mode_trade_count < total_late_mode_max_trades
+        volume_threshold_levels = self.dashboard._get_volume_eval_threshold_levels()
 
         if late_mode:
-            mode_name = str(late_mode.get("name", ""))
+            mode_name = active_mode_name
             mode_max_trades = int(late_mode.get("max_trades", 1))
+            if is_volume_eval_mode and volume_threshold_levels:
+                mode_max_trades = len(volume_threshold_levels)
             mode_trade_count = self.stats.late_mode_trade_count(mode_name)
             mode_trade_cap_ok = self.stats.can_enter_late_mode(mode_name, mode_max_trades)
         else:
@@ -3744,7 +3815,7 @@ class LiveTradingBot:
                 )
                 return
 
-            if late_mode and not total_trade_cap_ok:
+            if late_mode and (not is_volume_eval_mode) and not total_trade_cap_ok:
                 signal_logger.info(
                     f"SIGNAL IGNORED: {side} - total late-mode trade cap reached "
                     f"({total_late_mode_trade_count}/{total_late_mode_max_trades})"
@@ -3794,10 +3865,12 @@ class LiveTradingBot:
             (side == "BUY_DOWN" and token_trend <= 0)
         )
         fav_name = "UP" if side == "BUY_UP" else "DOWN"
+        next_min_curr_diff = self.dashboard._get_volume_eval_next_min_current_diff(time_left)
         vol_speed = self.dashboard._get_favorite_volume_speed_check(
             fav_name,
             self.state.up_token,
             self.state.down_token,
+            min_current_volume_diff_override=next_min_curr_diff,
         )
         vol_speed_ok = bool(vol_speed["ok"])
         vol_check_enabled = self.dashboard._is_volume_check_enabled_for_active_mode(late_mode)
