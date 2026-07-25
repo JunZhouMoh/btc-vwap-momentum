@@ -75,7 +75,7 @@ class VolumeEvalModeConfig:
     """Standalone volume-first entry mode (separate from late-entry modes)."""
     enabled: bool = False
     time_left_sec: int = 50
-    min_contracts: int = 45
+    min_contracts: int = 1
     max_trades: int = 1
     buffer_avg_multiplier: float = 1.25
     min_buffer_threshold_usd: float = 30.0
@@ -322,7 +322,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
     volume_eval_mode = VolumeEvalModeConfig(
         enabled=bool(volume_eval_data.get("enabled", False)),
         time_left_sec=_to_int(volume_eval_data.get("time_left_sec", 50), 50),
-        min_contracts=_to_int(volume_eval_data.get("min_contracts", 45), 45),
+        min_contracts=_to_int(volume_eval_data.get("min_contracts", 1), 1),
         max_trades=_to_int(volume_eval_data.get("max_trades", 1), 1),
         buffer_avg_multiplier=_to_float(volume_eval_data.get("buffer_avg_multiplier", 1.25), 1.25),
         min_buffer_threshold_usd=_to_float(volume_eval_data.get("min_buffer_threshold_usd", 30.0), 30.0),
