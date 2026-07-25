@@ -2386,7 +2386,8 @@ class Dashboard:
         has_data = (fav_curr + fav_prev + other_curr + other_prev) > 0.0
 
         curr_lead_ok = (fav_curr - other_curr) >= min_curr_diff
-        accel_ok = (fav_accel - other_accel) >= min_accel_diff
+        # Acceleration is informational only; do not gate entries on accel lead.
+        accel_ok = True
         if require_curr_lead:
             rule_ok = curr_lead_ok and accel_ok
         else:
@@ -2576,7 +2577,7 @@ class Dashboard:
                 self.last_signal = ""
             elif vol_check_enabled and not vol_speed_ok:
                 label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
-                signal = f"⏳ WAIT ({label}: {fav_name} volume not accelerating faster)"
+                signal = f"⏳ WAIT ({label}: {fav_name} current volume lead too small)"
                 self.last_signal = ""
             else:
                 label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
@@ -2596,7 +2597,7 @@ class Dashboard:
             elif not mom_ok:
                 signal = "🟡 ALMOST (need Mom>0%)"
             elif vol_check_enabled and not vol_speed_ok:
-                signal = f"🟡 ALMOST (need {fav_name} volume accelerating faster)"
+                signal = f"🟡 ALMOST (need {fav_name} current volume lead)"
             elif not btc_buffer_ok:
                 if btc_buffer:
                     signal = f"🟡 ALMOST (need BTC buffer >= ${btc_buffer['buffer_abs_usd']:.2f})"
@@ -2621,7 +2622,7 @@ class Dashboard:
             elif not mom_ok:
                 signal = f"⏳ WAIT (Mom≤0%)"
             elif vol_check_enabled and not vol_speed_ok:
-                signal = f"⏳ WAIT ({fav_name} volume not accelerating faster)"
+                signal = f"⏳ WAIT ({fav_name} current volume lead too small)"
             elif not fav_trend_ok:
                 signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
             elif not btc_buffer_ok and btc_buffer:
@@ -2977,7 +2978,7 @@ class Dashboard:
                     signal = f"⏳ WAIT ({label}: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
                 elif vol_check_enabled and not vol_speed_ok:
                     label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
-                    signal = f"⏳ WAIT ({label}: {fav_name} volume not accelerating faster)"
+                    signal = f"⏳ WAIT ({label}: {fav_name} current volume lead too small)"
                 else:
                     label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
                     signal = f"⏳ WAIT ({label}: P not in range)"
@@ -2991,7 +2992,7 @@ class Dashboard:
                 elif not mom_ok:
                     signal = "🟡 ALMOST (need Mom>0%)"
                 elif vol_check_enabled and not vol_speed_ok:
-                    signal = f"🟡 ALMOST (need {fav_name} volume accelerating faster)"
+                    signal = f"🟡 ALMOST (need {fav_name} current volume lead)"
                 elif not btc_buffer_ok and btc_buffer:
                     signal = f"🟡 ALMOST (need BTC buffer >= ${btc_buffer['buffer_abs_usd']:.2f})"
                 elif fav_dev >= max_dev:
@@ -3011,7 +3012,7 @@ class Dashboard:
             elif not mom_ok:
                 signal = "⏳ WAIT (Mom≤0%)"
             elif vol_check_enabled and not vol_speed_ok:
-                signal = f"⏳ WAIT ({fav_name} volume not accelerating faster)"
+                signal = f"⏳ WAIT ({fav_name} current volume lead too small)"
             elif not fav_trend_ok:
                 signal = f"⏳ WAIT ({fav_name} not trending {'up' if fav_name == 'UP' else 'down'})"
             elif not btc_buffer_ok and btc_buffer:
