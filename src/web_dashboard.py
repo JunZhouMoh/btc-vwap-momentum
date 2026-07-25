@@ -162,6 +162,9 @@ _HTML = """<!DOCTYPE html>
       }
 
       var html = [];
+      var levels = (cfg.entry_min_current_volume_diffs && cfg.entry_min_current_volume_diffs.length)
+        ? cfg.entry_min_current_volume_diffs
+        : [1000, 2000, 3000];
       html.push('<div class="mode-box">');
       html.push('<div class="mode-title">volume_eval_mode</div>');
       html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="vem_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
@@ -171,6 +174,9 @@ _HTML = """<!DOCTYPE html>
       html.push('<div class="row"><label>Buffer Mult</label><input type="number" id="vem_buffer_avg_multiplier" step="0.01" value="' + esc(cfg.buffer_avg_multiplier) + '"/></div>');
       html.push('<div class="row"><label>Min Buffer $</label><input type="number" id="vem_min_buffer_threshold_usd" step="0.1" value="' + esc(cfg.min_buffer_threshold_usd) + '"/></div>');
       html.push('<div class="row"><label>Volume Check</label><input type="checkbox" id="vem_volume_check_enabled" ' + (cfg.volume_check_enabled !== false ? 'checked' : '') + '/></div>');
+      html.push('<div class="row"><label>Entry 1 MinVol</label><input type="number" id="vem_mcvd_1" step="1" value="' + esc(levels[0] != null ? levels[0] : 1000) + '"/></div>');
+      html.push('<div class="row"><label>Entry 2 MinVol</label><input type="number" id="vem_mcvd_2" step="1" value="' + esc(levels[1] != null ? levels[1] : levels[0]) + '"/></div>');
+      html.push('<div class="row"><label>Entry 3 MinVol</label><input type="number" id="vem_mcvd_3" step="1" value="' + esc(levels[2] != null ? levels[2] : levels[1]) + '"/></div>');
       html.push('<div class="row"><label>Min Price</label><input type="number" id="vem_min_price" step="0.001" value="' + esc(cfg.min_price) + '"/></div>');
       html.push('<div class="row"><label>Max Price</label><input type="number" id="vem_max_price" step="0.001" value="' + esc(cfg.max_price) + '"/></div>');
       html.push('</div>');
@@ -278,6 +284,11 @@ _HTML = """<!DOCTYPE html>
         buffer_avg_multiplier: readNum('vem_buffer_avg_multiplier', 1.0),
         min_buffer_threshold_usd: readNum('vem_min_buffer_threshold_usd', 0.0),
         volume_check_enabled: !!(document.getElementById('vem_volume_check_enabled') && document.getElementById('vem_volume_check_enabled').checked),
+        entry_min_current_volume_diffs: [
+          readNum('vem_mcvd_1', 1000),
+          readNum('vem_mcvd_2', 2000),
+          readNum('vem_mcvd_3', 3000)
+        ],
         min_price: readNum('vem_min_price', 0.0),
         max_price: readNum('vem_max_price', 1.0)
       };
