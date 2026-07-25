@@ -169,7 +169,6 @@ _HTML = """<!DOCTYPE html>
       html.push('<div class="mode-title">volume_eval_mode</div>');
       html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="vem_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
       html.push('<div class="row"><label>Time Left</label><input type="number" id="vem_time_left_sec" step="1" value="' + esc(cfg.time_left_sec) + '"/></div>');
-      html.push('<div class="row"><label>Min Contracts</label><input type="number" id="vem_min_contracts" step="1" value="' + esc(cfg.min_contracts) + '"/></div>');
       html.push('<div class="row"><label>Max Trades</label><input type="number" id="vem_max_trades" step="1" value="' + esc(cfg.max_trades) + '"/></div>');
       html.push('<div class="row"><label>Buffer Mult</label><input type="number" id="vem_buffer_avg_multiplier" step="0.01" value="' + esc(cfg.buffer_avg_multiplier) + '"/></div>');
       html.push('<div class="row"><label>Min Buffer $</label><input type="number" id="vem_min_buffer_threshold_usd" step="0.1" value="' + esc(cfg.min_buffer_threshold_usd) + '"/></div>');
@@ -279,7 +278,6 @@ _HTML = """<!DOCTYPE html>
       var payload = {
         enabled: !!(document.getElementById('vem_enabled') && document.getElementById('vem_enabled').checked),
         time_left_sec: readInt('vem_time_left_sec', 0),
-        min_contracts: readInt('vem_min_contracts', 1),
         max_trades: readInt('vem_max_trades', 1),
         buffer_avg_multiplier: readNum('vem_buffer_avg_multiplier', 1.0),
         min_buffer_threshold_usd: readNum('vem_min_buffer_threshold_usd', 0.0),
