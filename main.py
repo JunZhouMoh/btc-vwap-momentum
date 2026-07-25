@@ -25,6 +25,8 @@ import re
 import signal
 import sys
 import threading
+import inspect
+import importlib
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from dataclasses import dataclass, field
@@ -71,39 +73,75 @@ signal_logger = NoOpLogger()
 
 # Project imports
 from src.config_loader import load_config, validate_config
+_web_dashboard_module = None
 try:
-    from src.web_dashboard import WebSnapshotHolder, start_web_dashboard, build_app
-except ImportError:
-    # Backward compatibility for older web_dashboard modules that expose only start_web_dashboard.
-    from src.web_dashboard import start_web_dashboard
+    _web_dashboard_module = importlib.import_module("src.web_dashboard")
+except Exception as e:
+    logger.warning(f"web_dashboard module unavailable: {e}")
 
-    class WebSnapshotHolder:
-        """Minimal thread-safe state holder used by ASGI fallback app."""
 
-        def __init__(self):
-            self._lock = threading.Lock()
-            self._data = {"status": "starting"}
+class WebSnapshotHolder:
+    """Minimal thread-safe state holder used by ASGI fallback app."""
 
-        def set(self, data):
-            with self._lock:
-                self._data = dict(data)
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._data = {"status": "starting"}
 
-        def get(self):
-            with self._lock:
-                return dict(self._data)
+    def set(self, data):
+        with self._lock:
+            self._data = dict(data)
 
-    def build_app(holder, get_late_modes=None, update_late_modes=None, trigger_manual_buy=None):
-        """Fallback ASGI app for environments with older dashboard module."""
-        from fastapi import FastAPI
-        from fastapi.responses import JSONResponse
+    def get(self):
+        with self._lock:
+            return dict(self._data)
 
-        fallback = FastAPI(title="BTC Live Bot (fallback)", docs_url=None, redoc_url=None)
 
-        @fallback.get("/api/state")
-        async def api_state():
-            return JSONResponse(holder.get())
+if _web_dashboard_module and hasattr(_web_dashboard_module, "WebSnapshotHolder"):
+    WebSnapshotHolder = getattr(_web_dashboard_module, "WebSnapshotHolder")
 
-        return fallback
+
+def build_app(holder, get_late_modes=None, update_late_modes=None, trigger_manual_buy=None):
+    """Build ASGI app from dashboard module when available, else lightweight fallback."""
+    if _web_dashboard_module and hasattr(_web_dashboard_module, "build_app"):
+        return _web_dashboard_module.build_app(
+            holder,
+            get_late_modes=get_late_modes,
+            update_late_modes=update_late_modes,
+            trigger_manual_buy=trigger_manual_buy,
+        )
+
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
+
+    fallback = FastAPI(title="BTC Live Bot (fallback)", docs_url=None, redoc_url=None)
+
+    @fallback.get("/api/state")
+    async def api_state():
+        return JSONResponse(holder.get())
+
+    return fallback
+
+
+def start_web_dashboard(host, port, holder, get_late_modes=None, update_late_modes=None, trigger_manual_buy=None):
+    """Start dashboard with compatibility for multiple dashboard module signatures."""
+    if not _web_dashboard_module or not hasattr(_web_dashboard_module, "start_web_dashboard"):
+        logger.warning("start_web_dashboard unavailable in src.web_dashboard; dashboard disabled")
+        return False
+
+    impl = getattr(_web_dashboard_module, "start_web_dashboard")
+    try:
+        sig = inspect.signature(impl)
+        kwargs = {}
+        if "get_late_modes" in sig.parameters:
+            kwargs["get_late_modes"] = get_late_modes
+        if "update_late_modes" in sig.parameters:
+            kwargs["update_late_modes"] = update_late_modes
+        if "trigger_manual_buy" in sig.parameters:
+            kwargs["trigger_manual_buy"] = trigger_manual_buy
+        return bool(impl(host, port, holder, **kwargs))
+    except TypeError:
+        # Older signatures may accept only (host, port, holder).
+        return bool(impl(host, port, holder))
 from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
