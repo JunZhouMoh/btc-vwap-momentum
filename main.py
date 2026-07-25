@@ -2126,6 +2126,7 @@ class Dashboard:
 
         return {
             "window_sec": window_sec,
+            "min_contracts": float(getattr(mode_cfg, "min_contracts", self.config.entry.min_contracts)),
             "max_trades": float(getattr(mode_cfg, "max_trades", 1)),
             "buffer_avg_multiplier": float(getattr(mode_cfg, "buffer_avg_multiplier", 1.0)),
             "min_buffer_threshold_usd": float(getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer)),
@@ -2524,7 +2525,10 @@ class Dashboard:
                 if late_mode:
                     mcvd_hint = ""
                     if str(late_mode.get("name", "")) == "volume_eval_mode":
-                        mcvd_hint = f", minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f}"
+                        mcvd_hint = (
+                            f", minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f}"
+                            f", minC={int(late_mode.get('min_contracts', self.config.entry.min_contracts))}"
+                        )
                     signal = (
                         f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s: "
                         f"x{late_mode['buffer_avg_multiplier']:.2f} buffer, "
@@ -2617,6 +2621,7 @@ class Dashboard:
                 mode_line = (
                     f"Volume mode: last {int(late_mode['window_sec'])}s | "
                     f"minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f} | "
+                    f"minC={int(late_mode.get('min_contracts', self.config.entry.min_contracts))} | "
                     f"buffer x{late_mode['buffer_avg_multiplier']:.2f} | "
                     f"vol {'ON' if vol_check_enabled else 'OFF'}"
                 )
@@ -3283,6 +3288,7 @@ class LiveTradingBot:
             return {
                 "enabled": bool(getattr(mode, "enabled", False)),
                 "time_left_sec": int(getattr(mode, "time_left_sec", 0)),
+                "min_contracts": int(getattr(mode, "min_contracts", self.config.entry.min_contracts)),
                 "max_trades": int(getattr(mode, "max_trades", 1)),
                 "buffer_avg_multiplier": float(getattr(mode, "buffer_avg_multiplier", 1.0)),
                 "min_buffer_threshold_usd": float(getattr(mode, "min_buffer_threshold_usd", self.config.buffer)),
@@ -3304,6 +3310,7 @@ class LiveTradingBot:
             try:
                 mode.enabled = bool(payload.get("enabled", mode.enabled))
                 mode.time_left_sec = max(0, int(payload.get("time_left_sec", mode.time_left_sec)))
+                mode.min_contracts = max(1, int(payload.get("min_contracts", mode.min_contracts)))
                 mode.max_trades = max(1, int(payload.get("max_trades", mode.max_trades)))
                 mode.buffer_avg_multiplier = max(0.0, float(payload.get("buffer_avg_multiplier", mode.buffer_avg_multiplier)))
                 mode.min_buffer_threshold_usd = max(0.0, float(payload.get("min_buffer_threshold_usd", mode.min_buffer_threshold_usd)))
@@ -4020,7 +4027,7 @@ class LiveTradingBot:
 
         selected_min_contracts = (
             int(late_mode["min_contracts"])
-            if late_mode and str(late_mode.get("name", "")) != "volume_eval_mode" and ("min_contracts" in late_mode)
+            if late_mode and ("min_contracts" in late_mode)
             else int(self.config.entry.min_contracts)
         )
         if late_mode:
