@@ -36,6 +36,7 @@
       "min_buffer_threshold_usd": 30.0,
       "volume_check_enabled": true,
       "entry_min_current_volume_diffs": [1000, 2000, 3000],
+      "entry_trade_limits": [1, 1, 1],
       "min_price": 0.84,
       "max_price": 0.96
     },
