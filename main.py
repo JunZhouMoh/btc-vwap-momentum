@@ -71,7 +71,39 @@ signal_logger = NoOpLogger()
 
 # Project imports
 from src.config_loader import load_config, validate_config
-from src.web_dashboard import WebSnapshotHolder, start_web_dashboard, build_app
+try:
+    from src.web_dashboard import WebSnapshotHolder, start_web_dashboard, build_app
+except ImportError:
+    # Backward compatibility for older web_dashboard modules that expose only start_web_dashboard.
+    from src.web_dashboard import start_web_dashboard
+
+    class WebSnapshotHolder:
+        """Minimal thread-safe state holder used by ASGI fallback app."""
+
+        def __init__(self):
+            self._lock = threading.Lock()
+            self._data = {"status": "starting"}
+
+        def set(self, data):
+            with self._lock:
+                self._data = dict(data)
+
+        def get(self):
+            with self._lock:
+                return dict(self._data)
+
+    def build_app(holder, get_late_modes=None, update_late_modes=None, trigger_manual_buy=None):
+        """Fallback ASGI app for environments with older dashboard module."""
+        from fastapi import FastAPI
+        from fastapi.responses import JSONResponse
+
+        fallback = FastAPI(title="BTC Live Bot (fallback)", docs_url=None, redoc_url=None)
+
+        @fallback.get("/api/state")
+        async def api_state():
+            return JSONResponse(holder.get())
+
+        return fallback
 from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
