@@ -2103,7 +2103,6 @@ class Dashboard:
                         "max_trades": float(mode_cfg.max_trades),
                         "buffer_avg_multiplier": float(mode_cfg.buffer_avg_multiplier),
                         "min_buffer_threshold_usd": float(getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer)),
-                        "volume_check_enabled": bool(getattr(mode_cfg, "volume_check_enabled", True)),
                         "min_price": float(mode_cfg.min_price),
                         "max_price": float(mode_cfg.max_price),
                         "name": f"mode_{int(window_sec)}s",
@@ -2136,6 +2135,14 @@ class Dashboard:
             "max_price": float(getattr(mode_cfg, "max_price", self.config.strategy.max_price)),
             "name": "volume_eval_mode",
         }
+
+    def _is_volume_check_enabled_for_active_mode(self, active_mode: Optional[Dict[str, float]]) -> bool:
+        """Late-entry modes do not use volume gate; standalone volume_eval_mode can use it."""
+        if not active_mode:
+            return True
+        if str(active_mode.get("name", "")) == "volume_eval_mode":
+            return bool(active_mode.get("volume_check_enabled", True))
+        return False
 
     def _get_btc_buffer_status(self) -> Optional[Dict[str, float]]:
         buffer_stats = self._get_recent_btc_buffer()
@@ -2459,7 +2466,7 @@ class Dashboard:
         fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
         vol_speed = self._get_favorite_volume_speed_check(fav_name, up, down)
         vol_speed_ok = bool(vol_speed["ok"])
-        vol_check_enabled = bool(late_mode.get("volume_check_enabled", True)) if late_mode else True
+        vol_check_enabled = self._is_volume_check_enabled_for_active_mode(late_mode)
         vol_gate_ok = vol_speed_ok if vol_check_enabled else True
         
         signal = "⏳ WAIT"
@@ -2850,7 +2857,7 @@ class Dashboard:
             fav_trend_ok = (fav_name == "UP" and up_trend_ok) or (fav_name == "DOWN" and down_trend_ok)
             vol_speed = self._get_favorite_volume_speed_check(fav_name, up, down)
             vol_speed_ok = bool(vol_speed["ok"])
-            vol_check_enabled = bool(late_mode.get("volume_check_enabled", True)) if late_mode else True
+            vol_check_enabled = self._is_volume_check_enabled_for_active_mode(late_mode)
             vol_gate_ok = vol_speed_ok if vol_check_enabled else True
 
             late_window_price_only = late_mode is not None
@@ -3129,7 +3136,6 @@ class LiveTradingBot:
                     "max_trades": int(getattr(m, "max_trades", 1)),
                     "buffer_avg_multiplier": float(getattr(m, "buffer_avg_multiplier", 1.0)),
                     "min_buffer_threshold_usd": float(getattr(m, "min_buffer_threshold_usd", self.config.buffer)),
-                    "volume_check_enabled": bool(getattr(m, "volume_check_enabled", True)),
                     "min_price": float(getattr(m, "min_price", 0.0)),
                     "max_price": float(getattr(m, "max_price", 1.0)),
                 })
@@ -3171,13 +3177,39 @@ class LiveTradingBot:
                         mode_cfg.max_trades = max(1, int(row.get("max_trades", mode_cfg.max_trades)))
                         mode_cfg.buffer_avg_multiplier = max(0.0, float(row.get("buffer_avg_multiplier", mode_cfg.buffer_avg_multiplier)))
                         mode_cfg.min_buffer_threshold_usd = max(0.0, float(row.get("min_buffer_threshold_usd", getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer))))
-                        mode_cfg.volume_check_enabled = bool(row.get("volume_check_enabled", getattr(mode_cfg, "volume_check_enabled", True)))
                         mode_cfg.min_price = float(row.get("min_price", mode_cfg.min_price))
                         mode_cfg.max_price = float(row.get("max_price", mode_cfg.max_price))
                     except (TypeError, ValueError):
                         continue
 
         return self._web_get_late_modes()
+
+    def _web_get_volume_accel_check(self) -> Dict[str, Any]:
+        with self._config_lock:
+            vac = getattr(self.config.strategy, "volume_acceleration_check", None)
+            if not vac:
+                return {"min_current_volume_diff": 0.0, "min_accel_diff": 0.0}
+            return {
+                "min_current_volume_diff": float(getattr(vac, "min_current_volume_diff", 0.0) or 0.0),
+                "min_accel_diff": float(getattr(vac, "min_accel_diff", 0.0) or 0.0),
+            }
+
+    def _web_update_volume_accel_check(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return self._web_get_volume_accel_check()
+
+        with self._config_lock:
+            vac = getattr(self.config.strategy, "volume_acceleration_check", None)
+            if not vac:
+                return {"min_current_volume_diff": 0.0, "min_accel_diff": 0.0}
+
+            try:
+                vac.min_current_volume_diff = max(0.0, float(payload.get("min_current_volume_diff", vac.min_current_volume_diff)))
+                vac.min_accel_diff = max(0.0, float(payload.get("min_accel_diff", vac.min_accel_diff)))
+            except (TypeError, ValueError):
+                pass
+
+        return self._web_get_volume_accel_check()
 
     def _web_get_volume_eval_mode(self) -> Dict[str, Any]:
         with self._config_lock:
@@ -3482,6 +3514,8 @@ class LiveTradingBot:
                 self._web_snapshot_holder,
                 get_late_modes=self._web_get_late_modes,
                 update_late_modes=self._web_update_late_modes,
+                get_volume_accel_check=self._web_get_volume_accel_check,
+                update_volume_accel_check=self._web_update_volume_accel_check,
                 get_volume_eval_mode=self._web_get_volume_eval_mode,
                 update_volume_eval_mode=self._web_update_volume_eval_mode,
                 trigger_manual_buy=self._web_trigger_manual_buy,
@@ -3766,7 +3800,7 @@ class LiveTradingBot:
             self.state.down_token,
         )
         vol_speed_ok = bool(vol_speed["ok"])
-        vol_check_enabled = bool(late_mode.get("volume_check_enabled", True)) if late_mode else True
+        vol_check_enabled = self.dashboard._is_volume_check_enabled_for_active_mode(late_mode)
         vol_gate_ok = vol_speed_ok if vol_check_enabled else True
 
         # Defensive time cutoff / buffer / trend gating applies only to auto entries.
