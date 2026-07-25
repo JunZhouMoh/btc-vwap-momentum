@@ -195,7 +195,7 @@ class Position:
     min_price_seen: float = 0.0  # Lowest price after entry (for drawdown tracking)
     btc_price_at_entry: float = 0.0    # Chainlink BTC/USD when order was submitted
     btc_anchor_at_entry: float = 0.0   # BTC anchor (market-open price) at order submission
-    entry_mode: str = "normal"        # normal | mode_60s | mode_40s | mode_30s | mode_20s | manual
+    entry_mode: str = "normal"        # normal | volume_eval_mode | mode_60s | mode_40s | mode_30s | mode_20s | manual
     mode_legs: List[Dict[str, Any]] = field(default_factory=list)  # [{mode, contracts, entry_price}]
 
 
@@ -2116,6 +2116,27 @@ class Dashboard:
         # Prioritize the tightest active window (20s over 40s over 60s).
         return sorted(candidates, key=lambda item: item["window_sec"])[0]
 
+    def _get_volume_eval_mode(self, time_left: float) -> Optional[Dict[str, float]]:
+        mode_cfg = getattr(self.config.strategy, "volume_eval_mode", None)
+        if not mode_cfg or not bool(getattr(mode_cfg, "enabled", False)):
+            return None
+
+        window_sec = float(max(0, getattr(mode_cfg, "time_left_sec", 0)))
+        if time_left > window_sec:
+            return None
+
+        return {
+            "window_sec": window_sec,
+            "min_contracts": float(getattr(mode_cfg, "min_contracts", 1)),
+            "max_trades": float(getattr(mode_cfg, "max_trades", 1)),
+            "buffer_avg_multiplier": float(getattr(mode_cfg, "buffer_avg_multiplier", 1.0)),
+            "min_buffer_threshold_usd": float(getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer)),
+            "volume_check_enabled": bool(getattr(mode_cfg, "volume_check_enabled", True)),
+            "min_price": float(getattr(mode_cfg, "min_price", self.config.strategy.min_price)),
+            "max_price": float(getattr(mode_cfg, "max_price", self.config.strategy.max_price)),
+            "name": "volume_eval_mode",
+        }
+
     def _get_btc_buffer_status(self) -> Optional[Dict[str, float]]:
         buffer_stats = self._get_recent_btc_buffer()
         if not buffer_stats:
@@ -2135,7 +2156,7 @@ class Dashboard:
 
         buffer_abs_usd = base_buffer_abs_usd
         time_left = max(0, self.state.end_time - time.time())
-        late_mode = self._get_late_entry_mode(time_left)
+        late_mode = self._get_volume_eval_mode(time_left) or self._get_late_entry_mode(time_left)
         if late_mode:
             mode_floor_usd = float(late_mode.get("min_buffer_threshold_usd", self.config.buffer))
             buffer_abs_usd = max(mode_floor_usd, stats_abs_usd * late_mode["buffer_avg_multiplier"])
@@ -2443,7 +2464,7 @@ class Dashboard:
         
         signal = "⏳ WAIT"
         signal_color = "yellow"
-        late_mode = self._get_late_entry_mode(time_left)
+        late_mode = self._get_volume_eval_mode(time_left) or self._get_late_entry_mode(time_left)
         late_window_price_only = late_mode is not None
         last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
         price_only_gate = late_window_price_only or last_20s_price_only
@@ -2804,7 +2825,7 @@ class Dashboard:
             btc_buffer = self._get_btc_buffer_status()
 
             # Use late-entry mode price range if active, otherwise use strategy range
-            late_mode = self._get_late_entry_mode(time_left)
+            late_mode = self._get_volume_eval_mode(time_left) or self._get_late_entry_mode(time_left)
             if late_mode:
                 min_price = late_mode.get("min_price", 0.0)
                 max_price = late_mode.get("max_price", 1.0)
@@ -3621,7 +3642,7 @@ class LiveTradingBot:
     ):
         """Execute entry order (live CLOB or simulation)."""
         time_left = max(0, self.state.end_time - time.time())
-        late_mode = self.dashboard._get_late_entry_mode(time_left)
+        late_mode = self.dashboard._get_volume_eval_mode(time_left) or self.dashboard._get_late_entry_mode(time_left)
         late_modes_cfg = getattr(self.config.strategy, "late_entry_modes", None)
         total_late_mode_max_trades = int(getattr(late_modes_cfg, "total_max_trades", 3))
         total_late_mode_trade_count = self.stats.total_late_mode_trade_count()
@@ -4266,7 +4287,10 @@ class LiveTradingBot:
                     
                     # Check for entry signal - запускаем в отдельном task
                     time_left_now = max(0.0, self.state.end_time - time.time())
-                    late_mode_active = self.dashboard._get_late_entry_mode(time_left_now) is not None
+                    late_mode_active = (
+                        self.dashboard._get_volume_eval_mode(time_left_now) is not None
+                        or self.dashboard._get_late_entry_mode(time_left_now) is not None
+                    )
                     can_attempt_signal = self.stats.can_enter() or late_mode_active
                     queued_manual_signal = self.dashboard.manual_signal_pending
                     queued_auto_signal = self.dashboard.last_signal
