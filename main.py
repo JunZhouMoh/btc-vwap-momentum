@@ -125,8 +125,54 @@ def build_app(holder, get_late_modes=None, update_late_modes=None, trigger_manua
 def start_web_dashboard(host, port, holder, get_late_modes=None, update_late_modes=None, trigger_manual_buy=None):
     """Start dashboard with compatibility for multiple dashboard module signatures."""
     if not _web_dashboard_module or not hasattr(_web_dashboard_module, "start_web_dashboard"):
-        logger.warning("start_web_dashboard unavailable in src.web_dashboard; dashboard disabled")
-        return False
+        logger.warning("start_web_dashboard unavailable in src.web_dashboard; using embedded fallback server")
+
+        try:
+            import socket
+            import uvicorn
+
+            fallback_app = build_app(
+                holder,
+                get_late_modes=get_late_modes,
+                update_late_modes=update_late_modes,
+                trigger_manual_buy=trigger_manual_buy,
+            )
+
+            def _probe_host(bind_host: str) -> str:
+                if bind_host in ("0.0.0.0", ""):
+                    return "127.0.0.1"
+                if bind_host in ("::", "[::]"):
+                    return "::1"
+                return bind_host
+
+            def _run() -> None:
+                try:
+                    uvicorn.run(
+                        fallback_app,
+                        host=host,
+                        port=port,
+                        log_level="warning",
+                        access_log=False,
+                    )
+                except Exception:
+                    logger.exception("Embedded fallback web dashboard crashed")
+
+            t = threading.Thread(target=_run, name="web-dashboard-fallback", daemon=True)
+            t.start()
+
+            probe = _probe_host(host)
+            for _ in range(60):
+                time.sleep(0.1)
+                try:
+                    with socket.create_connection((probe, port), timeout=0.4):
+                        return True
+                except OSError:
+                    continue
+
+            return False
+        except Exception as e:
+            logger.warning(f"Embedded fallback dashboard unavailable: {e}")
+            return False
 
     impl = getattr(_web_dashboard_module, "start_web_dashboard")
     try:
