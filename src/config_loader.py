@@ -80,6 +80,7 @@ class VolumeEvalModeConfig:
     buffer_avg_multiplier: float = 1.25
     min_buffer_threshold_usd: float = 30.0
     volume_check_enabled: bool = True
+    entry_min_current_volume_diffs: list[float] = field(default_factory=lambda: [1000.0, 2000.0, 3000.0])
     min_price: float = 0.84
     max_price: float = 0.96
 
@@ -308,6 +309,16 @@ def load_config(config_path: Optional[str] = None) -> Config:
             mode_cfg.name = fallback_name
 
     volume_eval_data = strategy_data.get("volume_eval_mode", {})
+    raw_entry_diffs = volume_eval_data.get("entry_min_current_volume_diffs", [1000.0, 2000.0, 3000.0])
+    entry_min_current_volume_diffs: list[float] = []
+    if isinstance(raw_entry_diffs, list):
+        for raw in raw_entry_diffs:
+            val = _to_float(raw, -1.0)
+            if val >= 0.0:
+                entry_min_current_volume_diffs.append(val)
+    if not entry_min_current_volume_diffs:
+        entry_min_current_volume_diffs = [1000.0, 2000.0, 3000.0]
+
     volume_eval_mode = VolumeEvalModeConfig(
         enabled=bool(volume_eval_data.get("enabled", False)),
         time_left_sec=_to_int(volume_eval_data.get("time_left_sec", 50), 50),
@@ -316,6 +327,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
         buffer_avg_multiplier=_to_float(volume_eval_data.get("buffer_avg_multiplier", 1.25), 1.25),
         min_buffer_threshold_usd=_to_float(volume_eval_data.get("min_buffer_threshold_usd", 30.0), 30.0),
         volume_check_enabled=bool(volume_eval_data.get("volume_check_enabled", True)),
+        entry_min_current_volume_diffs=entry_min_current_volume_diffs,
         min_price=_to_float(volume_eval_data.get("min_price", 0.84), 0.84),
         max_price=_to_float(volume_eval_data.get("max_price", 0.96), 0.96),
     )
@@ -530,6 +542,13 @@ def validate_config(config: Config) -> list:
         errors.append("strategy.volume_eval_mode.buffer_avg_multiplier must be > 0")
     if volume_mode.min_buffer_threshold_usd < 0:
         errors.append("strategy.volume_eval_mode.min_buffer_threshold_usd must be >= 0")
+    if not volume_mode.entry_min_current_volume_diffs:
+        errors.append("strategy.volume_eval_mode.entry_min_current_volume_diffs must have at least 1 value")
+    for i, value in enumerate(volume_mode.entry_min_current_volume_diffs, start=1):
+        if value < 0:
+            errors.append(
+                f"strategy.volume_eval_mode.entry_min_current_volume_diffs[{i}] must be >= 0"
+            )
 
     if config.buffer < 0:
         errors.append("buffer must be >= 0")
