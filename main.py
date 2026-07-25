@@ -3179,6 +3179,47 @@ class LiveTradingBot:
 
         return self._web_get_late_modes()
 
+    def _web_get_volume_eval_mode(self) -> Dict[str, Any]:
+        with self._config_lock:
+            mode = getattr(self.config.strategy, "volume_eval_mode", None)
+            if not mode:
+                return {"enabled": False}
+            return {
+                "enabled": bool(getattr(mode, "enabled", False)),
+                "time_left_sec": int(getattr(mode, "time_left_sec", 0)),
+                "min_contracts": int(getattr(mode, "min_contracts", 1)),
+                "max_trades": int(getattr(mode, "max_trades", 1)),
+                "buffer_avg_multiplier": float(getattr(mode, "buffer_avg_multiplier", 1.0)),
+                "min_buffer_threshold_usd": float(getattr(mode, "min_buffer_threshold_usd", self.config.buffer)),
+                "volume_check_enabled": bool(getattr(mode, "volume_check_enabled", True)),
+                "min_price": float(getattr(mode, "min_price", self.config.strategy.min_price)),
+                "max_price": float(getattr(mode, "max_price", self.config.strategy.max_price)),
+            }
+
+    def _web_update_volume_eval_mode(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return self._web_get_volume_eval_mode()
+
+        with self._config_lock:
+            mode = getattr(self.config.strategy, "volume_eval_mode", None)
+            if not mode:
+                return {"enabled": False}
+
+            try:
+                mode.enabled = bool(payload.get("enabled", mode.enabled))
+                mode.time_left_sec = max(0, int(payload.get("time_left_sec", mode.time_left_sec)))
+                mode.min_contracts = max(1, int(payload.get("min_contracts", mode.min_contracts)))
+                mode.max_trades = max(1, int(payload.get("max_trades", mode.max_trades)))
+                mode.buffer_avg_multiplier = max(0.0, float(payload.get("buffer_avg_multiplier", mode.buffer_avg_multiplier)))
+                mode.min_buffer_threshold_usd = max(0.0, float(payload.get("min_buffer_threshold_usd", mode.min_buffer_threshold_usd)))
+                mode.volume_check_enabled = bool(payload.get("volume_check_enabled", mode.volume_check_enabled))
+                mode.min_price = float(payload.get("min_price", mode.min_price))
+                mode.max_price = float(payload.get("max_price", mode.max_price))
+            except (TypeError, ValueError):
+                pass
+
+        return self._web_get_volume_eval_mode()
+
     def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.running:
             self.dashboard.manual_buy_live_status = "blocked: bot not running"
@@ -3441,6 +3482,8 @@ class LiveTradingBot:
                 self._web_snapshot_holder,
                 get_late_modes=self._web_get_late_modes,
                 update_late_modes=self._web_update_late_modes,
+                get_volume_eval_mode=self._web_get_volume_eval_mode,
+                update_volume_eval_mode=self._web_update_volume_eval_mode,
                 trigger_manual_buy=self._web_trigger_manual_buy,
             )
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
