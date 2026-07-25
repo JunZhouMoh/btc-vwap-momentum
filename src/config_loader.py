@@ -7,6 +7,7 @@ Loads settings from config.json and .env file.
 
 import os
 import json
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ class LateEntryModeConfig:
     buffer_avg_multiplier: float = 1.0
     min_buffer_threshold_usd: float = 25.0
     volume_check_enabled: bool = True
+    volume_eval_only: bool = False
     min_price: float = 0.0
     max_price: float = 1.0
 
@@ -68,6 +70,8 @@ class LateEntryModesConfig:
     mode_40s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_40s", enabled=True, time_left_sec=40, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
     mode_30s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_30s", enabled=True, time_left_sec=30, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
     mode_20s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_20s", enabled=True, time_left_sec=20, min_contracts=12, max_trades=1, buffer_avg_multiplier=0.5, min_buffer_threshold_usd=20.0, min_price=0.9, max_price=0.99))
+    mode_volume_eval: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_volume_eval", enabled=False, time_left_sec=50, min_contracts=20, max_trades=1, buffer_avg_multiplier=1.0, min_buffer_threshold_usd=20.0, volume_check_enabled=True, volume_eval_only=True, min_price=0.8, max_price=0.99))
+    extra_modes: Dict[str, LateEntryModeConfig] = field(default_factory=dict)
 
 
 @dataclass
@@ -270,9 +274,19 @@ def load_config(config_path: Optional[str] = None) -> Config:
             buffer_avg_multiplier=_to_float(raw.get("buffer_avg_multiplier", default_multiplier), default_multiplier),
             min_buffer_threshold_usd=_to_float(raw.get("min_buffer_threshold_usd", default_min_buffer_threshold_usd), default_min_buffer_threshold_usd),
             volume_check_enabled=bool(raw.get("volume_check_enabled", True)),
+            volume_eval_only=bool(raw.get("volume_eval_only", False)),
             min_price=_to_float(raw.get("min_price", default_min_price), default_min_price),
             max_price=_to_float(raw.get("max_price", default_max_price), default_max_price),
         )
+
+    def _default_window_from_mode_key(mode_key: str, fallback: int = 60) -> int:
+        m = re.search(r"(\d+)", mode_key)
+        if not m:
+            return fallback
+        try:
+            return int(m.group(1))
+        except (TypeError, ValueError):
+            return fallback
 
     late_entry_modes = LateEntryModesConfig(
         enabled=bool(late_modes_data.get("enabled", False)),
@@ -281,16 +295,42 @@ def load_config(config_path: Optional[str] = None) -> Config:
         mode_40s=_load_late_mode(late_modes_data.get("mode_40s", {}), 40, 8, 1, 0.8, 25.0, 0.85, 0.99),
         mode_30s=_load_late_mode(late_modes_data.get("mode_30s", {}), 30, 8, 1, 0.8, 25.0, 0.85, 0.99),
         mode_20s=_load_late_mode(late_modes_data.get("mode_20s", {}), 20, 12, 1, 0.5, 20.0, 0.9, 0.99),
+        mode_volume_eval=_load_late_mode(late_modes_data.get("mode_volume_eval", {}), 50, 20, 1, 1.0, 20.0, 0.8, 0.99),
     )
+
+    known_mode_keys = {"mode_60s", "mode_40s", "mode_30s", "mode_20s", "mode_volume_eval"}
+    for mode_key, mode_raw in late_modes_data.items():
+        if mode_key in known_mode_keys:
+            continue
+        if not (isinstance(mode_key, str) and mode_key.startswith("mode_")):
+            continue
+        if not isinstance(mode_raw, dict):
+            continue
+        default_time_left = _default_window_from_mode_key(mode_key, 60)
+        late_entry_modes.extra_modes[mode_key] = _load_late_mode(
+            mode_raw,
+            default_time_left,
+            10,
+            1,
+            1.0,
+            20.0,
+            0.8,
+            0.99,
+        )
 
     for fallback_name, mode_cfg in [
         ("mode_60s", late_entry_modes.mode_60s),
         ("mode_40s", late_entry_modes.mode_40s),
         ("mode_30s", late_entry_modes.mode_30s),
         ("mode_20s", late_entry_modes.mode_20s),
+        ("mode_volume_eval", late_entry_modes.mode_volume_eval),
     ]:
         if not mode_cfg.name:
             mode_cfg.name = fallback_name
+
+    for extra_name, mode_cfg in late_entry_modes.extra_modes.items():
+        if not mode_cfg.name:
+            mode_cfg.name = extra_name
 
     vac_data = strategy_data.get("volume_acceleration_check", {})
     threshold = _to_float(
@@ -475,12 +515,17 @@ def validate_config(config: Config) -> list:
     if vac.min_current_volume_diff < 0:
         errors.append("strategy.volume_acceleration_check.min_current_volume_diff must be >= 0")
 
-    for mode_name, mode_cfg in [
+    mode_items = [
         ("mode_60s", config.strategy.late_entry_modes.mode_60s),
         ("mode_40s", config.strategy.late_entry_modes.mode_40s),
         ("mode_30s", config.strategy.late_entry_modes.mode_30s),
         ("mode_20s", config.strategy.late_entry_modes.mode_20s),
-    ]:
+        ("mode_volume_eval", config.strategy.late_entry_modes.mode_volume_eval),
+    ]
+    for extra_key, extra_mode in config.strategy.late_entry_modes.extra_modes.items():
+        mode_items.append((extra_key, extra_mode))
+
+    for mode_name, mode_cfg in mode_items:
         if mode_cfg.min_contracts <= 0:
             errors.append(f"strategy.late_entry_modes.{mode_name}.min_contracts must be > 0")
         if mode_cfg.max_trades <= 0:
