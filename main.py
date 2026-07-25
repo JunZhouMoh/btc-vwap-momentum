@@ -25,8 +25,6 @@ import re
 import signal
 import sys
 import threading
-import inspect
-import importlib
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from dataclasses import dataclass, field
@@ -73,121 +71,7 @@ signal_logger = NoOpLogger()
 
 # Project imports
 from src.config_loader import load_config, validate_config
-_web_dashboard_module = None
-try:
-    _web_dashboard_module = importlib.import_module("src.web_dashboard")
-except Exception as e:
-    logger.warning(f"web_dashboard module unavailable: {e}")
-
-
-class WebSnapshotHolder:
-    """Minimal thread-safe state holder used by ASGI fallback app."""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._data = {"status": "starting"}
-
-    def set(self, data):
-        with self._lock:
-            self._data = dict(data)
-
-    def get(self):
-        with self._lock:
-            return dict(self._data)
-
-
-if _web_dashboard_module and hasattr(_web_dashboard_module, "WebSnapshotHolder"):
-    WebSnapshotHolder = getattr(_web_dashboard_module, "WebSnapshotHolder")
-
-
-def build_app(holder, get_late_modes=None, update_late_modes=None, trigger_manual_buy=None):
-    """Build ASGI app from dashboard module when available, else lightweight fallback."""
-    if _web_dashboard_module and hasattr(_web_dashboard_module, "build_app"):
-        return _web_dashboard_module.build_app(
-            holder,
-            get_late_modes=get_late_modes,
-            update_late_modes=update_late_modes,
-            trigger_manual_buy=trigger_manual_buy,
-        )
-
-    from fastapi import FastAPI
-    from fastapi.responses import JSONResponse
-
-    fallback = FastAPI(title="BTC Live Bot (fallback)", docs_url=None, redoc_url=None)
-
-    @fallback.get("/api/state")
-    async def api_state():
-        return JSONResponse(holder.get())
-
-    return fallback
-
-
-def start_web_dashboard(host, port, holder, get_late_modes=None, update_late_modes=None, trigger_manual_buy=None):
-    """Start dashboard with compatibility for multiple dashboard module signatures."""
-    if not _web_dashboard_module or not hasattr(_web_dashboard_module, "start_web_dashboard"):
-        logger.warning("start_web_dashboard unavailable in src.web_dashboard; using embedded fallback server")
-
-        try:
-            import socket
-            import uvicorn
-
-            fallback_app = build_app(
-                holder,
-                get_late_modes=get_late_modes,
-                update_late_modes=update_late_modes,
-                trigger_manual_buy=trigger_manual_buy,
-            )
-
-            def _probe_host(bind_host: str) -> str:
-                if bind_host in ("0.0.0.0", ""):
-                    return "127.0.0.1"
-                if bind_host in ("::", "[::]"):
-                    return "::1"
-                return bind_host
-
-            def _run() -> None:
-                try:
-                    uvicorn.run(
-                        fallback_app,
-                        host=host,
-                        port=port,
-                        log_level="warning",
-                        access_log=False,
-                    )
-                except Exception:
-                    logger.exception("Embedded fallback web dashboard crashed")
-
-            t = threading.Thread(target=_run, name="web-dashboard-fallback", daemon=True)
-            t.start()
-
-            probe = _probe_host(host)
-            for _ in range(60):
-                time.sleep(0.1)
-                try:
-                    with socket.create_connection((probe, port), timeout=0.4):
-                        return True
-                except OSError:
-                    continue
-
-            return False
-        except Exception as e:
-            logger.warning(f"Embedded fallback dashboard unavailable: {e}")
-            return False
-
-    impl = getattr(_web_dashboard_module, "start_web_dashboard")
-    try:
-        sig = inspect.signature(impl)
-        kwargs = {}
-        if "get_late_modes" in sig.parameters:
-            kwargs["get_late_modes"] = get_late_modes
-        if "update_late_modes" in sig.parameters:
-            kwargs["update_late_modes"] = update_late_modes
-        if "trigger_manual_buy" in sig.parameters:
-            kwargs["trigger_manual_buy"] = trigger_manual_buy
-        return bool(impl(host, port, holder, **kwargs))
-    except TypeError:
-        # Older signatures may accept only (host, port, holder).
-        return bool(impl(host, port, holder))
+from src.web_dashboard import WebSnapshotHolder, start_web_dashboard, build_app
 from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
@@ -311,7 +195,7 @@ class Position:
     min_price_seen: float = 0.0  # Lowest price after entry (for drawdown tracking)
     btc_price_at_entry: float = 0.0    # Chainlink BTC/USD when order was submitted
     btc_anchor_at_entry: float = 0.0   # BTC anchor (market-open price) at order submission
-    entry_mode: str = "normal"        # normal | mode_* | manual
+    entry_mode: str = "normal"        # normal | mode_60s | mode_40s | mode_30s | mode_20s | manual
     mode_legs: List[Dict[str, Any]] = field(default_factory=list)  # [{mode, contracts, entry_price}]
 
 
@@ -2205,19 +2089,11 @@ class Dashboard:
         if not modes or not modes.enabled:
             return None
 
-        mode_items: List[Tuple[str, Any]] = []
-        for key, value in vars(modes).items():
-            if key.startswith("mode_") and hasattr(value, "time_left_sec"):
-                mode_items.append((key, value))
-
-        extra_modes = getattr(modes, "extra_modes", {})
-        if isinstance(extra_modes, dict):
-            for key, value in extra_modes.items():
-                if key.startswith("mode_") and hasattr(value, "time_left_sec"):
-                    mode_items.append((key, value))
-
         candidates: List[Dict[str, float]] = []
-        for mode_name, mode_cfg in mode_items:
+        for mode_name in ["mode_60s", "mode_40s", "mode_30s", "mode_20s"]:
+            mode_cfg = getattr(modes, mode_name, None)
+            if mode_cfg is None:
+                continue
             window_sec = float(max(0, mode_cfg.time_left_sec))
             if time_left <= window_sec and mode_cfg.enabled:
                 candidates.append(
@@ -2228,10 +2104,9 @@ class Dashboard:
                         "buffer_avg_multiplier": float(mode_cfg.buffer_avg_multiplier),
                         "min_buffer_threshold_usd": float(getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer)),
                         "volume_check_enabled": bool(getattr(mode_cfg, "volume_check_enabled", True)),
-                        "volume_eval_only": bool(getattr(mode_cfg, "volume_eval_only", False)),
                         "min_price": float(mode_cfg.min_price),
                         "max_price": float(mode_cfg.max_price),
-                        "name": str(getattr(mode_cfg, "name", "") or mode_name),
+                        "name": f"mode_{int(window_sec)}s",
                     }
                 )
 
@@ -3214,27 +3089,6 @@ class LiveTradingBot:
         self._web_snapshot_holder: Optional[WebSnapshotHolder] = None
         self._config_lock = threading.Lock()
 
-    def _iter_late_mode_items(self, modes: Any) -> List[Tuple[str, Any]]:
-        if not modes:
-            return []
-
-        by_key: Dict[str, Any] = {}
-        for key, value in vars(modes).items():
-            if key.startswith("mode_") and hasattr(value, "time_left_sec"):
-                by_key[key] = value
-
-        extra_modes = getattr(modes, "extra_modes", {})
-        if isinstance(extra_modes, dict):
-            for key, value in extra_modes.items():
-                if key.startswith("mode_") and hasattr(value, "time_left_sec"):
-                    by_key[key] = value
-
-        return sorted(
-            by_key.items(),
-            key=lambda item: (float(getattr(item[1], "time_left_sec", 0)), item[0]),
-            reverse=True,
-        )
-
     def _web_get_late_modes(self) -> Dict[str, Any]:
         with self._config_lock:
             modes = getattr(self.config.strategy, "late_entry_modes", None)
@@ -3242,10 +3096,12 @@ class LiveTradingBot:
                 return {"enabled": False, "total_max_trades": 0, "modes": []}
 
             out_modes = []
-            for key, m in self._iter_late_mode_items(modes):
+            for key in ["mode_60s", "mode_40s", "mode_30s", "mode_20s"]:
+                m = getattr(modes, key, None)
+                if not m:
+                    continue
                 out_modes.append({
                     "key": key,
-                    "name": str(getattr(m, "name", "") or key),
                     "enabled": bool(getattr(m, "enabled", False)),
                     "time_left_sec": int(getattr(m, "time_left_sec", 0)),
                     "min_contracts": int(getattr(m, "min_contracts", 1)),
@@ -3253,7 +3109,6 @@ class LiveTradingBot:
                     "buffer_avg_multiplier": float(getattr(m, "buffer_avg_multiplier", 1.0)),
                     "min_buffer_threshold_usd": float(getattr(m, "min_buffer_threshold_usd", self.config.buffer)),
                     "volume_check_enabled": bool(getattr(m, "volume_check_enabled", True)),
-                    "volume_eval_only": bool(getattr(m, "volume_eval_only", False)),
                     "min_price": float(getattr(m, "min_price", 0.0)),
                     "max_price": float(getattr(m, "max_price", 1.0)),
                 })
@@ -3286,10 +3141,6 @@ class LiveTradingBot:
                         continue
                     key = str(row.get("key", "")).strip()
                     mode_cfg = getattr(modes, key, None)
-                    if mode_cfg is None:
-                        extra_modes = getattr(modes, "extra_modes", {})
-                        if isinstance(extra_modes, dict):
-                            mode_cfg = extra_modes.get(key)
                     if not mode_cfg:
                         continue
                     try:
@@ -3300,7 +3151,6 @@ class LiveTradingBot:
                         mode_cfg.buffer_avg_multiplier = max(0.0, float(row.get("buffer_avg_multiplier", mode_cfg.buffer_avg_multiplier)))
                         mode_cfg.min_buffer_threshold_usd = max(0.0, float(row.get("min_buffer_threshold_usd", getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer))))
                         mode_cfg.volume_check_enabled = bool(row.get("volume_check_enabled", getattr(mode_cfg, "volume_check_enabled", True)))
-                        mode_cfg.volume_eval_only = bool(row.get("volume_eval_only", getattr(mode_cfg, "volume_eval_only", False)))
                         mode_cfg.min_price = float(row.get("min_price", mode_cfg.min_price))
                         mode_cfg.max_price = float(row.get("max_price", mode_cfg.max_price))
                     except (TypeError, ValueError):
@@ -3853,7 +3703,6 @@ class LiveTradingBot:
         )
         vol_speed_ok = bool(vol_speed["ok"])
         vol_check_enabled = bool(late_mode.get("volume_check_enabled", True)) if late_mode else True
-        vol_eval_only = bool(late_mode.get("volume_eval_only", False)) if late_mode else False
         vol_gate_ok = vol_speed_ok if vol_check_enabled else True
 
         # Defensive time cutoff / buffer / trend gating applies only to auto entries.
@@ -3869,7 +3718,7 @@ class LiveTradingBot:
                         f"({token.last_price:.4f} not in [{min_price}, {max_price}])"
                     )
                     return
-                if not vol_eval_only and not trend_ok:
+                if not trend_ok:
                     signal_logger.info(
                         f"SIGNAL BLOCKED: {side} - not trending in desired direction "
                         f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
@@ -3883,7 +3732,7 @@ class LiveTradingBot:
                 logger.warning(f"Entry blocked: {time_left:.0f}s left < {no_entry_cutoff}s cutoff")
                 return
 
-            if not vol_eval_only and not trend_ok:
+            if not trend_ok:
                 signal_logger.info(
                     f"SIGNAL BLOCKED: {side} - not trending in desired direction "
                     f"(trend={'up' if side == 'BUY_UP' else 'down'} required)"
