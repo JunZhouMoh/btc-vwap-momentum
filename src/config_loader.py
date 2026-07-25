@@ -71,6 +71,20 @@ class LateEntryModesConfig:
 
 
 @dataclass
+class VolumeEvalModeConfig:
+    """Standalone volume-first entry mode (separate from late-entry modes)."""
+    enabled: bool = False
+    time_left_sec: int = 50
+    min_contracts: int = 45
+    max_trades: int = 1
+    buffer_avg_multiplier: float = 1.25
+    min_buffer_threshold_usd: float = 30.0
+    volume_check_enabled: bool = True
+    min_price: float = 0.84
+    max_price: float = 0.96
+
+
+@dataclass
 class VolumeAccelerationCheckConfig:
     """Favored-side volume acceleration gate settings."""
     enabled: bool = True
@@ -96,6 +110,7 @@ class StrategyConfig:
     vwap_window_sec: int = 30
     win_rate_csv: str = "data/win_rate.csv"
     volume_acceleration_check: VolumeAccelerationCheckConfig = field(default_factory=VolumeAccelerationCheckConfig)
+    volume_eval_mode: VolumeEvalModeConfig = field(default_factory=VolumeEvalModeConfig)
     late_entry_modes: LateEntryModesConfig = field(default_factory=LateEntryModesConfig)
 
 
@@ -292,6 +307,19 @@ def load_config(config_path: Optional[str] = None) -> Config:
         if not mode_cfg.name:
             mode_cfg.name = fallback_name
 
+    volume_eval_data = strategy_data.get("volume_eval_mode", {})
+    volume_eval_mode = VolumeEvalModeConfig(
+        enabled=bool(volume_eval_data.get("enabled", False)),
+        time_left_sec=_to_int(volume_eval_data.get("time_left_sec", 50), 50),
+        min_contracts=_to_int(volume_eval_data.get("min_contracts", 45), 45),
+        max_trades=_to_int(volume_eval_data.get("max_trades", 1), 1),
+        buffer_avg_multiplier=_to_float(volume_eval_data.get("buffer_avg_multiplier", 1.25), 1.25),
+        min_buffer_threshold_usd=_to_float(volume_eval_data.get("min_buffer_threshold_usd", 30.0), 30.0),
+        volume_check_enabled=bool(volume_eval_data.get("volume_check_enabled", True)),
+        min_price=_to_float(volume_eval_data.get("min_price", 0.84), 0.84),
+        max_price=_to_float(volume_eval_data.get("max_price", 0.96), 0.96),
+    )
+
     vac_data = strategy_data.get("volume_acceleration_check", {})
     threshold = _to_float(
         vac_data.get("threshold", vac_data.get("min_current_volume_diff", 5000.0)),
@@ -318,6 +346,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             min_accel_diff=_to_float(vac_data.get("min_accel_diff", 0.0), 0.0),
             min_current_volume_diff=_to_float(vac_data.get("min_current_volume_diff", threshold), threshold),
         ),
+        volume_eval_mode=volume_eval_mode,
         late_entry_modes=late_entry_modes,
     )
 
@@ -489,6 +518,18 @@ def validate_config(config: Config) -> list:
             errors.append(f"strategy.late_entry_modes.{mode_name}.buffer_avg_multiplier must be > 0")
         if mode_cfg.min_buffer_threshold_usd < 0:
             errors.append(f"strategy.late_entry_modes.{mode_name}.min_buffer_threshold_usd must be >= 0")
+
+    volume_mode = config.strategy.volume_eval_mode
+    if volume_mode.time_left_sec < 0:
+        errors.append("strategy.volume_eval_mode.time_left_sec must be >= 0")
+    if volume_mode.min_contracts <= 0:
+        errors.append("strategy.volume_eval_mode.min_contracts must be > 0")
+    if volume_mode.max_trades <= 0:
+        errors.append("strategy.volume_eval_mode.max_trades must be > 0")
+    if volume_mode.buffer_avg_multiplier <= 0:
+        errors.append("strategy.volume_eval_mode.buffer_avg_multiplier must be > 0")
+    if volume_mode.min_buffer_threshold_usd < 0:
+        errors.append("strategy.volume_eval_mode.min_buffer_threshold_usd must be >= 0")
 
     if config.buffer < 0:
         errors.append("buffer must be >= 0")
