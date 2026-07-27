@@ -2084,13 +2084,35 @@ class Dashboard:
             f"(+/-{buffer_stats['avg_abs_pct']:.3f}%)"
         )
 
+    def _late_mode_keys(self) -> List[str]:
+        modes = getattr(self.config.strategy, "late_entry_modes", None)
+        if not modes:
+            return []
+
+        entries: List[Tuple[str, float]] = []
+        for key, value in vars(modes).items():
+            if not isinstance(key, str) or not key.startswith("mode_") or not key.endswith("s"):
+                continue
+            mode_cfg = getattr(modes, key, None)
+            if mode_cfg is None:
+                continue
+            try:
+                time_left = float(getattr(mode_cfg, "time_left_sec", 0) or 0)
+            except (TypeError, ValueError):
+                time_left = 0.0
+            entries.append((key, time_left))
+
+        # Evaluate wider windows first; final selection still picks tightest active window.
+        entries.sort(key=lambda item: item[1], reverse=True)
+        return [item[0] for item in entries]
+
     def _get_late_entry_mode(self, time_left: float) -> Optional[Dict[str, float]]:
         modes = getattr(self.config.strategy, "late_entry_modes", None)
         if not modes or not modes.enabled:
             return None
 
         candidates: List[Dict[str, float]] = []
-        for mode_name in ["mode_60s", "mode_40s", "mode_30s", "mode_20s"]:
+        for mode_name in self._late_mode_keys():
             mode_cfg = getattr(modes, mode_name, None)
             if mode_cfg is None:
                 continue
@@ -3195,6 +3217,7 @@ class LiveTradingBot:
         self.hedge_mgr: HedgeManager = None
         self.redeemer: Optional[AsyncAutoRedeemer] = None
         self.telegram: TelegramNotifier = None
+        self.timer_telegram: Optional[TelegramNotifier] = None
         self.user_ws = None
         self._user_ws_task: Optional[asyncio.Task] = None
 
@@ -3218,6 +3241,7 @@ class LiveTradingBot:
         self._sim_history: Optional[SimulationHistoryLogger] = None
         self._web_snapshot_holder: Optional[WebSnapshotHolder] = None
         self._config_lock = threading.Lock()
+        self._timer_alert_last_sent_slug: str = ""
 
     def _web_get_late_modes(self) -> Dict[str, Any]:
         with self._config_lock:
@@ -3226,7 +3250,7 @@ class LiveTradingBot:
                 return {"enabled": False, "total_max_trades": 0, "modes": []}
 
             out_modes = []
-            for key in ["mode_60s", "mode_40s", "mode_30s", "mode_20s"]:
+            for key in self._late_mode_keys():
                 m = getattr(modes, key, None)
                 if not m:
                     continue
@@ -3380,6 +3404,114 @@ class LiveTradingBot:
 
         return self._web_get_volume_eval_mode()
 
+    def _web_get_timer_alert(self) -> Dict[str, Any]:
+        with self._config_lock:
+            timer_alert = getattr(self.config.telegram, "timer_alert", None)
+            if not timer_alert:
+                return {
+                    "enabled": False,
+                    "time_left_sec": 100,
+                    "min_price": 0.75,
+                    "max_price": 0.95,
+                    "timer_bot_ready": False,
+                }
+            return {
+                "enabled": bool(getattr(timer_alert, "enabled", False)),
+                "time_left_sec": int(getattr(timer_alert, "time_left_sec", 100)),
+                "min_price": float(getattr(timer_alert, "min_price", 0.75)),
+                "max_price": float(getattr(timer_alert, "max_price", 0.95)),
+                "timer_bot_ready": bool(
+                    getattr(self.config.telegram, "timer_bot_token", "")
+                    and getattr(self.config.telegram, "timer_chat_id", "")
+                ),
+            }
+
+    def _web_update_timer_alert(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return self._web_get_timer_alert()
+
+        with self._config_lock:
+            timer_alert = getattr(self.config.telegram, "timer_alert", None)
+            if not timer_alert:
+                return self._web_get_timer_alert()
+
+            try:
+                timer_alert.enabled = bool(payload.get("enabled", timer_alert.enabled))
+                timer_alert.time_left_sec = max(0, int(payload.get("time_left_sec", timer_alert.time_left_sec)))
+                timer_alert.min_price = min(1.0, max(0.0, float(payload.get("min_price", timer_alert.min_price))))
+                timer_alert.max_price = min(1.0, max(0.0, float(payload.get("max_price", timer_alert.max_price))))
+            except (TypeError, ValueError):
+                pass
+
+            if timer_alert.min_price > timer_alert.max_price:
+                timer_alert.min_price, timer_alert.max_price = timer_alert.max_price, timer_alert.min_price
+
+        return self._web_get_timer_alert()
+
+    def _get_favorite_price_snapshot(self) -> Optional[Dict[str, Any]]:
+        up = self.state.up_token
+        down = self.state.down_token
+        if not up or not down:
+            return None
+
+        up_price = float(up.last_price or 0.0)
+        down_price = float(down.last_price or 0.0)
+        if up_price <= 0.0 and down_price <= 0.0:
+            return None
+
+        if up_price >= down_price:
+            return {"favorite": "UP", "price": up_price}
+        return {"favorite": "DOWN", "price": down_price}
+
+    async def _check_timer_alert(self) -> None:
+        timer_alert = getattr(self.config.telegram, "timer_alert", None)
+        if not timer_alert or not bool(getattr(timer_alert, "enabled", False)):
+            return
+
+        if not self.timer_telegram or not self.timer_telegram.enabled:
+            return
+
+        market_slug = str(self.state.slug or "").strip()
+        if not market_slug or market_slug == self._timer_alert_last_sent_slug:
+            return
+
+        time_left = max(0.0, self.state.end_time - time.time())
+        threshold = float(getattr(timer_alert, "time_left_sec", 100))
+        if time_left > threshold:
+            return
+
+        fav = self._get_favorite_price_snapshot()
+        if not fav:
+            return
+
+        fav_price = float(fav["price"])
+        min_price = float(getattr(timer_alert, "min_price", 0.75))
+        max_price = float(getattr(timer_alert, "max_price", 0.95))
+        if not (min_price <= fav_price <= max_price):
+            return
+
+        self._timer_alert_last_sent_slug = market_slug
+        sent = await self.timer_telegram.send_message(
+            (
+                "⏰ <b>Timer Alert</b>\n"
+                f"Market: {market_slug}\n"
+                f"Time left: {int(time_left)}s (threshold {int(threshold)}s)\n"
+                f"Favorite: {fav['favorite']}\n"
+                f"Price: {fav_price:.3f}\n"
+                f"Range: [{min_price:.3f}, {max_price:.3f}]"
+            )
+        )
+        if sent:
+            logger.info(
+                "Timer alert sent | "
+                f"market={market_slug} | left={time_left:.1f}s | fav={fav['favorite']} | price={fav_price:.4f}"
+            )
+        else:
+            logger.warning(
+                "Timer alert send failed | "
+                f"market={market_slug} | left={time_left:.1f}s | fav={fav['favorite']} | price={fav_price:.4f}"
+            )
+
     def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.running:
             self.dashboard.manual_buy_live_status = "blocked: bot not running"
@@ -3484,6 +3616,13 @@ class LiveTradingBot:
             chat_id=self.config.telegram.chat_id,
             enabled=self.config.telegram.enabled
         )
+        self.timer_telegram = TelegramNotifier(
+            bot_token=getattr(self.config.telegram, "timer_bot_token", ""),
+            chat_id=getattr(self.config.telegram, "timer_chat_id", ""),
+            enabled=True,
+        )
+        if getattr(self.config.telegram, "timer_alert", None) and self.config.telegram.timer_alert.enabled and not self.timer_telegram.enabled:
+            logger.warning("Timer alert is enabled but TELEGRAM_TIMER_BOT_TOKEN / TELEGRAM_TIMER_CHAT_ID are missing")
 
         sim = self.config.simulation.enabled
 
@@ -3646,6 +3785,8 @@ class LiveTradingBot:
                 update_volume_accel_check=self._web_update_volume_accel_check,
                 get_volume_eval_mode=self._web_get_volume_eval_mode,
                 update_volume_eval_mode=self._web_update_volume_eval_mode,
+                get_timer_alert=self._web_get_timer_alert,
+                update_timer_alert=self._web_update_timer_alert,
                 trigger_manual_buy=self._web_trigger_manual_buy,
             )
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
@@ -3854,7 +3995,7 @@ class LiveTradingBot:
         total_late_mode_max_trades = int(getattr(late_modes_cfg, "total_max_trades", 3))
         total_late_mode_trade_count = sum(
             self.stats.late_mode_trade_count(mode_key)
-            for mode_key in ["mode_60s", "mode_40s", "mode_30s", "mode_20s"]
+            for mode_key in self.dashboard._late_mode_keys()
         )
         total_trade_cap_ok = total_late_mode_trade_count < total_late_mode_max_trades
         volume_threshold_levels = self.dashboard._get_volume_eval_threshold_levels()
@@ -4553,6 +4694,7 @@ class LiveTradingBot:
                         )
                     
                     # Check market end (быстрая операция - не выносим в task)
+                    await self._check_timer_alert()
                     await self.check_market_end()
 
                     # Emit a lightweight heartbeat so platform logs show liveness continuously.
@@ -4717,6 +4859,8 @@ class LiveTradingBot:
             
             await self.telegram.send_message("🛑 Bot stopped")
             await self.telegram.close()
+            if self.timer_telegram:
+                await self.timer_telegram.close()
             
             console.print("[green]Bot stopped.[/green]")
 
