@@ -4157,22 +4157,16 @@ class LiveTradingBot:
             st for st in mode_states if st["mode_trade_cap_ok"] and st["total_cap_ok"]
         ]
 
-        if eligible_mode_states:
-            selected_mode_state = eligible_mode_states[0]
-            late_mode = selected_mode_state["mode"]
-            mode_name = selected_mode_state["mode_name"]
-            is_volume_eval_mode = bool(selected_mode_state["is_volume"])
-            mode_max_trades = int(selected_mode_state["mode_max_trades"])
-            mode_trade_count = int(selected_mode_state["mode_trade_count"])
-            mode_trade_cap_ok = bool(selected_mode_state["mode_trade_cap_ok"])
-        else:
-            selected_mode_state = None
-            late_mode = None
-            mode_name = ""
-            is_volume_eval_mode = False
-            mode_max_trades = 0
-            mode_trade_count = 0
-            mode_trade_cap_ok = True
+        triggered_mode_names: List[str] = []
+        selected_min_contracts = int(self.config.entry.min_contracts)
+        mode_name = ""
+        late_mode = None
+        is_volume_eval_mode = False
+        mode_max_trades = 0
+        mode_trade_count = 0
+        mode_trade_cap_ok = True
+
+        gate_ready_states: List[Dict[str, Any]] = []
 
         if not manual_override:
             if active_modes and not eligible_mode_states:
@@ -4252,7 +4246,6 @@ class LiveTradingBot:
         btc_buffer_ok = bool(btc_buffer and btc_buffer.get("ok"))
 
         if eligible_mode_states:
-            gate_ready_states: List[Dict[str, Any]] = []
             for st in eligible_mode_states:
                 mode_i = st["mode"]
                 mode_price_ok = float(mode_i.get("min_price", self.config.strategy.min_price)) <= token.last_price <= float(mode_i.get("max_price", self.config.strategy.max_price))
@@ -4262,24 +4255,52 @@ class LiveTradingBot:
                     gate_ready_states.append(st)
 
             if gate_ready_states:
-                selected_mode_state = gate_ready_states[0]
-                late_mode = selected_mode_state["mode"]
-                mode_name = selected_mode_state["mode_name"]
-                is_volume_eval_mode = bool(selected_mode_state["is_volume"])
-                mode_max_trades = int(selected_mode_state["mode_max_trades"])
-                mode_trade_count = int(selected_mode_state["mode_trade_count"])
-                if late_mode:
-                    min_price = float(late_mode.get("min_price", self.config.strategy.min_price))
-                    max_price = float(late_mode.get("max_price", self.config.strategy.max_price))
+                triggered_mode_names = [str(st["mode_name"]).strip() for st in gate_ready_states if str(st["mode_name"]).strip()]
+                selected_min_contracts = min(
+                    int(float(st["mode"].get("min_contracts", self.config.entry.min_contracts) or self.config.entry.min_contracts))
+                    for st in gate_ready_states
+                )
+                if len(gate_ready_states) == 1:
+                    selected_mode_state = gate_ready_states[0]
+                    late_mode = selected_mode_state["mode"]
+                    mode_name = selected_mode_state["mode_name"]
+                    is_volume_eval_mode = bool(selected_mode_state["is_volume"])
+                    mode_max_trades = int(selected_mode_state["mode_max_trades"])
+                    mode_trade_count = int(selected_mode_state["mode_trade_count"])
+                    mode_trade_cap_ok = bool(selected_mode_state["mode_trade_cap_ok"])
                 else:
-                    min_price = self.config.strategy.min_price
-                    max_price = self.config.strategy.max_price
-                price_ok = min_price <= token.last_price <= max_price
+                    mode_name = "mixed_active_modes"
+
+        if gate_ready_states:
+            price_ok = True
+            if late_mode:
+                min_price = float(late_mode.get("min_price", self.config.strategy.min_price))
+                max_price = float(late_mode.get("max_price", self.config.strategy.max_price))
                 vol_check_enabled = self.dashboard._is_volume_check_enabled_for_active_mode(late_mode)
                 vol_gate_ok = vol_speed_ok if vol_check_enabled else True
+            else:
+                min_price = min(
+                    float(st["mode"].get("min_price", self.config.strategy.min_price))
+                    for st in gate_ready_states
+                )
+                max_price = max(
+                    float(st["mode"].get("max_price", self.config.strategy.max_price))
+                    for st in gate_ready_states
+                )
+                vol_check_enabled = all(
+                    self.dashboard._is_volume_check_enabled_for_active_mode(st["mode"])
+                    for st in gate_ready_states
+                )
+                vol_gate_ok = True
 
-        price_only_gate = late_mode is not None or last_20s_price_only
+        price_only_gate = bool(active_modes) or last_20s_price_only
         if not manual_override:
+            if active_modes and not gate_ready_states:
+                signal_logger.info(
+                    f"SIGNAL BLOCKED: {side} - active modes present but none are ready "
+                    f"(price/buffer/volume gate not satisfied)"
+                )
+                return
             if price_only_gate:
                 if not price_ok:
                     signal_logger.info(
@@ -4407,11 +4428,8 @@ class LiveTradingBot:
         
         logger.info(f"Executing entry: {token_name}")
 
-        selected_min_contracts = (
-            int(late_mode["min_contracts"])
-            if late_mode and ("min_contracts" in late_mode)
-            else int(self.config.entry.min_contracts)
-        )
+        if late_mode and ("min_contracts" in late_mode):
+            selected_min_contracts = int(late_mode["min_contracts"])
         if late_mode:
             mode_hint = ""
             if str(late_mode.get("name", "")) == "volume_eval_mode":
@@ -4450,7 +4468,12 @@ class LiveTradingBot:
         btc_price_at_entry = self.state.btc_current_price
         # Use rolling window anchor for all trading logic.
         btc_anchor_at_entry = self.state.btc_anchor_price
-        entry_mode = "manual" if manual_override else (mode_name if (late_mode and mode_name) else "normal")
+        if manual_override:
+            entry_mode = "manual"
+        elif mode_name:
+            entry_mode = mode_name
+        else:
+            entry_mode = "normal"
         
         result = await self.executor.execute_entry(
             token_id=token.token_id,
@@ -4479,8 +4502,9 @@ class LiveTradingBot:
                     entry_mode=entry_mode,
                 )
 
-            if late_mode and mode_name and not manual_override:
-                self.stats.record_late_mode_entry(mode_name)
+            if triggered_mode_names and not manual_override:
+                for triggered_mode_name in triggered_mode_names:
+                    self.stats.record_late_mode_entry(triggered_mode_name)
             
             # Log BTC price movement for this buy
             if self.btc_price_movement_logger:
