@@ -2551,7 +2551,9 @@ class Dashboard:
         elapsed_sec = self.config.market.duration_sec - time_left
         btc_buffer = self._get_btc_buffer_status()
         
-        active_modes = self._get_active_entry_modes(time_left)
+        volume_eval_mode = self._get_volume_eval_mode(time_left)
+        late_entry_mode = self._get_late_entry_mode(time_left)
+        active_modes = [m for m in [volume_eval_mode, late_entry_mode] if m is not None]
         late_mode = active_modes[0] if active_modes else None
         if late_mode:
             min_price = late_mode.get("min_price", 0.0)
@@ -2600,19 +2602,29 @@ class Dashboard:
                 ready_modes.append(mode)
 
         mode_status_lines: List[str] = []
-        for mode in active_modes:
-            mode_name = str(mode.get("name", "")).strip() or "mode"
+
+        def _build_mode_status_line(mode_label: str, mode: Optional[Dict[str, float]]) -> str:
+            if not mode:
+                return f"{mode_label}: inactive"
             mode_price_ok = mode.get("min_price", 0.0) <= fav_price <= mode.get("max_price", 1.0)
             mode_vol_enabled = self._is_volume_check_enabled_for_active_mode(mode)
             mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
             mode_ready = mode_price_ok and btc_buffer_ok and mode_vol_ok
-            mode_label = "Volume mode" if mode_name == "volume_eval_mode" else f"Late mode {mode_name}"
             vol_label = ("OK" if mode_vol_ok else "WAIT") if mode_vol_enabled else "OFF"
-            mode_status_lines.append(
-                f"{mode_label}: P {'OK' if mode_price_ok else 'WAIT'} | "
+            return (
+                f"{mode_label}: active {int(mode.get('window_sec', 0))}s | "
+                f"P {'OK' if mode_price_ok else 'WAIT'} | "
                 f"B {'OK' if btc_buffer_ok else 'WAIT'} | "
-                f"Vol {vol_label} => {'READY' if mode_ready else 'WAIT'}"
+                f"Vol {vol_label} | "
+                f"T {'OK' if time_ok else 'WAIT'} | "
+                f"D {'OK' if dev_ok else 'WAIT'} | "
+                f"M {'OK' if mom_ok else 'WAIT'} | "
+                f"R {'OK' if fav_trend_ok else 'WAIT'} | "
+                f"Cut {'OK' if time_cutoff_ok else 'WAIT'} => {'READY' if mode_ready else 'WAIT'}"
             )
+
+        mode_status_lines.append(_build_mode_status_line("Volume mode", volume_eval_mode))
+        mode_status_lines.append(_build_mode_status_line("Late mode", late_entry_mode))
 
         late_mode = ready_modes[0] if ready_modes else (active_modes[0] if active_modes else None)
         if late_mode:
@@ -2634,9 +2646,9 @@ class Dashboard:
                             f", minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f}"
                             f", minC={int(chosen_mode.get('min_contracts', self.config.entry.min_contracts))}"
                         )
-                    mode_label = " / ".join(str(mode.get("name", "")) for mode in ready_modes if mode)
+                    chosen_mode_name = str(chosen_mode.get("name", "")).strip() or "mode"
                     signal = (
-                        f"✅ BUY {fav_name} ({mode_label}: "
+                        f"✅ BUY {fav_name} ({chosen_mode_name}: "
                         f"last {int(chosen_mode['window_sec'])}s, "
                         f"x{chosen_mode['buffer_avg_multiplier']:.2f} buffer, "
                         f"vol {'ON' if chosen_vol_enabled else 'OFF'}{mcvd_hint})"
