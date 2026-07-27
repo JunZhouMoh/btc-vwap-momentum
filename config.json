@@ -125,7 +125,13 @@
 
   "telegram": {
     "enabled": true,
-    "chart_every_n_trades": 5
+    "chart_every_n_trades": 5,
+    "timer_alert": {
+      "enabled": true,
+      "time_left_sec": 100,
+      "min_price": 0.75,
+      "max_price": 0.95
+    }
   },
 
   "web_dashboard": {
