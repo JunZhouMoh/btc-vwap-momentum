@@ -2949,11 +2949,13 @@ class Dashboard:
             elapsed_sec = self.config.market.duration_sec - time_left
             btc_buffer = self._get_btc_buffer_status()
 
-            # Use late-entry mode price range if active, otherwise use strategy range
-            late_mode = self._get_volume_eval_mode(time_left) or self._get_late_entry_mode(time_left)
-            if late_mode:
-                min_price = late_mode.get("min_price", 0.0)
-                max_price = late_mode.get("max_price", 1.0)
+            # Keep web dashboard mode context explicit: volume-eval and late-entry are shown separately.
+            volume_eval_mode = self._get_volume_eval_mode(time_left)
+            late_entry_mode = self._get_late_entry_mode(time_left)
+            active_mode = volume_eval_mode or late_entry_mode
+            if active_mode:
+                min_price = active_mode.get("min_price", 0.0)
+                max_price = active_mode.get("max_price", 1.0)
             else:
                 min_price = self.config.strategy.min_price
                 max_price = self.config.strategy.max_price
@@ -2981,28 +2983,75 @@ class Dashboard:
                 min_current_volume_diff_override=next_min_curr_diff,
             )
             vol_speed_ok = bool(vol_speed["ok"])
-            vol_check_enabled = self._is_volume_check_enabled_for_active_mode(late_mode)
+            vol_check_enabled = self._is_volume_check_enabled_for_active_mode(active_mode)
             vol_gate_ok = vol_speed_ok if vol_check_enabled else True
 
-            late_window_price_only = late_mode is not None
+            late_window_price_only = active_mode is not None
             last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
             price_only_gate = late_window_price_only or last_20s_price_only
 
+            def _mode_strategy_block(mode: Optional[Dict[str, float]], mode_kind: str) -> Dict[str, Any]:
+                if not mode:
+                    return {
+                        "configured": bool(mode_kind == "volume_eval_mode" and getattr(self.config.strategy, "volume_eval_mode", None) and getattr(self.config.strategy.volume_eval_mode, "enabled", False))
+                                      or bool(mode_kind == "late_entry_mode" and getattr(self.config.strategy, "late_entry_modes", None) and getattr(self.config.strategy.late_entry_modes, "enabled", False)),
+                        "active": False,
+                        "name": mode_kind,
+                    }
+
+                mode_vol_enabled = self._is_volume_check_enabled_for_active_mode(mode)
+                mode_price_ok = mode.get("min_price", 0.0) <= fav_price <= mode.get("max_price", 1.0)
+                mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
+                mode_btc_ok = btc_buffer_ok
+                return {
+                    "configured": True,
+                    "active": True,
+                    "name": str(mode.get("name", mode_kind)),
+                    "window_sec": float(mode.get("window_sec", 0.0) or 0.0),
+                    "min_price": float(mode.get("min_price", 0.0) or 0.0),
+                    "max_price": float(mode.get("max_price", 1.0) or 1.0),
+                    "min_contracts": int(float(mode.get("min_contracts", self.config.entry.min_contracts) or self.config.entry.min_contracts)),
+                    "buffer_avg_multiplier": float(mode.get("buffer_avg_multiplier", 1.0) or 1.0),
+                    "volume_gate_enabled": bool(mode_vol_enabled),
+                    "checks": {
+                        "price": bool(mode_price_ok),
+                        "btc_buffer": bool(mode_btc_ok),
+                        "volume": bool(mode_vol_ok),
+                    },
+                    "ready": bool(mode_price_ok and mode_btc_ok and mode_vol_ok),
+                }
+
             if price_only_gate:
                 if price_ok and btc_buffer_ok and vol_gate_ok:
-                    signal = (
-                        f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s mode)"
-                        if late_mode
-                        else f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
-                    )
+                    if volume_eval_mode and active_mode:
+                        signal = f"✅ BUY {fav_name} (volume eval, last {int(active_mode['window_sec'])}s)"
+                    elif late_entry_mode and active_mode:
+                        signal = f"✅ BUY {fav_name} (late entry, last {int(active_mode['window_sec'])}s)"
+                    else:
+                        signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
                 elif not btc_buffer_ok and btc_buffer:
-                    label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
+                    if volume_eval_mode:
+                        label = f"volume eval (last {int(active_mode['window_sec'])}s)"
+                    elif late_entry_mode:
+                        label = f"late entry (last {int(active_mode['window_sec'])}s)"
+                    else:
+                        label = "last 20s"
                     signal = f"⏳ WAIT ({label}: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
                 elif vol_check_enabled and not vol_speed_ok:
-                    label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
+                    if volume_eval_mode:
+                        label = f"volume eval (last {int(active_mode['window_sec'])}s)"
+                    elif late_entry_mode:
+                        label = f"late entry (last {int(active_mode['window_sec'])}s)"
+                    else:
+                        label = "last 20s"
                     signal = f"⏳ WAIT ({label}: {fav_name} current volume lead too small)"
                 else:
-                    label = f"last {int(late_mode['window_sec'])}s" if late_mode else "last 20s"
+                    if volume_eval_mode:
+                        label = f"volume eval (last {int(active_mode['window_sec'])}s)"
+                    elif late_entry_mode:
+                        label = f"late entry (last {int(active_mode['window_sec'])}s)"
+                    else:
+                        label = "last 20s"
                     signal = f"⏳ WAIT ({label}: P not in range)"
             elif not time_cutoff_ok:
                 signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
@@ -3084,6 +3133,15 @@ class Dashboard:
                     "fav_accel": round(float(vol_speed["fav_accel"]), 6),
                     "other_accel": round(float(vol_speed["other_accel"]), 6),
                     "ok": vol_speed_ok,
+                },
+                "active_mode_kind": (
+                    "volume_eval_mode" if volume_eval_mode else (
+                        "late_entry_mode" if late_entry_mode else "none"
+                    )
+                ),
+                "mode_strategies": {
+                    "volume_eval_mode": _mode_strategy_block(volume_eval_mode, "volume_eval_mode"),
+                    "late_entry_mode": _mode_strategy_block(late_entry_mode, "late_entry_mode"),
                 },
                 "up_line": f"{up.last_price:.3f} | Dev {up_dev:+.1f}% | Mom {up_mom if up_mom is not None else 0:.2f}% | Trend {up_trend if up_trend is not None else 0:+.4f}",
                 "down_line": f"{down.last_price:.3f} | Dev {down_dev:+.1f}% | Mom {down_mom if down_mom is not None else 0:.2f}% | Trend {down_trend if down_trend is not None else 0:+.4f}",
