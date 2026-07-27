@@ -64,6 +64,7 @@ class LateEntryModesConfig:
     """Predefined late-entry windows; tightest active window wins."""
     enabled: bool = False
     total_max_trades: int = 3
+    mode_70s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_70s", enabled=False, time_left_sec=70, min_contracts=5, max_trades=1, buffer_avg_multiplier=1.0, min_buffer_threshold_usd=25.0, min_price=0.8, max_price=0.99))
     mode_60s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_60s", enabled=True, time_left_sec=60, min_contracts=5, max_trades=1, buffer_avg_multiplier=1.0, min_buffer_threshold_usd=25.0, min_price=0.8, max_price=0.99))
     mode_40s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_40s", enabled=True, time_left_sec=40, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
     mode_30s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_30s", enabled=True, time_left_sec=30, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
@@ -150,12 +151,24 @@ class RedeemConfig:
 
 
 @dataclass
+class TimerAlertConfig:
+    """One-shot timer alert sent to dedicated Telegram timer bot."""
+    enabled: bool = False
+    time_left_sec: int = 100
+    min_price: float = 0.75
+    max_price: float = 0.95
+
+
+@dataclass
 class TelegramConfig:
     """Telegram notification parameters."""
     enabled: bool = True
     bot_token: str = ""
     chat_id: str = ""
     chart_every_n_trades: int = 10
+    timer_bot_token: str = ""
+    timer_chat_id: str = ""
+    timer_alert: TimerAlertConfig = field(default_factory=TimerAlertConfig)
 
 
 @dataclass
@@ -294,6 +307,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
     late_entry_modes = LateEntryModesConfig(
         enabled=bool(late_modes_data.get("enabled", False)),
         total_max_trades=_to_int(late_modes_data.get("total_max_trades", 3), 3),
+        mode_70s=_load_late_mode(late_modes_data.get("mode_70s", {}), 70, 5, 1, 1.0, 25.0, 0.8, 0.99),
         mode_60s=_load_late_mode(late_modes_data.get("mode_60s", {}), 60, 5, 1, 1.0, 25.0, 0.8, 0.99),
         mode_40s=_load_late_mode(late_modes_data.get("mode_40s", {}), 40, 8, 1, 0.8, 25.0, 0.85, 0.99),
         mode_30s=_load_late_mode(late_modes_data.get("mode_30s", {}), 30, 8, 1, 0.8, 25.0, 0.85, 0.99),
@@ -301,6 +315,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
     )
 
     for fallback_name, mode_cfg in [
+        ("mode_70s", late_entry_modes.mode_70s),
         ("mode_60s", late_entry_modes.mode_60s),
         ("mode_40s", late_entry_modes.mode_40s),
         ("mode_30s", late_entry_modes.mode_30s),
@@ -409,11 +424,20 @@ def load_config(config_path: Optional[str] = None) -> Config:
     
     # Telegram (merge JSON + env)
     telegram_data = data.get("telegram", {})
+    timer_alert_data = telegram_data.get("timer_alert", {})
     telegram = TelegramConfig(
         enabled=telegram_data.get("enabled", True),
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         chart_every_n_trades=telegram_data.get("chart_every_n_trades", 10),
+        timer_bot_token=os.getenv("TELEGRAM_TIMER_BOT_TOKEN", ""),
+        timer_chat_id=os.getenv("TELEGRAM_TIMER_CHAT_ID", ""),
+        timer_alert=TimerAlertConfig(
+            enabled=bool(timer_alert_data.get("enabled", False)),
+            time_left_sec=_to_int(timer_alert_data.get("time_left_sec", 100), 100),
+            min_price=_to_float(timer_alert_data.get("min_price", 0.75), 0.75),
+            max_price=_to_float(timer_alert_data.get("max_price", 0.95), 0.95),
+        ),
     )
 
     web_data = data.get("web_dashboard", {})
@@ -529,6 +553,7 @@ def validate_config(config: Config) -> list:
         errors.append("strategy.volume_acceleration_check.min_current_volume_diff must be >= 0")
 
     for mode_name, mode_cfg in [
+        ("mode_70s", config.strategy.late_entry_modes.mode_70s),
         ("mode_60s", config.strategy.late_entry_modes.mode_60s),
         ("mode_40s", config.strategy.late_entry_modes.mode_40s),
         ("mode_30s", config.strategy.late_entry_modes.mode_30s),
@@ -571,5 +596,15 @@ def validate_config(config: Config) -> list:
     if config.web_dashboard.enabled:
         if not (1 <= config.web_dashboard.port <= 65535):
             errors.append("web_dashboard.port must be between 1 and 65535")
+
+    timer_alert = config.telegram.timer_alert
+    if timer_alert.time_left_sec < 0:
+        errors.append("telegram.timer_alert.time_left_sec must be >= 0")
+    if timer_alert.min_price < 0 or timer_alert.min_price > 1:
+        errors.append("telegram.timer_alert.min_price must be within [0, 1]")
+    if timer_alert.max_price < 0 or timer_alert.max_price > 1:
+        errors.append("telegram.timer_alert.max_price must be within [0, 1]")
+    if timer_alert.min_price >= timer_alert.max_price:
+        errors.append("telegram.timer_alert.min_price must be less than max_price")
     
     return errors
