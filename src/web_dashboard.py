@@ -68,7 +68,6 @@ _HTML = """<!DOCTYPE html>
     <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <div class="card controls"><h2>Timer Alert</h2><div id="timerAlert" class="mono">Loading…</div></div>
-    <div class="card controls"><h2>Volume Accel Check</h2><div id="volumeAccelCheck" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalMode" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
   </div>
@@ -201,28 +200,6 @@ _HTML = """<!DOCTYPE html>
       box.innerHTML = html.join('');
     }
 
-    function renderVolumeAccelCheck(cfg) {
-      var box = document.getElementById('volumeAccelCheck');
-      if (!box) return;
-      if (!cfg) {
-        box.textContent = 'Volume accel check config unavailable';
-        return;
-      }
-
-      var html = [];
-      html.push('<div class="mode-box">');
-      html.push('<div class="mode-title">volume_acceleration_check</div>');
-      html.push('<div class="row"><label>Min Curr Diff</label><input type="number" id="vac_min_current_volume_diff" step="1" value="' + esc(cfg.min_current_volume_diff) + '"/></div>');
-      html.push('<div class="row"><label>Min Accel Diff</label><input type="number" id="vac_min_accel_diff" step="1" value="' + esc(cfg.min_accel_diff) + '"/></div>');
-      html.push('</div>');
-      html.push('<div style="margin-top:0.5rem" class="row">');
-      html.push('<button class="btn" onclick="saveVolumeAccelCheck()">Apply</button>');
-      html.push('<button class="btn secondary" onclick="loadVolumeAccelCheck()">Reload</button>');
-      html.push('</div>');
-      html.push('<div id="vacStatus" class="status"></div>');
-      box.innerHTML = html.join('');
-    }
-
     function renderTimerAlert(cfg) {
       var box = document.getElementById('timerAlert');
       if (!box) return;
@@ -286,49 +263,6 @@ _HTML = """<!DOCTYPE html>
         if (r.status === 200) {
           if (status) status.textContent = 'Applied';
           loadTimerAlert();
-        } else {
-          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
-        }
-      };
-      r.send(JSON.stringify(payload));
-    }
-
-    function loadVolumeAccelCheck() {
-      var r = new XMLHttpRequest();
-      r.open('GET', '/api/volume-accel-check', true);
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status !== 200) {
-          var box = document.getElementById('volumeAccelCheck');
-          if (box) box.textContent = 'Could not load volume accel check (HTTP ' + r.status + ')';
-          return;
-        }
-        try {
-          var cfg = JSON.parse(r.responseText);
-          renderVolumeAccelCheck(cfg);
-        } catch (e) {
-          var box2 = document.getElementById('volumeAccelCheck');
-          if (box2) box2.textContent = 'Volume accel check parse error';
-        }
-      };
-      r.send();
-    }
-
-    function saveVolumeAccelCheck() {
-      var status = document.getElementById('vacStatus');
-      var payload = {
-        min_current_volume_diff: readNum('vac_min_current_volume_diff', 0.0),
-        min_accel_diff: readNum('vac_min_accel_diff', 0.0)
-      };
-
-      var r = new XMLHttpRequest();
-      r.open('POST', '/api/volume-accel-check', true);
-      r.setRequestHeader('Content-Type', 'application/json');
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status === 200) {
-          if (status) status.textContent = 'Applied';
-          loadVolumeAccelCheck();
         } else {
           if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
         }
@@ -530,7 +464,6 @@ _HTML = """<!DOCTYPE html>
       if (!force && (nowMs - lastPanelReloadMs) < 15000) return;
       lastPanelReloadMs = nowMs;
       loadTimerAlert();
-      loadVolumeAccelCheck();
       loadVolumeEvalMode();
       loadLateModes();
     }
@@ -577,11 +510,47 @@ _HTML = """<!DOCTYPE html>
           var volumeEnabled = (ck.volume_enabled !== undefined) ? !!ck.volume_enabled : true;
           var volumeCheck = (ck.volume !== undefined) ? ck.volume : ck.vol_speed;
           var volumeCheckLabel = volumeEnabled ? chk(volumeCheck) : "OFF";
+          var modeStrategies = st.mode_strategies || {};
+
+          function modeCheck(v) {
+            if (v === true) return "ok";
+            if (v === false) return "wait";
+            return "-";
+          }
+
+          function pushModeStrategyLine(label, modeKey) {
+            var m = modeStrategies[modeKey];
+            if (!m) {
+              strategyBits.push(label + ": n/a");
+              return;
+            }
+            if (!m.configured) {
+              strategyBits.push(label + ": disabled");
+              return;
+            }
+            if (!m.active) {
+              strategyBits.push(label + ": configured, not active");
+              return;
+            }
+            var checks = m.checks || {};
+            var volLabel = m.volume_gate_enabled ? modeCheck(checks.volume) : "off";
+            strategyBits.push(
+              label + ": active (" + numFmt(m.window_sec, 0) + "s) " +
+              "P=" + modeCheck(checks.price) +
+              " B=" + modeCheck(checks.btc_buffer) +
+              " Vol=" + volLabel +
+              " => " + (m.ready ? "READY" : "WAIT")
+            );
+          }
+
           var strategyBits = [
             "Fav: " + esc(st.favorite) + " \u00b7 WR: " + esc(st.win_rate_str),
             "Checks: P=" + chk(ck.price) + " T=" + chk(ck.time) + " D=" + chk(ck.dev) +
             " M=" + chk(ck.mom) + " Vol=" + volumeCheckLabel + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
           ];
+          pushModeStrategyLine("Volume Eval", "volume_eval_mode");
+          pushModeStrategyLine("Late Entry", "late_entry_mode");
+          strategyBits.push("Active mode: " + esc(st.active_mode_kind || "none"));
           var trend = st.trend || {};
           if (trend.window_sec != null) {
             strategyBits.push(
