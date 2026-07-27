@@ -65,6 +65,7 @@ _HTML = """<!DOCTYPE html>
   <div class="grid">
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
+    <div class="card"><h2>Mode Checks</h2><div id="modeChecks" class="mono">Loading…</div></div>
     <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <div class="card controls"><h2>Timer Alert</h2><div id="timerAlert" class="mono">Loading…</div></div>
@@ -511,6 +512,7 @@ _HTML = """<!DOCTYPE html>
           var st = d.strategy || {};
           var sig = st.signal_text || "\u2014";
           function chk(x) { return x === true ? "\u2713" : x === false ? "\u2717" : "\u2014"; }
+          function okWait(v) { return v === true ? "OK" : v === false ? "WAIT" : "-"; }
           var ck = st.checks || {};
 
           var strategyBits = [
@@ -542,6 +544,39 @@ _HTML = """<!DOCTYPE html>
             '<div class="mono" style="margin-top:0.4rem">' +
             strategyBits.join("<br/>") +
             "</div>";
+
+          var modeBox = document.getElementById("modeChecks");
+          if (modeBox) {
+            var ms = st.mode_strategies || {};
+            var activeKind = st.active_mode_kind || "none";
+
+            function modeLine(label, key) {
+              var m = ms[key];
+              if (!m) return label + ": unavailable";
+              if (!m.configured) return label + ": disabled";
+              if (!m.active) return label + ": configured, inactive";
+              var checks = m.checks || {};
+              var volText = m.volume_gate_enabled ? okWait(checks.volume) : "OFF";
+              var gate =
+                "P=" + okWait(checks.price) +
+                " B=" + okWait(checks.btc_buffer) +
+                " Vol=" + volText;
+              var cfg =
+                "win=" + esc(numFmt(m.window_sec || 0, 0)) + "s" +
+                " range=" + esc(numFmt(m.min_price || 0, 3)) + "-" + esc(numFmt(m.max_price || 1, 3)) +
+                " minC=" + esc(String(m.min_contracts != null ? m.min_contracts : "-")) +
+                " xBuf=" + esc(numFmt(m.buffer_avg_multiplier || 1, 2));
+              return label + ": " + (m.ready ? "READY" : "WAIT") + " | " + gate + " | " + cfg;
+            }
+
+            var modeLines = [
+              "Active: " + esc(activeKind),
+              modeLine("Volume Eval", "volume_eval_mode"),
+              modeLine("Late Entry", "late_entry_mode")
+            ];
+            modeBox.innerHTML = modeLines.join("<br/>");
+          }
+
           var b = d.btc || {};
           var btcEl = document.getElementById("btc");
           if ((b.btc_connected && b.btc_current_price > 0) || (b.binance_connected && b.binance_current_price > 0)) {
