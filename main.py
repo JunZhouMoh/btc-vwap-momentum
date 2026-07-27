@@ -2158,6 +2158,16 @@ class Dashboard:
             "name": "volume_eval_mode",
         }
 
+    def _get_active_entry_modes(self, time_left: float) -> List[Dict[str, float]]:
+        modes: List[Dict[str, float]] = []
+        volume_mode = self._get_volume_eval_mode(time_left)
+        if volume_mode:
+            modes.append(volume_mode)
+        late_mode = self._get_late_entry_mode(time_left)
+        if late_mode:
+            modes.append(late_mode)
+        return modes
+
     def _get_volume_eval_threshold_levels(self) -> List[float]:
         mode_cfg = getattr(self.config.strategy, "volume_eval_mode", None)
         raw = getattr(mode_cfg, "entry_min_current_volume_diffs", None) if mode_cfg else None
@@ -2251,10 +2261,18 @@ class Dashboard:
 
         buffer_abs_usd = base_buffer_abs_usd
         time_left = max(0, self.state.end_time - time.time())
-        late_mode = self._get_volume_eval_mode(time_left) or self._get_late_entry_mode(time_left)
-        if late_mode:
-            mode_floor_usd = float(late_mode.get("min_buffer_threshold_usd", self.config.buffer))
-            buffer_abs_usd = max(mode_floor_usd, stats_abs_usd * late_mode["buffer_avg_multiplier"])
+        active_modes = self._get_active_entry_modes(time_left)
+        late_mode = None
+        if active_modes:
+            mode_thresholds: List[Tuple[float, Dict[str, float]]] = []
+            for mode in active_modes:
+                mode_floor_usd = float(mode.get("min_buffer_threshold_usd", self.config.buffer))
+                threshold_usd = max(mode_floor_usd, stats_abs_usd * float(mode.get("buffer_avg_multiplier", 1.0)))
+                mode_thresholds.append((threshold_usd, mode))
+            if mode_thresholds:
+                mode_thresholds.sort(key=lambda item: item[0])
+                buffer_abs_usd = mode_thresholds[0][0]
+                late_mode = mode_thresholds[0][1]
         elif self.config.strategy.dangerous and time_left <= 20:
             # Legacy fallback when structured late-entry modes are disabled.
             buffer_abs_usd = max(20.0, stats_abs_usd * 0.5)
@@ -2533,8 +2551,8 @@ class Dashboard:
         elapsed_sec = self.config.market.duration_sec - time_left
         btc_buffer = self._get_btc_buffer_status()
         
-        # Use late-entry mode price range if active, otherwise use strategy range
-        late_mode = self._get_late_entry_mode(time_left)
+        active_modes = self._get_active_entry_modes(time_left)
+        late_mode = active_modes[0] if active_modes else None
         if late_mode:
             min_price = late_mode.get("min_price", 0.0)
             max_price = late_mode.get("max_price", 1.0)
@@ -2565,29 +2583,48 @@ class Dashboard:
             min_current_volume_diff_override=next_min_curr_diff,
         )
         vol_speed_ok = bool(vol_speed["ok"])
-        vol_check_enabled = self._is_volume_check_enabled_for_active_mode(late_mode)
+        if active_modes:
+            vol_check_enabled = any(self._is_volume_check_enabled_for_active_mode(mode) for mode in active_modes)
+        else:
+            vol_check_enabled = True
         vol_gate_ok = vol_speed_ok if vol_check_enabled else True
         
         signal = "⏳ WAIT"
         signal_color = "yellow"
-        late_mode = self._get_volume_eval_mode(time_left) or self._get_late_entry_mode(time_left)
-        late_window_price_only = late_mode is not None
+        ready_modes: List[Dict[str, float]] = []
+        for mode in active_modes:
+            mode_price_ok = mode.get("min_price", 0.0) <= fav_price <= mode.get("max_price", 1.0)
+            mode_vol_enabled = self._is_volume_check_enabled_for_active_mode(mode)
+            mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
+            if mode_price_ok and btc_buffer_ok and mode_vol_ok:
+                ready_modes.append(mode)
+
+        late_mode = ready_modes[0] if ready_modes else (active_modes[0] if active_modes else None)
+        if late_mode:
+            min_price = late_mode.get("min_price", 0.0)
+            max_price = late_mode.get("max_price", 1.0)
+
+        late_window_price_only = len(active_modes) > 0
         last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
         price_only_gate = late_window_price_only or last_20s_price_only
         
         if price_only_gate:
-            if price_ok and btc_buffer_ok and vol_gate_ok:
-                if late_mode:
+            if ready_modes:
+                chosen_mode = ready_modes[0]
+                chosen_vol_enabled = self._is_volume_check_enabled_for_active_mode(chosen_mode)
+                if chosen_mode:
                     mcvd_hint = ""
-                    if str(late_mode.get("name", "")) == "volume_eval_mode":
+                    if str(chosen_mode.get("name", "")) == "volume_eval_mode":
                         mcvd_hint = (
                             f", minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f}"
-                            f", minC={int(late_mode.get('min_contracts', self.config.entry.min_contracts))}"
+                            f", minC={int(chosen_mode.get('min_contracts', self.config.entry.min_contracts))}"
                         )
+                    mode_label = " / ".join(str(mode.get("name", "")) for mode in ready_modes if mode)
                     signal = (
-                        f"✅ BUY {fav_name} (last {int(late_mode['window_sec'])}s: "
-                        f"x{late_mode['buffer_avg_multiplier']:.2f} buffer, "
-                        f"vol {'ON' if vol_check_enabled else 'OFF'}{mcvd_hint})"
+                        f"✅ BUY {fav_name} ({mode_label}: "
+                        f"last {int(chosen_mode['window_sec'])}s, "
+                        f"x{chosen_mode['buffer_avg_multiplier']:.2f} buffer, "
+                        f"vol {'ON' if chosen_vol_enabled else 'OFF'}{mcvd_hint})"
                     )
                 else:
                     signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
@@ -4052,9 +4089,7 @@ class LiveTradingBot:
     ):
         """Execute entry order (live CLOB or simulation)."""
         time_left = max(0, self.state.end_time - time.time())
-        late_mode = self.dashboard._get_volume_eval_mode(time_left) or self.dashboard._get_late_entry_mode(time_left)
-        active_mode_name = str(late_mode.get("name", "")) if late_mode else ""
-        is_volume_eval_mode = active_mode_name == "volume_eval_mode"
+        active_modes = self.dashboard._get_active_entry_modes(time_left)
         late_modes_cfg = getattr(self.config.strategy, "late_entry_modes", None)
         total_late_mode_max_trades = int(getattr(late_modes_cfg, "total_max_trades", 3))
         total_late_mode_trade_count = sum(
@@ -4064,36 +4099,68 @@ class LiveTradingBot:
         total_trade_cap_ok = total_late_mode_trade_count < total_late_mode_max_trades
         volume_threshold_levels = self.dashboard._get_volume_eval_threshold_levels()
 
-        if late_mode:
-            mode_name = active_mode_name
-            mode_max_trades = int(late_mode.get("max_trades", 1))
-            if is_volume_eval_mode and volume_threshold_levels:
+        mode_states: List[Dict[str, Any]] = []
+        for mode in active_modes:
+            mode_name_i = str(mode.get("name", "")).strip()
+            is_volume_i = mode_name_i == "volume_eval_mode"
+            mode_max_trades_i = int(mode.get("max_trades", 1))
+            if is_volume_i and volume_threshold_levels:
                 entry_trade_limits = self.dashboard._get_volume_eval_entry_trade_limits()
                 if entry_trade_limits:
-                    mode_max_trades = sum(entry_trade_limits)
+                    mode_max_trades_i = sum(entry_trade_limits)
                 else:
-                    mode_max_trades = len(volume_threshold_levels)
-            mode_trade_count = self.stats.late_mode_trade_count(mode_name)
-            mode_trade_cap_ok = self.stats.can_enter_late_mode(mode_name, mode_max_trades)
+                    mode_max_trades_i = len(volume_threshold_levels)
+            mode_trade_count_i = self.stats.late_mode_trade_count(mode_name_i)
+            mode_trade_cap_ok_i = self.stats.can_enter_late_mode(mode_name_i, mode_max_trades_i)
+            total_cap_ok_i = True if is_volume_i else total_trade_cap_ok
+            mode_states.append(
+                {
+                    "mode": mode,
+                    "mode_name": mode_name_i,
+                    "is_volume": is_volume_i,
+                    "mode_max_trades": mode_max_trades_i,
+                    "mode_trade_count": mode_trade_count_i,
+                    "mode_trade_cap_ok": mode_trade_cap_ok_i,
+                    "total_cap_ok": total_cap_ok_i,
+                }
+            )
+
+        eligible_mode_states = [
+            st for st in mode_states if st["mode_trade_cap_ok"] and st["total_cap_ok"]
+        ]
+
+        if eligible_mode_states:
+            selected_mode_state = eligible_mode_states[0]
+            late_mode = selected_mode_state["mode"]
+            mode_name = selected_mode_state["mode_name"]
+            is_volume_eval_mode = bool(selected_mode_state["is_volume"])
+            mode_max_trades = int(selected_mode_state["mode_max_trades"])
+            mode_trade_count = int(selected_mode_state["mode_trade_count"])
+            mode_trade_cap_ok = bool(selected_mode_state["mode_trade_cap_ok"])
         else:
+            selected_mode_state = None
+            late_mode = None
             mode_name = ""
+            is_volume_eval_mode = False
             mode_max_trades = 0
             mode_trade_count = 0
             mode_trade_cap_ok = True
 
         if not manual_override:
-            if late_mode and not mode_trade_cap_ok:
-                signal_logger.info(
-                    f"SIGNAL IGNORED: {side} - late mode '{mode_name}' trade cap reached "
-                    f"({mode_trade_count}/{mode_max_trades})"
-                )
-                return
-
-            if late_mode and (not is_volume_eval_mode) and not total_trade_cap_ok:
-                signal_logger.info(
-                    f"SIGNAL IGNORED: {side} - total late-mode trade cap reached "
-                    f"({total_late_mode_trade_count}/{total_late_mode_max_trades})"
-                )
+            if active_modes and not eligible_mode_states:
+                first_state = mode_states[0] if mode_states else None
+                if first_state and not bool(first_state["mode_trade_cap_ok"]):
+                    signal_logger.info(
+                        f"SIGNAL IGNORED: {side} - late mode '{first_state['mode_name']}' trade cap reached "
+                        f"({first_state['mode_trade_count']}/{first_state['mode_max_trades']})"
+                    )
+                elif first_state and not bool(first_state["total_cap_ok"]):
+                    signal_logger.info(
+                        f"SIGNAL IGNORED: {side} - total late-mode trade cap reached "
+                        f"({total_late_mode_trade_count}/{total_late_mode_max_trades})"
+                    )
+                else:
+                    signal_logger.info(f"SIGNAL IGNORED: {side} - no eligible active mode")
                 return
 
         if self.stats.position is not None:
@@ -4153,8 +4220,37 @@ class LiveTradingBot:
         # Defensive time cutoff / buffer / trend gating applies only to auto entries.
         no_entry_cutoff = self.config.strategy.no_entry_before_end_sec
         last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
-        price_only_gate = late_mode is not None or last_20s_price_only
         btc_buffer = self.dashboard._get_btc_buffer_status()
+        btc_buffer_ok = bool(btc_buffer and btc_buffer.get("ok"))
+
+        if eligible_mode_states:
+            gate_ready_states: List[Dict[str, Any]] = []
+            for st in eligible_mode_states:
+                mode_i = st["mode"]
+                mode_price_ok = float(mode_i.get("min_price", self.config.strategy.min_price)) <= token.last_price <= float(mode_i.get("max_price", self.config.strategy.max_price))
+                mode_vol_enabled = self.dashboard._is_volume_check_enabled_for_active_mode(mode_i)
+                mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
+                if mode_price_ok and btc_buffer_ok and mode_vol_ok:
+                    gate_ready_states.append(st)
+
+            if gate_ready_states:
+                selected_mode_state = gate_ready_states[0]
+                late_mode = selected_mode_state["mode"]
+                mode_name = selected_mode_state["mode_name"]
+                is_volume_eval_mode = bool(selected_mode_state["is_volume"])
+                mode_max_trades = int(selected_mode_state["mode_max_trades"])
+                mode_trade_count = int(selected_mode_state["mode_trade_count"])
+                if late_mode:
+                    min_price = float(late_mode.get("min_price", self.config.strategy.min_price))
+                    max_price = float(late_mode.get("max_price", self.config.strategy.max_price))
+                else:
+                    min_price = self.config.strategy.min_price
+                    max_price = self.config.strategy.max_price
+                price_ok = min_price <= token.last_price <= max_price
+                vol_check_enabled = self.dashboard._is_volume_check_enabled_for_active_mode(late_mode)
+                vol_gate_ok = vol_speed_ok if vol_check_enabled else True
+
+        price_only_gate = late_mode is not None or last_20s_price_only
         if not manual_override:
             if price_only_gate:
                 if not price_ok:
@@ -4193,15 +4289,18 @@ class LiveTradingBot:
                 )
                 return
 
-            if btc_buffer and not btc_buffer["ok"]:
-                signal_logger.info(
-                    f"SIGNAL BLOCKED: {side} - BTC absolute move ${btc_buffer['current_abs_usd']:,.2f} "
-                    f"< buffer ${btc_buffer['buffer_abs_usd']:,.2f}"
-                )
-                logger.warning(
-                    f"Entry blocked by BTC buffer: ${btc_buffer['current_abs_usd']:,.2f} "
-                    f"< ${btc_buffer['buffer_abs_usd']:,.2f}"
-                )
+            if not btc_buffer_ok:
+                if btc_buffer:
+                    signal_logger.info(
+                        f"SIGNAL BLOCKED: {side} - BTC absolute move ${btc_buffer['current_abs_usd']:,.2f} "
+                        f"< buffer ${btc_buffer['buffer_abs_usd']:,.2f}"
+                    )
+                    logger.warning(
+                        f"Entry blocked by BTC buffer: ${btc_buffer['current_abs_usd']:,.2f} "
+                        f"< ${btc_buffer['buffer_abs_usd']:,.2f}"
+                    )
+                else:
+                    signal_logger.info(f"SIGNAL BLOCKED: {side} - BTC buffer data unavailable")
                 return
         
         # Log full signal snapshot
