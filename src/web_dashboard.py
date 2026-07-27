@@ -66,10 +66,11 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
     <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
+    <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
+    <div class="card controls"><h2>Timer Alert</h2><div id="timerAlert" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Volume Accel Check</h2><div id="volumeAccelCheck" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalMode" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
-    <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
   <script>
@@ -110,6 +111,8 @@ _HTML = """<!DOCTYPE html>
       return isNaN(v) ? fallback : v;
     }
 
+    var lateModeKeys = [];
+
     function buildModeEditor(mode) {
       var k = mode.key;
       var h = [];
@@ -132,7 +135,13 @@ _HTML = """<!DOCTYPE html>
       if (!box) return;
       if (!cfg || !cfg.modes) {
         box.textContent = 'Late mode config unavailable';
+        lateModeKeys = [];
         return;
+      }
+
+      lateModeKeys = [];
+      for (var m = 0; m < cfg.modes.length; m++) {
+        if (cfg.modes[m] && cfg.modes[m].key) lateModeKeys.push(String(cfg.modes[m].key));
       }
 
       var html = [];
@@ -212,6 +221,76 @@ _HTML = """<!DOCTYPE html>
       html.push('</div>');
       html.push('<div id="vacStatus" class="status"></div>');
       box.innerHTML = html.join('');
+    }
+
+    function renderTimerAlert(cfg) {
+      var box = document.getElementById('timerAlert');
+      if (!box) return;
+      if (!cfg) {
+        box.textContent = 'Timer alert config unavailable';
+        return;
+      }
+
+      var html = [];
+      html.push('<div class="mode-box">');
+      html.push('<div class="mode-title">telegram.timer_alert</div>');
+      html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="ta_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
+      html.push('<div class="row"><label>Time Left</label><input type="number" id="ta_time_left_sec" step="1" value="' + esc(cfg.time_left_sec) + '"/></div>');
+      html.push('<div class="row"><label>Min Price</label><input type="number" id="ta_min_price" step="0.001" value="' + esc(cfg.min_price) + '"/></div>');
+      html.push('<div class="row"><label>Max Price</label><input type="number" id="ta_max_price" step="0.001" value="' + esc(cfg.max_price) + '"/></div>');
+      html.push('<div class="status">Timer bot: ' + (cfg.timer_bot_ready ? 'ready' : 'missing TELEGRAM_TIMER_BOT_TOKEN or TELEGRAM_TIMER_CHAT_ID') + '</div>');
+      html.push('</div>');
+      html.push('<div style="margin-top:0.5rem" class="row">');
+      html.push('<button class="btn" onclick="saveTimerAlert()">Apply</button>');
+      html.push('<button class="btn secondary" onclick="loadTimerAlert()">Reload</button>');
+      html.push('</div>');
+      html.push('<div id="taStatus" class="status"></div>');
+      box.innerHTML = html.join('');
+    }
+
+    function loadTimerAlert() {
+      var r = new XMLHttpRequest();
+      r.open('GET', '/api/timer-alert', true);
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status !== 200) {
+          var box = document.getElementById('timerAlert');
+          if (box) box.textContent = 'Could not load timer alert (HTTP ' + r.status + ')';
+          return;
+        }
+        try {
+          var cfg = JSON.parse(r.responseText);
+          renderTimerAlert(cfg);
+        } catch (e) {
+          var box2 = document.getElementById('timerAlert');
+          if (box2) box2.textContent = 'Timer alert parse error';
+        }
+      };
+      r.send();
+    }
+
+    function saveTimerAlert() {
+      var status = document.getElementById('taStatus');
+      var payload = {
+        enabled: !!(document.getElementById('ta_enabled') && document.getElementById('ta_enabled').checked),
+        time_left_sec: readInt('ta_time_left_sec', 100),
+        min_price: readNum('ta_min_price', 0.75),
+        max_price: readNum('ta_max_price', 0.95)
+      };
+
+      var r = new XMLHttpRequest();
+      r.open('POST', '/api/timer-alert', true);
+      r.setRequestHeader('Content-Type', 'application/json');
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status === 200) {
+          if (status) status.textContent = 'Applied';
+          loadTimerAlert();
+        } else {
+          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
+        }
+      };
+      r.send(JSON.stringify(payload));
     }
 
     function loadVolumeAccelCheck() {
@@ -340,7 +419,9 @@ _HTML = """<!DOCTYPE html>
 
     function saveLateModes() {
       var status = document.getElementById('lateStatus');
-      var keys = ['mode_60s', 'mode_40s', 'mode_30s', 'mode_20s'];
+      var keys = lateModeKeys && lateModeKeys.length
+        ? lateModeKeys
+        : ['mode_70s', 'mode_60s', 'mode_40s', 'mode_30s', 'mode_20s'];
       var modes = [];
       for (var i = 0; i < keys.length; i++) {
         var k = keys[i];
@@ -448,6 +529,7 @@ _HTML = """<!DOCTYPE html>
       var nowMs = Date.now();
       if (!force && (nowMs - lastPanelReloadMs) < 15000) return;
       lastPanelReloadMs = nowMs;
+      loadTimerAlert();
       loadVolumeAccelCheck();
       loadVolumeEvalMode();
       loadLateModes();
@@ -618,7 +700,7 @@ _HTML = """<!DOCTYPE html>
             var modeWrParts = [];
             var modeMap = tr.win_rate_by_mode;
             var handledModes = {};
-            var modeOrder = ["normal", "manual", "volume_eval_mode", "mode_60s", "mode_40s", "mode_30s", "mode_20s", "unknown"];
+            var modeOrder = ["normal", "manual", "volume_eval_mode", "mode_70s", "mode_60s", "mode_40s", "mode_30s", "mode_20s", "unknown"];
 
             function pushModeLine(modeKey) {
               if (!Object.prototype.hasOwnProperty.call(modeMap, modeKey)) return;
@@ -736,6 +818,8 @@ def build_app(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_accel_check: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
@@ -768,6 +852,20 @@ def build_app(
         return JSONResponse({"error": "Late mode controls unavailable"}, status_code=501)
       payload = await req.json()
       updated = update_late_modes(payload if isinstance(payload, dict) else {})
+      return JSONResponse(_sanitize_for_json(updated))
+
+    @app.get("/api/timer-alert")
+    async def api_timer_alert_get():
+      if not get_timer_alert:
+        return JSONResponse({"error": "Timer alert controls unavailable"}, status_code=501)
+      return JSONResponse(_sanitize_for_json(get_timer_alert()))
+
+    @app.post("/api/timer-alert")
+    async def api_timer_alert_post(req: Request):
+      if not update_timer_alert:
+        return JSONResponse({"error": "Timer alert controls unavailable"}, status_code=501)
+      payload = await req.json()
+      updated = update_timer_alert(payload if isinstance(payload, dict) else {})
       return JSONResponse(_sanitize_for_json(updated))
 
     @app.get("/api/volume-accel-check")
@@ -834,6 +932,8 @@ def start_web_dashboard(
   holder: WebSnapshotHolder,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_accel_check: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
@@ -848,6 +948,8 @@ def start_web_dashboard(
         holder,
         get_late_modes=get_late_modes,
         update_late_modes=update_late_modes,
+      get_timer_alert=get_timer_alert,
+      update_timer_alert=update_timer_alert,
         get_volume_accel_check=get_volume_accel_check,
         update_volume_accel_check=update_volume_accel_check,
         get_volume_eval_mode=get_volume_eval_mode,
