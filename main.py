@@ -2599,6 +2599,21 @@ class Dashboard:
             if mode_price_ok and btc_buffer_ok and mode_vol_ok:
                 ready_modes.append(mode)
 
+        mode_status_lines: List[str] = []
+        for mode in active_modes:
+            mode_name = str(mode.get("name", "")).strip() or "mode"
+            mode_price_ok = mode.get("min_price", 0.0) <= fav_price <= mode.get("max_price", 1.0)
+            mode_vol_enabled = self._is_volume_check_enabled_for_active_mode(mode)
+            mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
+            mode_ready = mode_price_ok and btc_buffer_ok and mode_vol_ok
+            mode_label = "Volume mode" if mode_name == "volume_eval_mode" else f"Late mode {mode_name}"
+            vol_label = ("OK" if mode_vol_ok else "WAIT") if mode_vol_enabled else "OFF"
+            mode_status_lines.append(
+                f"{mode_label}: P {'OK' if mode_price_ok else 'WAIT'} | "
+                f"B {'OK' if btc_buffer_ok else 'WAIT'} | "
+                f"Vol {vol_label} => {'READY' if mode_ready else 'WAIT'}"
+            )
+
         late_mode = ready_modes[0] if ready_modes else (active_modes[0] if active_modes else None)
         if late_mode:
             min_price = late_mode.get("min_price", 0.0)
@@ -2670,7 +2685,10 @@ class Dashboard:
         else:
             self.last_signal = ""
             if not time_ok:
-                signal = f"⏳ WAIT (elapsed<{min_elapsed}s)"
+                signal = (
+                    f"⏳ WAIT (elapsed<{min_elapsed}s; mode checks below)"
+                    if mode_status_lines else f"⏳ WAIT (elapsed<{min_elapsed}s)"
+                )
             elif not price_ok:
                 signal = f"⏳ WAIT (P not in range)"
             elif not dev_ok:
@@ -2707,27 +2725,25 @@ class Dashboard:
                 f"BTC Buffer:  ${btc_buffer['current_abs_usd']:,.2f} vs ${btc_buffer['buffer_abs_usd']:,.2f} "
                 f"({'OK' if btc_buffer_ok else 'WAIT'})"
             )
+        if mode_status_lines:
+            for mode_line in reversed(mode_status_lines):
+                lines.insert(7, mode_line)
         if late_mode:
             mode_name_for_line = str(late_mode.get("name", ""))
             if mode_name_for_line == "volume_eval_mode":
-                mode_line = (
-                    f"Volume mode: last {int(late_mode['window_sec'])}s | "
+                chosen_mode_line = (
+                    f"Chosen mode: volume_eval_mode ({int(late_mode['window_sec'])}s) | "
                     f"minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f} | "
                     f"minC={int(late_mode.get('min_contracts', self.config.entry.min_contracts))} | "
-                    f"buffer x{late_mode['buffer_avg_multiplier']:.2f} | "
-                    f"vol {'ON' if vol_check_enabled else 'OFF'}"
+                    f"buffer x{late_mode['buffer_avg_multiplier']:.2f}"
                 )
             else:
-                mode_line = (
-                    f"Late mode:   last {int(late_mode['window_sec'])}s | "
+                chosen_mode_line = (
+                    f"Chosen mode: {mode_name_for_line} ({int(late_mode['window_sec'])}s) | "
                     f"minC={int(late_mode['min_contracts'])} | "
-                    f"buffer x{late_mode['buffer_avg_multiplier']:.2f} | "
-                    f"vol {'ON' if vol_check_enabled else 'OFF'}"
+                    f"buffer x{late_mode['buffer_avg_multiplier']:.2f}"
                 )
-            lines.insert(
-                7,
-                mode_line,
-            )
+            lines.insert(7, chosen_mode_line)
         elif last_20s_price_only:
             lines.insert(7, "Last 20s:   DANGEROUS BTC buffer = max($20.00, 50% of avg buffer)")
         
