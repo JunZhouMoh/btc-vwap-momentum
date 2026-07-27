@@ -495,11 +495,15 @@ _HTML = """<!DOCTYPE html>
             ? d.trading.bet_usd
             : 1;
           if (!buyAmountVal) buyAmountVal = String(defaultBuyAmount);
+          var upVol = (d.up && d.up.book && typeof d.up.book.volume_total === "number" && !isNaN(d.up.book.volume_total)) ? d.up.book.volume_total : 0;
+          var downVol = (d.down && d.down.book && typeof d.down.book.volume_total === "number" && !isNaN(d.down.book.volume_total)) ? d.down.book.volume_total : 0;
+          var sessionTotalVolume = upVol + downVol;
 
           document.getElementById("session").innerHTML = [
             "Timer: " + (hdr.time_left_sec != null ? esc(Math.floor(hdr.time_left_sec) + "s left") : "\u2014"),
             "WS: " + (hdr.ws_connected ? "live" : "disconnected"),
             "Mode: " + (hdr.simulation ? "simulation" : "real"),
+            "Session Volume: " + esc(Math.round(sessionTotalVolume)),
             'Live: ' + esc(liveStatusVal),
             '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="' + esc(buyAmountVal) + '" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setManualAmount(29)">$29</button> <button class="btn secondary" onclick="setManualAmount(39)">$39</button> <button class="btn secondary" onclick="setManualAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">Buy UP</button> <button class="btn" onclick="manualBuyDown()">Buy DOWN</button> <span id="buyStatus" class="status">' + esc(buyStatusVal) + '</span></span>'
           ].join("<br/>");
@@ -507,50 +511,12 @@ _HTML = """<!DOCTYPE html>
           var sig = st.signal_text || "\u2014";
           function chk(x) { return x === true ? "\u2713" : x === false ? "\u2717" : "\u2014"; }
           var ck = st.checks || {};
-          var volumeEnabled = (ck.volume_enabled !== undefined) ? !!ck.volume_enabled : true;
-          var volumeCheck = (ck.volume !== undefined) ? ck.volume : ck.vol_speed;
-          var volumeCheckLabel = volumeEnabled ? chk(volumeCheck) : "OFF";
-          var modeStrategies = st.mode_strategies || {};
-
-          function modeCheck(v) {
-            if (v === true) return "ok";
-            if (v === false) return "wait";
-            return "-";
-          }
-
-          function pushModeStrategyLine(label, modeKey) {
-            var m = modeStrategies[modeKey];
-            if (!m) {
-              strategyBits.push(label + ": n/a");
-              return;
-            }
-            if (!m.configured) {
-              strategyBits.push(label + ": disabled");
-              return;
-            }
-            if (!m.active) {
-              strategyBits.push(label + ": configured, not active");
-              return;
-            }
-            var checks = m.checks || {};
-            var volLabel = m.volume_gate_enabled ? modeCheck(checks.volume) : "off";
-            strategyBits.push(
-              label + ": active (" + numFmt(m.window_sec, 0) + "s) " +
-              "P=" + modeCheck(checks.price) +
-              " B=" + modeCheck(checks.btc_buffer) +
-              " Vol=" + volLabel +
-              " => " + (m.ready ? "READY" : "WAIT")
-            );
-          }
 
           var strategyBits = [
             "Fav: " + esc(st.favorite) + " \u00b7 WR: " + esc(st.win_rate_str),
             "Checks: P=" + chk(ck.price) + " T=" + chk(ck.time) + " D=" + chk(ck.dev) +
-            " M=" + chk(ck.mom) + " Vol=" + volumeCheckLabel + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
+            " M=" + chk(ck.mom) + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
           ];
-          pushModeStrategyLine("Volume Eval", "volume_eval_mode");
-          pushModeStrategyLine("Late Entry", "late_entry_mode");
-          strategyBits.push("Active mode: " + esc(st.active_mode_kind || "none"));
           var trend = st.trend || {};
           if (trend.window_sec != null) {
             strategyBits.push(
@@ -559,25 +525,6 @@ _HTML = """<!DOCTYPE html>
               " (" + chk(trend.up_ok) + ")" +
               " | DOWN " + (trend.down_delta != null ? esc(numFmt(trend.down_delta, 4)) : "\u2014") +
               " (" + chk(trend.down_ok) + ")"
-            );
-          }
-          var vs = st.volume_speed || {};
-          if (vs.window_sec != null) {
-            strategyBits.push("Volume check: " + volumeCheckLabel);
-            strategyBits.push(
-              "VolSpeed " + esc(vs.window_sec) + "s: " +
-              esc(vs.favorite || "-") + " dV " +
-              (vs.fav_accel != null ? esc(numFmt(vs.fav_accel, 2)) : "\u2014") +
-              " | Other dV " +
-              (vs.other_accel != null ? esc(numFmt(vs.other_accel, 2)) : "\u2014") +
-              " (" + chk(vs.ok) + ")"
-            );
-            strategyBits.push(
-              "Vol Curr: " +
-              esc(vs.favorite || "Fav") + " " +
-              (vs.fav_curr != null ? esc(numFmt(vs.fav_curr, 2)) : "\u2014") +
-              " | Other " +
-              (vs.other_curr != null ? esc(numFmt(vs.other_curr, 2)) : "\u2014")
             );
           }
             if (st.up_line) {
@@ -664,6 +611,7 @@ _HTML = """<!DOCTYPE html>
           var tr = d.trading || {};
 
           var tHtml = "Markets " + esc(tr.markets_seen) + " \u00b7 Trades " + esc(tr.trade_count) +
+            " \u00b7 Vol " + esc(Math.round(sessionTotalVolume)) +
             " \u00b7 PnL $" + (tr.total_pnl != null ? numFmtSigned(tr.total_pnl, 2) : "\u2014") + "<br/>";
           if (tr.win_rate_by_mode) {
             var modeWrParts = [];
