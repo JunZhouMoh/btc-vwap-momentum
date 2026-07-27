@@ -3249,8 +3249,14 @@ class LiveTradingBot:
             if not modes:
                 return {"enabled": False, "total_max_trades": 0, "modes": []}
 
+            mode_keys = []
+            if self.dashboard is not None:
+                mode_keys = self.dashboard._late_mode_keys()
+            if not mode_keys:
+                mode_keys = ["mode_70s", "mode_60s", "mode_40s", "mode_30s", "mode_20s"]
+
             out_modes = []
-            for key in self._late_mode_keys():
+            for key in mode_keys:
                 m = getattr(modes, key, None)
                 if not m:
                     continue
