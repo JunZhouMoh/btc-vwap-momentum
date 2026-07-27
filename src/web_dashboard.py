@@ -65,7 +65,8 @@ _HTML = """<!DOCTYPE html>
   <div class="grid">
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
-    <div class="card"><h2>Mode Checks</h2><div id="modeChecks" class="mono">Loading…</div></div>
+    <div class="card"><h2>Volume Eval Strategy</h2><div id="volumeEvalStrategy" class="mono">Loading…</div></div>
+    <div class="card"><h2>Late Entry Strategy</h2><div id="lateEntryStrategy" class="mono">Loading…</div></div>
     <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <div class="card controls"><h2>Timer Alert</h2><div id="timerAlert" class="mono">Loading…</div></div>
@@ -545,37 +546,49 @@ _HTML = """<!DOCTYPE html>
             strategyBits.join("<br/>") +
             "</div>";
 
-          var modeBox = document.getElementById("modeChecks");
-          if (modeBox) {
-            var ms = st.mode_strategies || {};
-            var activeKind = st.active_mode_kind || "none";
+          var ms = st.mode_strategies || {};
+          var activeKind = st.active_mode_kind || "none";
 
-            function modeLine(label, key) {
-              var m = ms[key];
-              if (!m) return label + ": unavailable";
-              if (!m.configured) return label + ": disabled";
-              if (!m.active) return label + ": configured, inactive";
-              var checks = m.checks || {};
-              var volText = m.volume_gate_enabled ? okWait(checks.volume) : "OFF";
-              var gate =
-                "P=" + okWait(checks.price) +
-                " B=" + okWait(checks.btc_buffer) +
-                " Vol=" + volText;
-              var cfg =
-                "win=" + esc(numFmt(m.window_sec || 0, 0)) + "s" +
-                " range=" + esc(numFmt(m.min_price || 0, 3)) + "-" + esc(numFmt(m.max_price || 1, 3)) +
-                " minC=" + esc(String(m.min_contracts != null ? m.min_contracts : "-")) +
-                " xBuf=" + esc(numFmt(m.buffer_avg_multiplier || 1, 2));
-              return label + ": " + (m.ready ? "READY" : "WAIT") + " | " + gate + " | " + cfg;
+          function renderModeStrategy(panelId, title, key) {
+            var panel = document.getElementById(panelId);
+            if (!panel) return;
+            var m = ms[key];
+            if (!m) {
+              panel.innerHTML = esc(title + ": unavailable");
+              return;
             }
-
-            var modeLines = [
-              "Active: " + esc(activeKind),
-              modeLine("Volume Eval", "volume_eval_mode"),
-              modeLine("Late Entry", "late_entry_mode")
-            ];
-            modeBox.innerHTML = modeLines.join("<br/>");
+            var lines = [];
+            lines.push("Active now: " + (activeKind === key ? "YES" : "NO"));
+            if (!m.configured) {
+              lines.push("Status: disabled");
+              panel.innerHTML = lines.join("<br/>");
+              return;
+            }
+            if (!m.active) {
+              lines.push("Status: configured, inactive");
+              panel.innerHTML = lines.join("<br/>");
+              return;
+            }
+            var checks = m.checks || {};
+            lines.push("Status: " + (m.ready ? "READY" : "WAIT"));
+            lines.push(
+              "Checks: " +
+              "P=" + okWait(checks.price) +
+              " B=" + okWait(checks.btc_buffer) +
+              " Vol=" + (m.volume_gate_enabled ? okWait(checks.volume) : "OFF")
+            );
+            lines.push(
+              "Config: " +
+              "win=" + esc(numFmt(m.window_sec || 0, 0)) + "s" +
+              " range=" + esc(numFmt(m.min_price || 0, 3)) + "-" + esc(numFmt(m.max_price || 1, 3)) +
+              " minC=" + esc(String(m.min_contracts != null ? m.min_contracts : "-")) +
+              " xBuf=" + esc(numFmt(m.buffer_avg_multiplier || 1, 2))
+            );
+            panel.innerHTML = lines.join("<br/>");
           }
+
+          renderModeStrategy("volumeEvalStrategy", "Volume Eval", "volume_eval_mode");
+          renderModeStrategy("lateEntryStrategy", "Late Entry", "late_entry_mode");
 
           var b = d.btc || {};
           var btcEl = document.getElementById("btc");
