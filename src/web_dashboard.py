@@ -471,6 +471,7 @@ _HTML = """<!DOCTYPE html>
     function tick() {
       if (pollInFlight) return;
       pollInFlight = true;
+      var pollStartedAt = Date.now();
       var errEl = document.getElementById("err");
       var r = new XMLHttpRequest();
       r.open("GET", "/api/state", true);
@@ -662,7 +663,10 @@ _HTML = """<!DOCTYPE html>
         } catch (e) {
           errEl.textContent = "Poll error: " + (e && e.message ? e.message : e);
         }
-        scheduleTick(document.hidden ? 5000 : 1000);
+        var targetIntervalMs = document.hidden ? 5000 : 1000;
+        var elapsedMs = Date.now() - pollStartedAt;
+        var nextDelayMs = Math.max(100, targetIntervalMs - elapsedMs);
+        scheduleTick(nextDelayMs);
       };
       r.send();
     }
