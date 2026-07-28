@@ -696,7 +696,18 @@ class TradingStats:
         if len(unique_modes) == 1:
             entry_mode_for_record = unique_modes[0]
         elif len(unique_modes) > 1:
-            entry_mode_for_record = "mixed"
+            # Keep a concrete mode label for dashboards; breakdown still preserves all legs.
+            mode_contracts: Dict[str, int] = {}
+            for leg in legs:
+                mode = str(leg.get("mode", "") or "unknown").strip() or "unknown"
+                try:
+                    mode_contracts[mode] = mode_contracts.get(mode, 0) + int(float(leg.get("contracts", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+            if mode_contracts:
+                entry_mode_for_record = sorted(mode_contracts.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
+            else:
+                entry_mode_for_record = unique_modes[0]
         else:
             entry_mode_for_record = (str(self.position.entry_mode).strip() or "unknown")
         
@@ -3344,9 +3355,26 @@ class Dashboard:
         for trade in st.trades[-5:][::-1]:
             icon = "✅" if trade.won else "❌"
             trade_time = datetime.fromtimestamp(trade.timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            display_mode = str(getattr(trade, "entry_mode", "unknown") or "unknown")
+            if display_mode in {"mixed", "mixed_active_modes"}:
+                breakdown = getattr(trade, "mode_breakdown", None)
+                if isinstance(breakdown, dict) and breakdown:
+                    def _mode_score(item: Tuple[str, Dict[str, Any]]) -> Tuple[float, float, str]:
+                        mk, md = item
+                        try:
+                            triggers = float(md.get("trigger_count", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            triggers = 0.0
+                        try:
+                            pnl_usd = float(md.get("total_pnl_usd", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            pnl_usd = 0.0
+                        return (triggers, abs(pnl_usd), str(mk))
+
+                    display_mode = sorted(breakdown.items(), key=_mode_score, reverse=True)[0][0]
             trading["recent_trades"].append({
                 "line": f"{icon} {trade_time} | {trade.token_name} @ {trade.entry_price:.2f} -> ${trade.pnl:+.2f}",
-                "entry_mode": str(getattr(trade, "entry_mode", "unknown") or "unknown"),
+                "entry_mode": display_mode,
             })
 
         return {
@@ -4309,7 +4337,34 @@ class LiveTradingBot:
                     mode_trade_count = int(selected_mode_state["mode_trade_count"])
                     mode_trade_cap_ok = bool(selected_mode_state["mode_trade_cap_ok"])
                 else:
-                    mode_name = "mixed_active_modes"
+                    # Pick one deterministic mode label instead of mixed_active_modes.
+                    # Priority: tightest late-entry mode first, then volume-eval mode.
+                    ranked_states = sorted(
+                        gate_ready_states,
+                        key=lambda st: (
+                            0 if (str(st.get("mode_name", "")).startswith("mode_") and str(st.get("mode_name", "")).endswith("s")) else (1 if bool(st.get("is_volume")) else 2),
+                            float(st.get("mode", {}).get("window_sec", 10**9) or 10**9),
+                            str(st.get("mode_name", "")),
+                        ),
+                    )
+                    selected_mode_state = ranked_states[0]
+                    late_mode = selected_mode_state["mode"]
+                    mode_name = selected_mode_state["mode_name"]
+                    is_volume_eval_mode = bool(selected_mode_state["is_volume"])
+                    mode_max_trades = int(selected_mode_state["mode_max_trades"])
+                    mode_trade_count = int(selected_mode_state["mode_trade_count"])
+                    mode_trade_cap_ok = bool(selected_mode_state["mode_trade_cap_ok"])
+
+                    if is_volume_eval_mode and volume_threshold_levels:
+                        chosen_min_curr_diff = float(vol_speed.get("min_current_volume_diff", 0.0) or 0.0)
+                        selected_entry_idx = 0
+                        best_gap = float("inf")
+                        for i, threshold_i in enumerate(volume_threshold_levels):
+                            gap = abs(float(threshold_i) - chosen_min_curr_diff)
+                            if gap < best_gap:
+                                best_gap = gap
+                                selected_entry_idx = i
+                        mode_name = f"volume_eval_entry_{selected_entry_idx + 1}"
 
         if gate_ready_states:
             price_ok = True
