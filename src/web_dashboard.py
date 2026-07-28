@@ -515,6 +515,13 @@ _HTML = """<!DOCTYPE html>
           function chk(x) { return x === true ? "\u2713" : x === false ? "\u2717" : "\u2014"; }
           function okWait(v) { return v === true ? "OK" : v === false ? "WAIT" : "-"; }
           var ck = st.checks || {};
+          var vs = st.volume_speed || {};
+          var currDiffVal = (typeof vs.curr_diff === "number" && !isNaN(vs.curr_diff))
+            ? vs.curr_diff
+            : ((typeof vs.fav_curr === "number" && typeof vs.other_curr === "number") ? (vs.fav_curr - vs.other_curr) : null);
+          var minCurrDiffVal = (typeof vs.min_current_volume_diff === "number" && !isNaN(vs.min_current_volume_diff))
+            ? vs.min_current_volume_diff
+            : null;
 
           var strategyBits = [
             "Fav: " + esc(st.favorite) + " \u00b7 WR: " + esc(st.win_rate_str),
@@ -529,6 +536,17 @@ _HTML = """<!DOCTYPE html>
               " (" + chk(trend.up_ok) + ")" +
               " | DOWN " + (trend.down_delta != null ? esc(numFmt(trend.down_delta, 4)) : "\u2014") +
               " (" + chk(trend.down_ok) + ")"
+            );
+          }
+          if (currDiffVal !== null || minCurrDiffVal !== null) {
+            var diffState = "-";
+            if (currDiffVal !== null && minCurrDiffVal !== null) diffState = (currDiffVal >= minCurrDiffVal) ? "OK" : "WAIT";
+            strategyBits.push(
+              "Vol curr diff: " +
+              esc(numFmt(currDiffVal, 0)) +
+              " vs min " +
+              esc(numFmt(minCurrDiffVal, 0)) +
+              " (" + diffState + ")"
             );
           }
             if (st.up_line) {
@@ -549,6 +567,15 @@ _HTML = """<!DOCTYPE html>
           var ms = st.mode_strategies || {};
           var activeKind = st.active_mode_kind || "none";
 
+          function modeNameForDisplay(rawName, key) {
+            var n = rawName ? String(rawName) : "";
+            if (key === "late_entry_mode") {
+              if (/^mode_\d+s$/.test(n)) return n;
+              return "mode_unknown";
+            }
+            return "volume_eval_mode";
+          }
+
           function renderModeStrategy(panelId, title, key) {
             var panel = document.getElementById(panelId);
             if (!panel) return;
@@ -560,6 +587,14 @@ _HTML = """<!DOCTYPE html>
             var lines = [];
             lines.push("Active now: " + (m.active ? "YES" : "NO"));
             lines.push("Selected: " + (activeKind === key ? "YES" : "NO"));
+            lines.push("Mode: " + modeNameForDisplay(m.name, key));
+            if (key === "volume_eval_mode") {
+              var entryType = m.entry_type ? String(m.entry_type) : "Entry 1 MinVol";
+              var entryMinDiff = (m.entry_min_current_volume_diff != null)
+                ? numFmt(Number(m.entry_min_current_volume_diff), 0)
+                : numFmt(minCurrDiffVal, 0);
+              lines.push("Entry type: " + esc(entryType) + " (>= " + esc(entryMinDiff) + ")");
+            }
             if (!m.configured) {
               lines.push("Status: disabled");
               panel.innerHTML = lines.join("<br/>");
@@ -585,6 +620,17 @@ _HTML = """<!DOCTYPE html>
               " minC=" + esc(String(m.min_contracts != null ? m.min_contracts : "-")) +
               " xBuf=" + esc(numFmt(m.buffer_avg_multiplier || 1, 2))
             );
+            if (key === "volume_eval_mode") {
+              var evalDiffState = "-";
+              if (currDiffVal !== null && minCurrDiffVal !== null) evalDiffState = (currDiffVal >= minCurrDiffVal) ? "OK" : "WAIT";
+              lines.push(
+                "Vol curr diff: " +
+                esc(numFmt(currDiffVal, 0)) +
+                " vs min " +
+                esc(numFmt(minCurrDiffVal, 0)) +
+                " (" + evalDiffState + ")"
+              );
+            }
             panel.innerHTML = lines.join("<br/>");
           }
 
