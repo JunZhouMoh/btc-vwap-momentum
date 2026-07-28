@@ -3051,24 +3051,52 @@ class Dashboard:
             vol_check_enabled = self._is_volume_check_enabled_for_active_mode(active_mode)
             vol_gate_ok = vol_speed_ok if vol_check_enabled else True
 
+            volume_entry_index: Optional[int] = None
+            volume_entry_label: Optional[str] = None
+            volume_entry_min_curr_diff: Optional[float] = None
+            if volume_eval_mode:
+                levels = self._get_volume_eval_threshold_levels()
+                if levels:
+                    limits = self._get_volume_eval_entry_trade_limits()
+                    used_count = self.stats.late_mode_trade_count("volume_eval_mode")
+                    remaining = max(used_count, 0)
+                    idx = len(levels) - 1
+                    for i, cap in enumerate(limits):
+                        if remaining < cap:
+                            idx = i
+                            break
+                        remaining -= cap
+                    idx = min(max(idx, 0), len(levels) - 1)
+                    volume_entry_index = idx + 1
+                    volume_entry_label = f"Entry {volume_entry_index} MinVol"
+                    volume_entry_min_curr_diff = float(levels[idx])
+
             late_window_price_only = active_mode is not None
             last_20s_price_only = self.config.strategy.dangerous and time_left <= 20
             price_only_gate = late_window_price_only or last_20s_price_only
 
             def _mode_strategy_block(mode: Optional[Dict[str, float]], mode_kind: str) -> Dict[str, Any]:
                 if not mode:
-                    return {
+                    block = {
                         "configured": bool(mode_kind == "volume_eval_mode" and getattr(self.config.strategy, "volume_eval_mode", None) and getattr(self.config.strategy.volume_eval_mode, "enabled", False))
                                       or bool(mode_kind == "late_entry_mode" and getattr(self.config.strategy, "late_entry_modes", None) and getattr(self.config.strategy.late_entry_modes, "enabled", False)),
                         "active": False,
                         "name": mode_kind,
                     }
+                    if mode_kind == "volume_eval_mode":
+                        block["entry_type"] = volume_entry_label
+                        block["entry_min_current_volume_diff"] = (
+                            float(volume_entry_min_curr_diff)
+                            if volume_entry_min_curr_diff is not None
+                            else float(vol_speed.get("min_current_volume_diff", 0.0))
+                        )
+                    return block
 
                 mode_vol_enabled = self._is_volume_check_enabled_for_active_mode(mode)
                 mode_price_ok = mode.get("min_price", 0.0) <= fav_price <= mode.get("max_price", 1.0)
                 mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
                 mode_btc_ok = btc_buffer_ok
-                return {
+                block = {
                     "configured": True,
                     "active": True,
                     "name": str(mode.get("name", mode_kind)),
@@ -3085,6 +3113,14 @@ class Dashboard:
                     },
                     "ready": bool(mode_price_ok and mode_btc_ok and mode_vol_ok),
                 }
+                if mode_kind == "volume_eval_mode":
+                    block["entry_type"] = volume_entry_label
+                    block["entry_min_current_volume_diff"] = (
+                        float(volume_entry_min_curr_diff)
+                        if volume_entry_min_curr_diff is not None
+                        else float(vol_speed.get("min_current_volume_diff", 0.0))
+                    )
+                return block
 
             if price_only_gate:
                 if price_ok and btc_buffer_ok and vol_gate_ok:
@@ -3195,8 +3231,10 @@ class Dashboard:
                     "fav_prev": round(float(vol_speed["fav_prev"]), 6),
                     "other_curr": round(float(vol_speed["other_curr"]), 6),
                     "other_prev": round(float(vol_speed["other_prev"]), 6),
+                    "curr_diff": round(float(vol_speed["fav_curr"] - vol_speed["other_curr"]), 6),
                     "fav_accel": round(float(vol_speed["fav_accel"]), 6),
                     "other_accel": round(float(vol_speed["other_accel"]), 6),
+                    "min_current_volume_diff": round(float(vol_speed.get("min_current_volume_diff", 0.0)), 6),
                     "ok": vol_speed_ok,
                 },
                 "active_mode_kind": (
