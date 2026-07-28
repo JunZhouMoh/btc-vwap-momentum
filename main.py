@@ -4186,8 +4186,10 @@ class LiveTradingBot:
                 return
 
         if self.stats.position is not None:
-            if not manual_override and not late_mode:
-                signal_logger.info(f"SIGNAL IGNORED: {side} - cannot enter (already in position)")
+            if not manual_override and not eligible_mode_states:
+                signal_logger.info(
+                    f"SIGNAL IGNORED: {side} - already in position and no eligible active mode for scale-in"
+                )
                 return
             expected_token_name = "UP" if side == "BUY_UP" else "DOWN"
             if self.stats.position.token_name != expected_token_name:
@@ -4618,18 +4620,31 @@ class LiveTradingBot:
                         
                         logger.info(f"Timeout recovery: {rec_contracts} @ {rec_price:.4f}")
                         
-                        # Record position as if entry succeeded
-                        self.stats.record_entry(
-                            token_name=token_name,
-                            token_id=token.token_id,
-                            opposite_token_id=opposite_token.token_id,
-                            price=rec_price,
-                            contracts=rec_contracts,
-                            market_slug=self.state.slug,
-                            btc_price_at_entry=btc_price_at_entry,
-                            btc_anchor_at_entry=btc_anchor_at_entry,
-                            entry_mode=entry_mode,
-                        )
+                        # Record recovered fill with the same scale-in behavior as normal success path.
+                        if self.stats.position is None:
+                            self.stats.record_entry(
+                                token_name=token_name,
+                                token_id=token.token_id,
+                                opposite_token_id=opposite_token.token_id,
+                                price=rec_price,
+                                contracts=rec_contracts,
+                                market_slug=self.state.slug,
+                                btc_price_at_entry=btc_price_at_entry,
+                                btc_anchor_at_entry=btc_anchor_at_entry,
+                                entry_mode=entry_mode,
+                            )
+                        else:
+                            self.stats.add_to_position(
+                                price=rec_price,
+                                contracts=rec_contracts,
+                                btc_price_at_entry=btc_price_at_entry,
+                                entry_mode=entry_mode,
+                            )
+
+                        if triggered_mode_names and not manual_override:
+                            for triggered_mode_name in triggered_mode_names:
+                                self.stats.record_late_mode_entry(triggered_mode_name)
+
                         self._simulation_log_entry(
                             token_name, rec_price, rec_contracts, rec_cost
                         )
