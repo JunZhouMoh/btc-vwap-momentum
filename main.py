@@ -1790,7 +1790,6 @@ class Dashboard:
         """Load and log the latest 5 completed windows from CSV."""
         try:
             if not self._latest5_csv_path.exists():
-                logger.info("Latest 5 windows CSV not yet available")
                 return
             
             with open(self._latest5_csv_path, "r", newline="") as handle:
@@ -2394,9 +2393,18 @@ class Dashboard:
             return f"[red]{m:.2f}%[/red]"
         return f"[cyan]0.00%[/cyan]"
 
-    def _sum_volume_in_window(self, trades: deque, start_ts: float, end_ts: float) -> float:
+    def _sum_volume_in_window(self, trades: deque, start_ts: float, end_ts: float, basis: str = "total") -> float:
         if not trades:
             return 0.0
+        normalized_basis = str(basis or "total").strip().lower()
+        if normalized_basis == "buy":
+            return float(
+                sum(
+                    float(t.size)
+                    for t in trades
+                    if start_ts <= float(t.timestamp) < end_ts and str(getattr(t, "side", "")).upper() == "BUY"
+                )
+            )
         return float(sum(float(t.size) for t in trades if start_ts <= float(t.timestamp) < end_ts))
 
     def _get_favorite_volume_speed_check(
@@ -2415,6 +2423,9 @@ class Dashboard:
         require_curr_lead = bool(getattr(vac_cfg, "require_current_volume_lead", True))
         min_accel_diff = float(getattr(vac_cfg, "min_accel_diff", 0.0) or 0.0)
         threshold = float(getattr(vac_cfg, "threshold", 5000.0) or 5000.0)
+        volume_basis = str(getattr(vac_cfg, "volume_basis", "total") or "total").strip().lower()
+        if volume_basis not in {"total", "buy"}:
+            volume_basis = "total"
         if min_current_volume_diff_override is None:
             min_curr_diff = float(getattr(vac_cfg, "min_current_volume_diff", threshold) or threshold)
         else:
@@ -2427,10 +2438,10 @@ class Dashboard:
         fav_token = up if fav_name == "UP" else down
         other_token = down if fav_name == "UP" else up
 
-        fav_curr = self._sum_volume_in_window(fav_token.trades, curr_start, now)
-        fav_prev = self._sum_volume_in_window(fav_token.trades, prev_start, curr_start)
-        other_curr = self._sum_volume_in_window(other_token.trades, curr_start, now)
-        other_prev = self._sum_volume_in_window(other_token.trades, prev_start, curr_start)
+        fav_curr = self._sum_volume_in_window(fav_token.trades, curr_start, now, basis=volume_basis)
+        fav_prev = self._sum_volume_in_window(fav_token.trades, prev_start, curr_start, basis=volume_basis)
+        other_curr = self._sum_volume_in_window(other_token.trades, curr_start, now, basis=volume_basis)
+        other_prev = self._sum_volume_in_window(other_token.trades, prev_start, curr_start, basis=volume_basis)
 
         fav_accel = fav_curr - fav_prev
         other_accel = other_curr - other_prev
@@ -2449,6 +2460,7 @@ class Dashboard:
         return {
             "window_sec": float(window_sec),
             "enabled": enabled,
+            "volume_basis": volume_basis,
             "fav_name": fav_name,
             "fav_curr": fav_curr,
             "fav_prev": fav_prev,
@@ -3237,6 +3249,7 @@ class Dashboard:
                     "window_sec": vol_speed["window_sec"],
                     "enabled": bool(vol_speed.get("enabled", True)) and vol_check_enabled,
                     "rule_enabled": vol_check_enabled,
+                    "volume_basis": str(vol_speed.get("volume_basis", "total") or "total"),
                     "favorite": fav_name,
                     "fav_curr": round(float(vol_speed["fav_curr"]), 6),
                     "fav_prev": round(float(vol_speed["fav_prev"]), 6),
@@ -3513,6 +3526,7 @@ class LiveTradingBot:
             return {
                 "min_current_volume_diff": float(getattr(vac, "min_current_volume_diff", 0.0) or 0.0),
                 "min_accel_diff": float(getattr(vac, "min_accel_diff", 0.0) or 0.0),
+                "volume_basis": str(getattr(vac, "volume_basis", "total") or "total").strip().lower(),
             }
 
     def _web_update_volume_accel_check(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -3527,6 +3541,10 @@ class LiveTradingBot:
             try:
                 vac.min_current_volume_diff = max(0.0, float(payload.get("min_current_volume_diff", vac.min_current_volume_diff)))
                 vac.min_accel_diff = max(0.0, float(payload.get("min_accel_diff", vac.min_accel_diff)))
+                if "volume_basis" in payload:
+                    basis = str(payload.get("volume_basis", vac.volume_basis)).strip().lower()
+                    if basis in {"total", "buy"}:
+                        vac.volume_basis = basis
             except (TypeError, ValueError):
                 pass
 
