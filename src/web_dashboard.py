@@ -42,6 +42,7 @@ _HTML = """<!DOCTYPE html>
     .controls .row { margin-bottom: 0.35rem; align-items: center; }
     .controls label { min-width: 105px; color: var(--muted); font-size: 0.8rem; }
     .controls input[type="number"] { width: 86px; background: #0d1117; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 0.25rem 0.35rem; }
+    .controls select { width: 96px; background: #0d1117; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 0.25rem 0.35rem; }
     .controls input[type="checkbox"] { transform: scale(1.05); }
     .mode-grid { display: grid; gap: 0.55rem; }
     .mode-box { border: 1px solid var(--border); border-radius: 8px; padding: 0.55rem; }
@@ -70,6 +71,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <div class="card controls"><h2>Timer Alert</h2><div id="timerAlert" class="mono">Loading…</div></div>
+    <div class="card controls"><h2>Volume Accel Check</h2><div id="volumeAccelCheck" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalMode" class="mono">Loading…</div></div>
     <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
   </div>
@@ -227,6 +229,30 @@ _HTML = """<!DOCTYPE html>
       box.innerHTML = html.join('');
     }
 
+    function renderVolumeAccelCheck(cfg) {
+      var box = document.getElementById('volumeAccelCheck');
+      if (!box) return;
+      if (!cfg) {
+        box.textContent = 'Volume accel check config unavailable';
+        return;
+      }
+
+      var basis = (String(cfg.volume_basis || '').toLowerCase() === 'buy') ? 'buy' : 'total';
+      var html = [];
+      html.push('<div class="mode-box">');
+      html.push('<div class="mode-title">volume_acceleration_check</div>');
+      html.push('<div class="row"><label>Min Curr Diff</label><input type="number" id="vac_min_current_volume_diff" step="1" value="' + esc(cfg.min_current_volume_diff != null ? cfg.min_current_volume_diff : 0) + '"/></div>');
+      html.push('<div class="row"><label>Min Accel Diff</label><input type="number" id="vac_min_accel_diff" step="1" value="' + esc(cfg.min_accel_diff != null ? cfg.min_accel_diff : 0) + '"/></div>');
+      html.push('<div class="row"><label>Volume Basis</label><select id="vac_volume_basis"><option value="total"' + (basis === 'total' ? ' selected' : '') + '>TOTAL</option><option value="buy"' + (basis === 'buy' ? ' selected' : '') + '>BUY</option></select></div>');
+      html.push('</div>');
+      html.push('<div style="margin-top:0.5rem" class="row">');
+      html.push('<button class="btn" onclick="saveVolumeAccelCheck()">Apply</button>');
+      html.push('<button class="btn secondary" onclick="loadVolumeAccelCheck()">Reload</button>');
+      html.push('</div>');
+      html.push('<div id="vacStatus" class="status"></div>');
+      box.innerHTML = html.join('');
+    }
+
     function loadTimerAlert() {
       var r = new XMLHttpRequest();
       r.open('GET', '/api/timer-alert', true);
@@ -265,6 +291,52 @@ _HTML = """<!DOCTYPE html>
         if (r.status === 200) {
           if (status) status.textContent = 'Applied';
           loadTimerAlert();
+        } else {
+          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
+        }
+      };
+      r.send(JSON.stringify(payload));
+    }
+
+    function loadVolumeAccelCheck() {
+      var r = new XMLHttpRequest();
+      r.open('GET', '/api/volume-accel-check', true);
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status !== 200) {
+          var box = document.getElementById('volumeAccelCheck');
+          if (box) box.textContent = 'Could not load volume accel check (HTTP ' + r.status + ')';
+          return;
+        }
+        try {
+          var cfg = JSON.parse(r.responseText);
+          renderVolumeAccelCheck(cfg);
+        } catch (e) {
+          var box2 = document.getElementById('volumeAccelCheck');
+          if (box2) box2.textContent = 'Volume accel check parse error';
+        }
+      };
+      r.send();
+    }
+
+    function saveVolumeAccelCheck() {
+      var status = document.getElementById('vacStatus');
+      var basisEl = document.getElementById('vac_volume_basis');
+      var basisVal = basisEl ? String(basisEl.value || 'total').toLowerCase() : 'total';
+      var payload = {
+        min_current_volume_diff: readNum('vac_min_current_volume_diff', 0),
+        min_accel_diff: readNum('vac_min_accel_diff', 0),
+        volume_basis: (basisVal === 'buy') ? 'buy' : 'total'
+      };
+
+      var r = new XMLHttpRequest();
+      r.open('POST', '/api/volume-accel-check', true);
+      r.setRequestHeader('Content-Type', 'application/json');
+      r.onreadystatechange = function() {
+        if (r.readyState !== 4) return;
+        if (r.status === 200) {
+          if (status) status.textContent = 'Applied';
+          loadVolumeAccelCheck();
         } else {
           if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
         }
@@ -466,6 +538,7 @@ _HTML = """<!DOCTYPE html>
       if (!force && (nowMs - lastPanelReloadMs) < 15000) return;
       lastPanelReloadMs = nowMs;
       loadTimerAlert();
+      loadVolumeAccelCheck();
       loadVolumeEvalMode();
       loadLateModes();
     }
@@ -498,27 +571,37 @@ _HTML = """<!DOCTYPE html>
             ? d.trading.bet_usd
             : 1;
           if (!buyAmountVal) buyAmountVal = String(defaultBuyAmount);
-          var upVol = (d.up && d.up.book && typeof d.up.book.volume_total === "number" && !isNaN(d.up.book.volume_total)) ? d.up.book.volume_total : 0;
-          var downVol = (d.down && d.down.book && typeof d.down.book.volume_total === "number" && !isNaN(d.down.book.volume_total)) ? d.down.book.volume_total : 0;
+          var st = d.strategy || {};
+          var vs = st.volume_speed || {};
+          var volumeBasis = (String(vs.volume_basis || "").toLowerCase() === "buy") ? "buy" : "total";
+          var upVolField = volumeBasis === "buy" ? "volume_buy" : "volume_total";
+          var downVolField = volumeBasis === "buy" ? "volume_buy" : "volume_total";
+          var upVol = (d.up && d.up.book && typeof d.up.book[upVolField] === "number" && !isNaN(d.up.book[upVolField])) ? d.up.book[upVolField] : 0;
+          var downVol = (d.down && d.down.book && typeof d.down.book[downVolField] === "number" && !isNaN(d.down.book[downVolField])) ? d.down.book[downVolField] : 0;
           var sessionTotalVolume = upVol + downVol;
+          var sessionVolumeLabel = volumeBasis === "buy" ? "Session Buy Volume" : "Session Volume";
 
           document.getElementById("session").innerHTML = [
             "Timer: " + (hdr.time_left_sec != null ? esc(Math.floor(hdr.time_left_sec) + "s left") : "\u2014"),
             "WS: " + (hdr.ws_connected ? "live" : "disconnected"),
             "Mode: " + (hdr.simulation ? "simulation" : "real"),
-            "Session Volume: " + esc(Math.round(sessionTotalVolume)),
+            sessionVolumeLabel + ": " + esc(Math.round(sessionTotalVolume)),
             'Live: ' + esc(liveStatusVal),
             '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="' + esc(buyAmountVal) + '" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setManualAmount(29)">$29</button> <button class="btn secondary" onclick="setManualAmount(39)">$39</button> <button class="btn secondary" onclick="setManualAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">Buy UP</button> <button class="btn" onclick="manualBuyDown()">Buy DOWN</button> <span id="buyStatus" class="status">' + esc(buyStatusVal) + '</span></span>'
           ].join("<br/>");
-          var st = d.strategy || {};
           var sig = st.signal_text || "\u2014";
           function chk(x) { return x === true ? "\u2713" : x === false ? "\u2717" : "\u2014"; }
           function okWait(v) { return v === true ? "OK" : v === false ? "WAIT" : "-"; }
           var ck = st.checks || {};
-          var vs = st.volume_speed || {};
           var currDiffVal = (typeof vs.curr_diff === "number" && !isNaN(vs.curr_diff))
             ? vs.curr_diff
             : ((typeof vs.fav_curr === "number" && typeof vs.other_curr === "number") ? (vs.fav_curr - vs.other_curr) : null);
+          var currDiffBuyVal = (typeof vs.curr_diff_buy === "number" && !isNaN(vs.curr_diff_buy))
+            ? vs.curr_diff_buy
+            : null;
+          var currDiffTotalVal = (typeof vs.curr_diff_total === "number" && !isNaN(vs.curr_diff_total))
+            ? vs.curr_diff_total
+            : null;
           var minCurrDiffVal = (typeof vs.min_current_volume_diff === "number" && !isNaN(vs.min_current_volume_diff))
             ? vs.min_current_volume_diff
             : null;
@@ -542,19 +625,19 @@ _HTML = """<!DOCTYPE html>
             var diffState = "-";
             if (currDiffVal !== null && minCurrDiffVal !== null) diffState = (currDiffVal >= minCurrDiffVal) ? "OK" : "WAIT";
             strategyBits.push(
-              "Vol curr diff: " +
+              "Vol curr diff (active): " +
               esc(numFmt(currDiffVal, 0)) +
               " vs min " +
               esc(numFmt(minCurrDiffVal, 0)) +
-              " (" + diffState + ")"
+              " (" + diffState + ", basis=" + esc(volumeBasis.toUpperCase()) + ")"
             );
           }
-            if (st.up_line) {
-              strategyBits.push("UP: " + esc(st.up_line));
-            }
-            if (st.down_line) {
-              strategyBits.push("DOWN: " + esc(st.down_line));
-            }
+          if (currDiffBuyVal !== null) {
+            strategyBits.push("Vol curr diff (BUY): " + esc(numFmt(currDiffBuyVal, 0)));
+          }
+          if (currDiffTotalVal !== null) {
+            strategyBits.push("Vol curr diff (TOTAL): " + esc(numFmt(currDiffTotalVal, 0)));
+          }
           if (st.btc_buffer_line) {
             strategyBits.push("BTC Buffer: " + esc(st.btc_buffer_line));
           }
@@ -707,7 +790,7 @@ _HTML = """<!DOCTYPE html>
           var tr = d.trading || {};
 
           var tHtml = "Markets " + esc(tr.markets_seen) + " \u00b7 Trades " + esc(tr.trade_count) +
-            " \u00b7 Vol " + esc(Math.round(sessionTotalVolume)) +
+            " \u00b7 Vol(" + esc(volumeBasis.toUpperCase()) + ") " + esc(Math.round(sessionTotalVolume)) +
             " \u00b7 PnL $" + (tr.total_pnl != null ? numFmtSigned(tr.total_pnl, 2) : "\u2014") + "<br/>";
           if (tr.win_rate_by_mode) {
             var modeWrParts = [];
