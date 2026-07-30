@@ -96,6 +96,7 @@ class VolumeAccelerationCheckConfig:
     require_current_volume_lead: bool = True
     min_accel_diff: float = 0.0
     min_current_volume_diff: float = 5000.0
+    volume_basis: str = "total"  # total | buy
 
 
 @dataclass
@@ -364,6 +365,9 @@ def load_config(config_path: Optional[str] = None) -> Config:
         vac_data.get("threshold", vac_data.get("min_current_volume_diff", 5000.0)),
         5000.0,
     )
+    raw_volume_basis = str(vac_data.get("volume_basis", "")).strip().lower()
+    if raw_volume_basis not in {"total", "buy"}:
+        raw_volume_basis = "buy" if bool(vac_data.get("use_buy_only_volume", False)) else "total"
 
     strategy = StrategyConfig(
         min_price=strategy_data.get("min_price", 0.65),
@@ -384,6 +388,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             require_current_volume_lead=bool(vac_data.get("require_current_volume_lead", True)),
             min_accel_diff=_to_float(vac_data.get("min_accel_diff", 0.0), 0.0),
             min_current_volume_diff=_to_float(vac_data.get("min_current_volume_diff", threshold), threshold),
+            volume_basis=raw_volume_basis,
         ),
         volume_eval_mode=volume_eval_mode,
         late_entry_modes=late_entry_modes,
@@ -551,6 +556,8 @@ def validate_config(config: Config) -> list:
         errors.append("strategy.volume_acceleration_check.min_accel_diff must be >= 0")
     if vac.min_current_volume_diff < 0:
         errors.append("strategy.volume_acceleration_check.min_current_volume_diff must be >= 0")
+    if str(getattr(vac, "volume_basis", "total")).lower() not in {"total", "buy"}:
+        errors.append("strategy.volume_acceleration_check.volume_basis must be 'total' or 'buy'")
 
     for mode_name, mode_cfg in [
         ("mode_70s", config.strategy.late_entry_modes.mode_70s),
