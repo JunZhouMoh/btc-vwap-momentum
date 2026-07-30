@@ -2414,6 +2414,7 @@ class Dashboard:
         down: TokenData,
         window_sec: Optional[float] = None,
         min_current_volume_diff_override: Optional[float] = None,
+        volume_basis_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Compare volume acceleration between favored and opposite side."""
         vac_cfg = getattr(self.config.strategy, "volume_acceleration_check", None)
@@ -2423,7 +2424,10 @@ class Dashboard:
         require_curr_lead = bool(getattr(vac_cfg, "require_current_volume_lead", True))
         min_accel_diff = float(getattr(vac_cfg, "min_accel_diff", 0.0) or 0.0)
         threshold = float(getattr(vac_cfg, "threshold", 5000.0) or 5000.0)
-        volume_basis = str(getattr(vac_cfg, "volume_basis", "total") or "total").strip().lower()
+        if volume_basis_override is None:
+            volume_basis = str(getattr(vac_cfg, "volume_basis", "total") or "total").strip().lower()
+        else:
+            volume_basis = str(volume_basis_override or "total").strip().lower()
         if volume_basis not in {"total", "buy"}:
             volume_basis = "total"
         if min_current_volume_diff_override is None:
@@ -3070,6 +3074,20 @@ class Dashboard:
                 down,
                 min_current_volume_diff_override=next_min_curr_diff,
             )
+            vol_speed_buy = self._get_favorite_volume_speed_check(
+                fav_name,
+                up,
+                down,
+                min_current_volume_diff_override=next_min_curr_diff,
+                volume_basis_override="buy",
+            )
+            vol_speed_total = self._get_favorite_volume_speed_check(
+                fav_name,
+                up,
+                down,
+                min_current_volume_diff_override=next_min_curr_diff,
+                volume_basis_override="total",
+            )
             vol_speed_ok = bool(vol_speed["ok"])
             vol_check_enabled = self._is_volume_check_enabled_for_active_mode(active_mode)
             vol_gate_ok = vol_speed_ok if vol_check_enabled else True
@@ -3256,6 +3274,8 @@ class Dashboard:
                     "other_curr": round(float(vol_speed["other_curr"]), 6),
                     "other_prev": round(float(vol_speed["other_prev"]), 6),
                     "curr_diff": round(float(vol_speed["fav_curr"] - vol_speed["other_curr"]), 6),
+                    "curr_diff_buy": round(float(vol_speed_buy["fav_curr"] - vol_speed_buy["other_curr"]), 6),
+                    "curr_diff_total": round(float(vol_speed_total["fav_curr"] - vol_speed_total["other_curr"]), 6),
                     "fav_accel": round(float(vol_speed["fav_accel"]), 6),
                     "other_accel": round(float(vol_speed["other_accel"]), 6),
                     "min_current_volume_diff": round(float(vol_speed.get("min_current_volume_diff", 0.0)), 6),
