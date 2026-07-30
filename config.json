@@ -22,6 +22,7 @@
     "volume_acceleration_check": {
       "enabled": true,
       "window_sec": 10,
+      "volume_basis": "buy",
       "threshold": 5000.0,
       "require_current_volume_lead": true,
       "min_accel_diff": 0.0,
@@ -30,10 +31,10 @@
     "volume_eval_mode": {
       "enabled": true,
       "time_left_sec": 50,
-      "min_contracts": 1,
-      "max_trades": 1,
-      "buffer_avg_multiplier": 1.25,
-      "min_buffer_threshold_usd": 30.0,
+      "min_contracts": 15,
+      "max_trades": 3,
+      "buffer_avg_multiplier": 0.5,
+      "min_buffer_threshold_usd": 20,
       "volume_check_enabled": true,
       "entry_min_current_volume_diffs": [1000, 2000, 3000],
       "entry_trade_limits": [1, 1, 1],
