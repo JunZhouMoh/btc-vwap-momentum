@@ -55,6 +55,7 @@ _HTML = """<!DOCTYPE html>
   <div class="grid">
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
+    <div class="card"><h2>Volume + Late Entry</h2><div id="modepanel" class="mono"></div></div>
     <div class="card"><h2>Indicator Controls</h2><div id="controls" class="mono"></div></div>
     <div class="card"><h2>5s / 15s Checks</h2><div id="checks" class="mono"></div></div>
     <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
@@ -89,6 +90,135 @@ _HTML = """<!DOCTYPE html>
       return "\u2014";
     }
 
+    var modeCfg = {
+      late: null,
+      volEval: null,
+      volAccel: null,
+      lastFetchTs: 0,
+    };
+
+    function requestJson(method, url, payload, onDone) {
+      var r = new XMLHttpRequest();
+      r.open(method, url, true);
+      if (payload !== null && payload !== undefined) {
+        r.setRequestHeader("Content-Type", "application/json");
+      }
+      r.onreadystatechange = function () {
+        if (r.readyState !== 4) return;
+        if (r.status < 200 || r.status >= 300) return;
+        try {
+          var d = JSON.parse(r.responseText);
+          if (onDone) onDone(d);
+        } catch (e) {
+          /* no-op */
+        }
+      };
+      r.send(payload !== null && payload !== undefined ? JSON.stringify(payload) : null);
+    }
+
+    function refreshModeConfig() {
+      requestJson("GET", "/api/late-modes", null, function (d) { modeCfg.late = d || {}; });
+      requestJson("GET", "/api/volume-eval-mode", null, function (d) { modeCfg.volEval = d || {}; });
+      requestJson("GET", "/api/volume-accel-check", null, function (d) { modeCfg.volAccel = d || {}; });
+      modeCfg.lastFetchTs = Date.now();
+    }
+
+    function applyVolEval() {
+      var cfg = modeCfg.volEval || {};
+      var payload = {
+        enabled: !!document.getElementById("ve-enabled").checked,
+        time_left_sec: Number(document.getElementById("ve-time-left").value || cfg.time_left_sec || 0),
+        min_contracts: Number(document.getElementById("ve-min-contracts").value || cfg.min_contracts || 1),
+        max_trades: Number(document.getElementById("ve-max-trades").value || cfg.max_trades || 1),
+        min_price: Number(document.getElementById("ve-min-price").value || cfg.min_price || 0),
+        max_price: Number(document.getElementById("ve-max-price").value || cfg.max_price || 1),
+        volume_check_enabled: !!document.getElementById("ve-vol-check").checked,
+      };
+      requestJson("POST", "/api/volume-eval-mode", payload, function (d) {
+        modeCfg.volEval = d || payload;
+      });
+    }
+
+    function applyLateModes() {
+      var cfg = modeCfg.late || {};
+      var payload = {
+        enabled: !!document.getElementById("lm-enabled").checked,
+        total_max_trades: Number(document.getElementById("lm-total-max").value || cfg.total_max_trades || 1),
+        modes: (cfg.modes || []),
+      };
+      requestJson("POST", "/api/late-modes", payload, function (d) {
+        modeCfg.late = d || payload;
+      });
+    }
+
+    function applyVolAccel() {
+      var cfg = modeCfg.volAccel || {};
+      var basisEl = document.getElementById("va-basis");
+      var basis = basisEl ? String(basisEl.value || "total") : "total";
+      var payload = {
+        min_current_volume_diff: Number(document.getElementById("va-min-curr-diff").value || cfg.min_current_volume_diff || 0),
+        min_accel_diff: Number(document.getElementById("va-min-accel-diff").value || cfg.min_accel_diff || 0),
+        volume_basis: basis,
+      };
+      requestJson("POST", "/api/volume-accel-check", payload, function (d) {
+        modeCfg.volAccel = d || payload;
+      });
+    }
+
+    function renderModePanel(st) {
+      var modeEl = document.getElementById("modepanel");
+      if (!modeEl) return;
+
+      var ms = st.mode_strategies || {};
+      var vms = ms.volume_eval_mode || {};
+      var lms = ms.late_entry_mode || {};
+      var vs = st.volume_speed || {};
+      var ve = modeCfg.volEval || {};
+      var lm = modeCfg.late || {};
+      var va = modeCfg.volAccel || {};
+
+      var modeLines = [];
+      modeLines.push("Active volume mode: " + (vms.active ? "ON" : "OFF") + " | Ready=" + boolHtml(vms.ready));
+      modeLines.push("Active late mode: " + (lms.active ? "ON" : "OFF") + " | Ready=" + boolHtml(lms.ready));
+      modeLines.push("Vol speed: " + boolHtml(vs.ok) + " | fav=" + (vs.favorite || "\u2014") + " | basis=" + (vs.volume_basis || "\u2014"));
+      modeLines.push("");
+
+      modeLines.push('<label><input id="ve-enabled" type="checkbox" ' + (ve.enabled ? "checked" : "") + '> Volume eval enabled</label>');
+      modeLines.push('VE timeLeft: <input id="ve-time-left" type="number" value="' + esc(ve.time_left_sec != null ? ve.time_left_sec : 0) + '" style="width:68px">s');
+      modeLines.push('VE minC: <input id="ve-min-contracts" type="number" value="' + esc(ve.min_contracts != null ? ve.min_contracts : 1) + '" style="width:56px">');
+      modeLines.push('VE maxTrades: <input id="ve-max-trades" type="number" value="' + esc(ve.max_trades != null ? ve.max_trades : 1) + '" style="width:56px">');
+      modeLines.push('VE P: <input id="ve-min-price" type="number" step="0.001" value="' + esc(ve.min_price != null ? ve.min_price : 0) + '" style="width:70px"> - <input id="ve-max-price" type="number" step="0.001" value="' + esc(ve.max_price != null ? ve.max_price : 1) + '" style="width:70px">');
+      modeLines.push('<label><input id="ve-vol-check" type="checkbox" ' + (ve.volume_check_enabled ? "checked" : "") + '> VE volume gate</label>');
+      modeLines.push('<button id="ve-apply" type="button">Apply VE</button>');
+      modeLines.push("");
+
+      modeLines.push('<label><input id="lm-enabled" type="checkbox" ' + (lm.enabled ? "checked" : "") + '> Late modes enabled</label>');
+      modeLines.push('Late total max: <input id="lm-total-max" type="number" value="' + esc(lm.total_max_trades != null ? lm.total_max_trades : 1) + '" style="width:64px">');
+      modeLines.push('<button id="lm-apply" type="button">Apply Late</button>');
+
+      if (lm.modes && lm.modes.length) {
+        for (var i = 0; i < lm.modes.length; i++) {
+          var m = lm.modes[i] || {};
+          modeLines.push(' - ' + esc(m.key || ("mode" + i)) + ': en=' + boolHtml(m.enabled) + ', t=' + esc(m.time_left_sec) + 's, minC=' + esc(m.min_contracts) + ', maxT=' + esc(m.max_trades));
+        }
+      }
+      modeLines.push("");
+
+      modeLines.push('Vol accel minCurr: <input id="va-min-curr-diff" type="number" value="' + esc(va.min_current_volume_diff != null ? va.min_current_volume_diff : 0) + '" style="width:86px">');
+      modeLines.push('Vol accel minDiff: <input id="va-min-accel-diff" type="number" value="' + esc(va.min_accel_diff != null ? va.min_accel_diff : 0) + '" style="width:86px">');
+      modeLines.push('Vol basis: <select id="va-basis"><option value="total"' + (va.volume_basis === "total" ? " selected" : "") + '>total</option><option value="buy"' + (va.volume_basis === "buy" ? " selected" : "") + '>buy</option></select>');
+      modeLines.push('<button id="va-apply" type="button">Apply Vol</button>');
+
+      modeEl.innerHTML = modeLines.join("<br/>");
+
+      var veBtn = document.getElementById("ve-apply");
+      var lmBtn = document.getElementById("lm-apply");
+      var vaBtn = document.getElementById("va-apply");
+      if (veBtn) veBtn.onclick = applyVolEval;
+      if (lmBtn) lmBtn.onclick = applyLateModes;
+      if (vaBtn) vaBtn.onclick = applyVolAccel;
+    }
+
     function applyControls() {
       var payload = {
         momentum: !!document.getElementById("ctl-momentum").checked,
@@ -102,6 +232,9 @@ _HTML = """<!DOCTYPE html>
     }
     function tick() {
       var errEl = document.getElementById("err");
+      if (!modeCfg.lastFetchTs || (Date.now() - modeCfg.lastFetchTs) > 5000) {
+        refreshModeConfig();
+      }
       var r = new XMLHttpRequest();
       r.open("GET", "/api/state", true);
       r.onreadystatechange = function () {
@@ -143,6 +276,8 @@ _HTML = """<!DOCTYPE html>
             '<div class="mono" style="margin-top:0.4rem">' +
             strategyBits.join("<br/>") +
             "</div>";
+
+          renderModePanel(st);
 
           var ctl = st.indicator_controls || {};
           document.getElementById("controls").innerHTML = [
