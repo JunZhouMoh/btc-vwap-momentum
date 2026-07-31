@@ -188,6 +188,12 @@ _HTML = """<!DOCTYPE html>
     function manualBuyUp(){ manualBuyWithDirection('UP'); }
     function manualBuyDown(){ manualBuyWithDirection('DOWN'); }
 
+    function setBuyAmount(v){
+      var el=document.getElementById('buyAmount');
+      if(!el) return;
+      el.value=String(v);
+    }
+
     function applyControls(){
       var payload={ momentum:!!document.getElementById('ctl-momentum').checked, vwap_deviation:!!document.getElementById('ctl-vwap').checked, zscore:!!document.getElementById('ctl-zscore').checked };
       requestJson('POST','/api/indicator-controls',payload,function(){});
@@ -220,7 +226,7 @@ _HTML = """<!DOCTYPE html>
             'WS: '+(hdr.ws_connected?'live':'disconnected'),
             'Mode: '+(hdr.simulation?'simulation':'real'),
             'Live: '+esc(liveStatusVal),
-            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn" onclick="manualBuyUp()">Buy</button> <button class="btn secondary" onclick="manualBuyDown()">Sell</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
+            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">Buy</button> <button class="btn secondary" onclick="manualBuyDown()">Sell</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
           ].join('<br/>');
 
           var st=d.strategy||{}, sig=st.signal_text||'\u2014';
