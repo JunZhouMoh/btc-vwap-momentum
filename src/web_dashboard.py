@@ -65,6 +65,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
+    <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div>
     <div class="card controls"><h2>Volume + Late Entry</h2><div id="modepanel" class="mono">Loading...</div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
@@ -78,11 +79,15 @@ _HTML = """<!DOCTYPE html>
     function requestJson(method,url,payload,onDone){ var r=new XMLHttpRequest(); r.open(method,url,true); if(payload!==null&&payload!==undefined){ r.setRequestHeader('Content-Type','application/json'); } r.onreadystatechange=function(){ if(r.readyState!==4) return; if(r.status<200||r.status>=300) return; try{ var d=JSON.parse(r.responseText); if(onDone) onDone(d);}catch(e){} }; r.send(payload!==null&&payload!==undefined?JSON.stringify(payload):null); }
 
     var modeCfg={late:null,volEval:null,volAccel:null};
+    window.latestModePerfData={};
 
-    function buildLateModeEditor(mode){
+    function numFmtSigned(n,d){ if(n===null||n===undefined||typeof n!=='number'||isNaN(n)) return '\u2014'; var fixed=n.toFixed(d); if(n>0) return '+'+fixed; return fixed; }
+
+    function buildLateModeEditor(mode,modePerfData){
       var k=mode.key, h=[];
       h.push('<div class="mode-box">');
       h.push('<div class="mode-title">'+esc(k)+'</div>');
+      if(modePerfData&&modePerfData[k]){ var perf=modePerfData[k]||{}; var pnl=perf.total_pnl_usd!=null?numFmtSigned(perf.total_pnl_usd,2):'\u2014'; var trades=perf.trade_count||0; var wr=perf.win_rate_pct!=null?numFmt(perf.win_rate_pct,1)+'%':'\u2014'; h.push('<div style="font-size:0.75rem;color:#8b949e;margin-bottom:0.25rem">PnL $'+esc(pnl)+' | Trades '+esc(trades)+' | WR '+esc(wr)+'</div>'); }
       h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="'+esc(k)+'_enabled" '+(mode.enabled?'checked':'')+'/></div>');
       h.push('<div class="row"><label>Time Left</label><input type="number" id="'+esc(k)+'_time_left_sec" step="1" value="'+esc(mode.time_left_sec)+'"/></div>');
       h.push('<div class="row"><label>Min Contracts</label><input type="number" id="'+esc(k)+'_min_contracts" step="1" value="'+esc(mode.min_contracts)+'"/></div>');
@@ -95,15 +100,15 @@ _HTML = """<!DOCTYPE html>
       return h.join('');
     }
 
-    function renderModePanelConfig(){
+    function renderModePanelConfig(modePerfData){
       var box=document.getElementById('modepanel'); if(!box) return;
       var ve=modeCfg.volEval||{}, lm=modeCfg.late||{}, va=modeCfg.volAccel||{};
       if(!lm||!lm.modes){ box.textContent='Mode config unavailable'; return; }
       var h=[];
       h.push('<div class="row"><label>Late Enabled</label><input type="checkbox" id="late_enabled" '+(lm.enabled?'checked':'')+'/></div>');
-      h.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="'+esc(lm.total_max_trades!=null?lm.total_max_trades:1)+'"/></div>');
+      h.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="'+esc(lm.total_max_trades!=null?lm.total_max_trades:1)+'\"/></div>');
       h.push('<div class="mode-grid">');
-      for(var i=0;i<lm.modes.length;i++){ h.push(buildLateModeEditor(lm.modes[i]||{})); }
+      for(var i=0;i<lm.modes.length;i++){ h.push(buildLateModeEditor(lm.modes[i]||{},modePerfData)); }
       h.push('</div>');
       h.push('<div class="mode-box"><div class="mode-title">volume_eval_mode</div>');
       h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="ve_enabled" '+(ve.enabled?'checked':'')+'/></div>');
@@ -131,7 +136,7 @@ _HTML = """<!DOCTYPE html>
         modeCfg.late=late||{};
         requestJson('GET','/api/volume-eval-mode',null,function(ve){
           modeCfg.volEval=ve||{};
-          requestJson('GET','/api/volume-accel-check',null,function(va){ modeCfg.volAccel=va||{}; renderModePanelConfig(); });
+          requestJson('GET','/api/volume-accel-check',null,function(va){ modeCfg.volAccel=va||{}; renderModePanelConfig(window.latestModePerfData||{}); });
         });
       });
     }
@@ -152,7 +157,7 @@ _HTML = """<!DOCTYPE html>
         modeCfg.late=lateResp||latePayload;
         requestJson('POST','/api/volume-eval-mode',vePayload,function(veResp){
           modeCfg.volEval=veResp||vePayload;
-          requestJson('POST','/api/volume-accel-check',vaPayload,function(vaResp){ modeCfg.volAccel=vaResp||vaPayload; if(status) status.textContent='Applied'; renderModePanelConfig(); });
+          requestJson('POST','/api/volume-accel-check',vaPayload,function(vaResp){ modeCfg.volAccel=vaResp||vaPayload; if(status) status.textContent='Applied'; renderModePanelConfig(window.latestModePerfData||{}); });
         });
       });
     }
@@ -213,6 +218,8 @@ _HTML = """<!DOCTYPE html>
           var tHtml='Markets '+esc(tr.markets_seen)+' \u00b7 Trades '+esc(tr.trade_count)+' \u00b7 PnL $'+(tr.total_pnl!=null?numFmt(tr.total_pnl,2):'\u2014')+'<br/>';
           if(tr.position){ var p=tr.position; tHtml+='LONG '+esc(p.token_name)+' @ '+esc(p.entry_price)+' \u00d7'+esc(p.contracts)+(p.hedged?' hedged':'')+'<br/>'; tHtml+='Unreal $'+(p.unrealized_pnl!=null?numFmt(p.unrealized_pnl,2):'\u2014')+'<br/>'; } else { tHtml+='No open position<br/>'; }
           if(tr.recent_trades&&tr.recent_trades.length){ var lines=[]; for(var ri=0;ri<tr.recent_trades.length;ri++){ lines.push(esc(tr.recent_trades[ri].line)); } tHtml+='<br/>Recent:<br/>'+lines.join('<br/>'); }
+          var tr=d.trading||{}, modePerfEl=document.getElementById('modePerf');
+          if(modePerfEl){ var modePerfLines=[], modePerfData=tr.win_rate_by_mode||{}; window.latestModePerfData=modePerfData; var panelHandledModes={}; var panelModeOrder=['normal','manual','mode_60s','mode_40s','mode_30s','mode_20s','unknown']; function pushPanelModeLine(modeKey){ if(!Object.prototype.hasOwnProperty.call(modePerfData,modeKey)) return; panelHandledModes[modeKey]=true; var ms=modePerfData[modeKey]||{}; var wrVal=(ms.win_rate_pct!=null&&typeof ms.win_rate_pct==='number'&&!isNaN(ms.win_rate_pct))?(numFmt(ms.win_rate_pct,1)+'%'):'\u2014'; var pnlVal=(ms.total_pnl_usd!=null&&typeof ms.total_pnl_usd==='number'&&!isNaN(ms.total_pnl_usd))?('$'+numFmtSigned(ms.total_pnl_usd,2)):'$\u2014'; var countVal=(ms.trade_count!=null)?String(ms.trade_count):'0'; modePerfLines.push(esc(modeKey)+' | PnL '+esc(pnlVal)+' | Triggers '+esc(countVal)+' | WR '+esc(wrVal)); } for(var pmo=0;pmo<panelModeOrder.length;pmo++){ pushPanelModeLine(panelModeOrder[pmo]); } for(var pmk in modePerfData){ if(!Object.prototype.hasOwnProperty.call(modePerfData,pmk)) continue; if(panelHandledModes[pmk]) continue; pushPanelModeLine(pmk); } modePerfEl.innerHTML=modePerfLines.length?modePerfLines.join('<br/>'):'No mode stats yet'; }
           document.getElementById('trading').innerHTML=tHtml;
         } catch(e){ errEl.textContent='Poll error: '+((e&&e.message)?e.message:e); }
       };
