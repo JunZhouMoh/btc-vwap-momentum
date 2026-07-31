@@ -106,7 +106,7 @@ _HTML = """<!DOCTYPE html>
       if(!lm||!lm.modes){ box.textContent='Mode config unavailable'; return; }
       var h=[];
       h.push('<div class="row"><label>Late Enabled</label><input type="checkbox" id="late_enabled" '+(lm.enabled?'checked':'')+'/></div>');
-      h.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="'+esc(lm.total_max_trades!=null?lm.total_max_trades:1)+'\"/></div>');
+      h.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="'+esc(lm.total_max_trades!=null?lm.total_max_trades:1)+'"/></div>');
       h.push('<div class="mode-grid">');
       for(var i=0;i<lm.modes.length;i++){ h.push(buildLateModeEditor(lm.modes[i]||{},modePerfData)); }
       h.push('</div>');
@@ -117,7 +117,12 @@ _HTML = """<!DOCTYPE html>
       h.push('<div class="row"><label>Max Trades</label><input type="number" id="ve_max_trades" step="1" value="'+esc(ve.max_trades!=null?ve.max_trades:1)+'"/></div>');
       h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="ve_buffer_avg_multiplier" step="0.01" value="'+esc(ve.buffer_avg_multiplier!=null?ve.buffer_avg_multiplier:1.0)+'"/></div>');
       h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="ve_min_buffer_threshold_usd" step="0.1" value="'+esc(ve.min_buffer_threshold_usd!=null?ve.min_buffer_threshold_usd:0.0)+'"/></div>');
-      h.push('<div class="row"><label>Vol Gate</label><input type="checkbox" id="ve_volume_check_enabled" '+(ve.volume_check_enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Entry Vol 1</label><input type="number" id="ve_entry_vol_1" step="1" value="'+esc((ve.entry_min_current_volume_diffs&&ve.entry_min_current_volume_diffs.length>0)?ve.entry_min_current_volume_diffs[0]:1000)+'"/></div>');
+      h.push('<div class="row"><label>Entry Vol 2</label><input type="number" id="ve_entry_vol_2" step="1" value="'+esc((ve.entry_min_current_volume_diffs&&ve.entry_min_current_volume_diffs.length>1)?ve.entry_min_current_volume_diffs[1]:2000)+'"/></div>');
+      h.push('<div class="row"><label>Entry Vol 3</label><input type="number" id="ve_entry_vol_3" step="1" value="'+esc((ve.entry_min_current_volume_diffs&&ve.entry_min_current_volume_diffs.length>2)?ve.entry_min_current_volume_diffs[2]:3000)+'"/></div>');
+      h.push('<div class="row"><label>Entry Limit 1</label><input type="number" id="ve_entry_limit_1" step="1" value="'+esc((ve.entry_trade_limits&&ve.entry_trade_limits.length>0)?ve.entry_trade_limits[0]:1)+'"/></div>');
+      h.push('<div class="row"><label>Entry Limit 2</label><input type="number" id="ve_entry_limit_2" step="1" value="'+esc((ve.entry_trade_limits&&ve.entry_trade_limits.length>1)?ve.entry_trade_limits[1]:1)+'"/></div>');
+      h.push('<div class="row"><label>Entry Limit 3</label><input type="number" id="ve_entry_limit_3" step="1" value="'+esc((ve.entry_trade_limits&&ve.entry_trade_limits.length>2)?ve.entry_trade_limits[2]:1)+'"/></div>');
       h.push('<div class="row"><label>Min Price</label><input type="number" id="ve_min_price" step="0.001" value="'+esc(ve.min_price!=null?ve.min_price:0.0)+'"/></div>');
       h.push('<div class="row"><label>Max Price</label><input type="number" id="ve_max_price" step="0.001" value="'+esc(ve.max_price!=null?ve.max_price:1.0)+'"/></div>');
       h.push('</div>');
@@ -150,7 +155,7 @@ _HTML = """<!DOCTYPE html>
       }
       var latePayload={ enabled:!!(document.getElementById('late_enabled')&&document.getElementById('late_enabled').checked), total_max_trades:readInt('late_total_max_trades',late.total_max_trades||1), modes:lateModes };
       var ve=modeCfg.volEval||{};
-      var vePayload={ enabled:!!(document.getElementById('ve_enabled')&&document.getElementById('ve_enabled').checked), time_left_sec:readInt('ve_time_left_sec',ve.time_left_sec||0), min_contracts:readInt('ve_min_contracts',ve.min_contracts||1), max_trades:readInt('ve_max_trades',ve.max_trades||1), buffer_avg_multiplier:readNum('ve_buffer_avg_multiplier',ve.buffer_avg_multiplier||1.0), min_buffer_threshold_usd:readNum('ve_min_buffer_threshold_usd',ve.min_buffer_threshold_usd||0.0), volume_check_enabled:!!(document.getElementById('ve_volume_check_enabled')&&document.getElementById('ve_volume_check_enabled').checked), min_price:readNum('ve_min_price',ve.min_price||0.0), max_price:readNum('ve_max_price',ve.max_price||1.0) };
+      var vePayload={ enabled:!!(document.getElementById('ve_enabled')&&document.getElementById('ve_enabled').checked), time_left_sec:readInt('ve_time_left_sec',ve.time_left_sec||0), min_contracts:readInt('ve_min_contracts',ve.min_contracts||1), max_trades:readInt('ve_max_trades',ve.max_trades||1), buffer_avg_multiplier:readNum('ve_buffer_avg_multiplier',ve.buffer_avg_multiplier||1.0), min_buffer_threshold_usd:readNum('ve_min_buffer_threshold_usd',ve.min_buffer_threshold_usd||0.0), volume_check_enabled:(document.getElementById('ve_volume_check_enabled')?!!document.getElementById('ve_volume_check_enabled').checked:!!ve.volume_check_enabled), entry_min_current_volume_diffs:[readNum('ve_entry_vol_1',1000),readNum('ve_entry_vol_2',2000),readNum('ve_entry_vol_3',3000)], entry_trade_limits:[readInt('ve_entry_limit_1',1),readInt('ve_entry_limit_2',1),readInt('ve_entry_limit_3',1)], min_price:readNum('ve_min_price',ve.min_price||0.0), max_price:readNum('ve_max_price',ve.max_price||1.0) };
       var va=modeCfg.volAccel||{}, basisEl=document.getElementById('va_volume_basis');
       var vaPayload={ min_current_volume_diff:readNum('va_min_current_volume_diff',va.min_current_volume_diff||0.0), min_accel_diff:readNum('va_min_accel_diff',va.min_accel_diff||0.0), volume_basis:basisEl?String(basisEl.value||'total'):'total' };
       requestJson('POST','/api/late-modes',latePayload,function(lateResp){
