@@ -1554,6 +1554,33 @@ class BTCPriceMovementLogger:
             }
 
 
+class MarketMicrostructureLogger:
+    """Writes periodic market microstructure snapshots into data/ as JSONL."""
+
+    def __init__(self, log_file: str = "data/market_microstructure.jsonl", interval_sec: float = 5.0):
+        self.log_file = Path(log_file)
+        self.interval_sec = max(1.0, float(interval_sec))
+        self._next_emit_ts = 0.0
+        self._lock = threading.Lock()
+
+    def maybe_log(self, snapshot: Dict[str, Any], now: Optional[float] = None) -> None:
+        now_ts = float(now if now is not None else time.time())
+        if not isinstance(snapshot, dict):
+            return
+
+        with self._lock:
+            if now_ts < self._next_emit_ts:
+                return
+            self._next_emit_ts = now_ts + self.interval_sec
+
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning(f"Failed to write market microstructure snapshot: {e}")
+
+
 # =============================================================================
 # BINANCE BTC PRICE CLIENT (parallel feed for price comparison)
 # =============================================================================
@@ -1758,6 +1785,12 @@ class Dashboard:
             "UP": None,
             "DOWN": None,
         }
+        self._indicator_controls: Dict[str, bool] = {
+            "momentum": True,
+            "vwap_deviation": True,
+            "zscore": True,
+        }
+        self._zscore_abs_min: float = 0.25
 
     def _get_btc_roll_key(self, label: str) -> str:
         text = (label or "").upper()
@@ -1785,6 +1818,87 @@ class Dashboard:
                 self._btc_roll_cache[key] = cached
 
         return cached
+
+    def get_indicator_controls(self) -> Dict[str, bool]:
+        return {
+            "momentum": bool(self._indicator_controls.get("momentum", True)),
+            "vwap_deviation": bool(self._indicator_controls.get("vwap_deviation", True)),
+            "zscore": bool(self._indicator_controls.get("zscore", True)),
+        }
+
+    def update_indicator_controls(self, payload: Dict[str, Any]) -> Dict[str, bool]:
+        if isinstance(payload, dict):
+            if "momentum" in payload:
+                self._indicator_controls["momentum"] = bool(payload.get("momentum"))
+            if "vwap_deviation" in payload:
+                self._indicator_controls["vwap_deviation"] = bool(payload.get("vwap_deviation"))
+            if "zscore" in payload:
+                self._indicator_controls["zscore"] = bool(payload.get("zscore"))
+        return self.get_indicator_controls()
+
+    def _window_indicator_status(self, token: Optional[TokenData], window_sec: int) -> Dict[str, Any]:
+        if not token or not token.trades or token.last_price <= 0:
+            return {
+                "window_sec": int(window_sec),
+                "momentum_pct": None,
+                "deviation_pct": None,
+                "zscore": None,
+                "momentum_ok": False,
+                "vwap_deviation_ok": False,
+                "zscore_ok": False,
+                "all_ok": False,
+            }
+
+        trades_in_window = self.calc.get_trades_in_window(token.trades, float(window_sec))
+        vwap = self.calc.calc_vwap(trades_in_window)
+        deviation = self.calc.calc_deviation(token.last_price, vwap)
+        momentum = self.calc.calc_momentum(token.trades, token.last_price, window=float(window_sec))
+        zscore = self.calc.calc_zscore(token.trades, token.last_price, window=float(window_sec))
+
+        min_dev = self.config.strategy.min_deviation_pct
+        max_dev = self.config.strategy.max_deviation_pct
+        min_mom = float(getattr(self.config.strategy, "momentum_min_pct", 0.0) or 0.0)
+
+        mom_ok = momentum is not None and momentum > min_mom
+        dev_ok = deviation > min_dev and deviation < max_dev
+        z_ok = zscore is not None and abs(zscore) >= self._zscore_abs_min
+
+        controls = self.get_indicator_controls()
+        all_ok = True
+        if controls["momentum"]:
+            all_ok = all_ok and mom_ok
+        if controls["vwap_deviation"]:
+            all_ok = all_ok and dev_ok
+        if controls["zscore"]:
+            all_ok = all_ok and z_ok
+
+        return {
+            "window_sec": int(window_sec),
+            "momentum_pct": momentum,
+            "deviation_pct": deviation,
+            "zscore": zscore,
+            "momentum_ok": bool(mom_ok),
+            "vwap_deviation_ok": bool(dev_ok),
+            "zscore_ok": bool(z_ok),
+            "all_ok": bool(all_ok),
+        }
+
+    def _favorite_window_checks(self) -> Dict[str, Dict[str, Any]]:
+        up = self.state.up_token
+        down = self.state.down_token
+        if not up and not down:
+            token = None
+        elif not down:
+            token = up
+        elif not up:
+            token = down
+        else:
+            token = up if up.last_price >= down.last_price else down
+
+        return {
+            "s5": self._window_indicator_status(token, 5),
+            "s15": self._window_indicator_status(token, 15),
+        }
 
     def _display_latest_5_windows(self) -> None:
         """Load and log the latest 5 completed windows from CSV."""
@@ -2560,11 +2674,13 @@ class Dashboard:
             fav_price = up.last_price
             fav_dev = up_dev
             fav_mom = up_mom
+            fav_zscore = self.calc.calc_zscore(up.trades, up.last_price, window=5)
         else:
             fav_name = "DOWN"
             fav_price = down.last_price
             fav_dev = down_dev
             fav_mom = down_mom
+            fav_zscore = self.calc.calc_zscore(down.trades, down.last_price, window=5)
         
         base_wr = self.winrate_table.get_winrate(fav_price, time_bin, span)
         wr_str = f"{base_wr:.1f}%" if base_wr else "N/A"
@@ -2591,10 +2707,17 @@ class Dashboard:
         
         price_ok = min_price <= fav_price <= max_price
         time_ok = elapsed_sec >= min_elapsed
-        dev_ok = fav_dev > min_dev and fav_dev < max_dev
-        mom_ok = fav_mom is not None and fav_mom > self.config.strategy.momentum_min_pct
+        dev_raw_ok = fav_dev > min_dev and fav_dev < max_dev
+        mom_min_pct = float(getattr(self.config.strategy, "momentum_min_pct", 0.0) or 0.0)
+        mom_raw_ok = fav_mom is not None and fav_mom > mom_min_pct
+        z_raw_ok = fav_zscore is not None and abs(fav_zscore) >= self._zscore_abs_min
+        controls = self.get_indicator_controls()
+        dev_ok = dev_raw_ok if controls["vwap_deviation"] else True
+        mom_ok = mom_raw_ok if controls["momentum"] else True
+        zscore_ok = z_raw_ok if controls["zscore"] else True
         time_cutoff_ok = time_left > no_entry_cutoff
         btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
+        window_checks = self._favorite_window_checks()
         
         # Check price trend over last 10 seconds
         up_trend = self.calc.calc_price_trend(up.trades, window=10.0) if up and up.trades else None
@@ -2646,6 +2769,7 @@ class Dashboard:
                 f"T {'OK' if time_ok else 'WAIT'} | "
                 f"D {'OK' if dev_ok else 'WAIT'} | "
                 f"M {'OK' if mom_ok else 'WAIT'} | "
+                f"Z {'OK' if zscore_ok else 'WAIT'} | "
                 f"R {'OK' if fav_trend_ok else 'WAIT'} | "
                 f"Cut {'OK' if time_cutoff_ok else 'WAIT'} => {'READY' if mode_ready else 'WAIT'}"
             )
@@ -2700,7 +2824,7 @@ class Dashboard:
             signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
             signal_color = "red"
             self.last_signal = ""
-        elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok and vol_gate_ok:
+        elif price_ok and time_ok and dev_ok and mom_ok and zscore_ok and btc_buffer_ok and fav_trend_ok and vol_gate_ok:
             signal = f"✅ BUY {fav_name}"
             signal_color = "bold green"
             self.last_signal = f"BUY_{fav_name}"
@@ -2709,6 +2833,8 @@ class Dashboard:
                 signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
             elif not mom_ok:
                 signal = "🟡 ALMOST (need Mom>0%)"
+            elif not zscore_ok:
+                signal = f"🟡 ALMOST (need |Z|>={self._zscore_abs_min:.2f})"
             elif vol_check_enabled and not vol_speed_ok:
                 signal = f"🟡 ALMOST (need {fav_name} current volume lead)"
             elif not btc_buffer_ok:
@@ -2737,6 +2863,8 @@ class Dashboard:
                     signal = f"⏳ WAIT (Dev<{min_dev}%)"
             elif not mom_ok:
                 signal = f"⏳ WAIT (Mom≤0%)"
+            elif not zscore_ok:
+                signal = f"⏳ WAIT (|Z|<{self._zscore_abs_min:.2f})"
             elif vol_check_enabled and not vol_speed_ok:
                 signal = f"⏳ WAIT ({fav_name} current volume lead too small)"
             elif not fav_trend_ok:
@@ -2751,6 +2879,10 @@ class Dashboard:
             f"Price:       {self._fmt_price(fav_price)} (range: {min_price}-{max_price})",
             f"Deviation:   {self._fmt_dev(fav_dev)} (need {min_dev}%–{max_dev}%)",
             f"Momentum:    {self._fmt_momentum(fav_mom)}",
+            f"Z-Score 5s:  {self._fmt_zscore(fav_zscore)} (need |Z|≥{self._zscore_abs_min:.2f})",
+            f"Indicator gates: M={'ON' if controls['momentum'] else 'OFF'} D={'ON' if controls['vwap_deviation'] else 'OFF'} Z={'ON' if controls['zscore'] else 'OFF'}",
+            f"5s checks:   M {'OK' if window_checks['s5']['momentum_ok'] else 'WAIT'} | D {'OK' if window_checks['s5']['vwap_deviation_ok'] else 'WAIT'} | Z {'OK' if window_checks['s5']['zscore_ok'] else 'WAIT'} | ALL {'OK' if window_checks['s5']['all_ok'] else 'WAIT'}",
+            f"15s checks:  M {'OK' if window_checks['s15']['momentum_ok'] else 'WAIT'} | D {'OK' if window_checks['s15']['vwap_deviation_ok'] else 'WAIT'} | Z {'OK' if window_checks['s15']['zscore_ok'] else 'WAIT'} | ALL {'OK' if window_checks['s15']['all_ok'] else 'WAIT'}",
             f"Vol Speed:   {'OFF' if (not vol_speed.get('enabled', True) or not vol_check_enabled) else ('OK' if vol_speed_ok else 'WAIT')} "
             f"({fav_name} dV{int(vol_speed['window_sec'])}={vol_speed['fav_accel']:+.0f}, other={vol_speed['other_accel']:+.0f})",
             f"Elapsed:     {int(elapsed_sec)}s (need ≥{min_elapsed}s)  [bin {time_bin}]",
@@ -3001,6 +3133,21 @@ class Dashboard:
             "checks": {},
             "up_line": "",
             "down_line": "",
+            "indicator_controls": self.get_indicator_controls(),
+            "window_checks": {
+                "s5": {
+                    "momentum_ok": False,
+                    "vwap_deviation_ok": False,
+                    "zscore_ok": False,
+                    "all_ok": False,
+                },
+                "s15": {
+                    "momentum_ok": False,
+                    "vwap_deviation_ok": False,
+                    "zscore_ok": False,
+                    "all_ok": False,
+                },
+            },
         }
 
         if self.state.up_token and self.state.down_token:
@@ -3025,11 +3172,13 @@ class Dashboard:
                 fav_price = up.last_price
                 fav_dev = up_dev
                 fav_mom = up_mom
+                fav_zscore = self.calc.calc_zscore(up.trades, up.last_price, window=5)
             else:
                 fav_name = "DOWN"
                 fav_price = down.last_price
                 fav_dev = down_dev
                 fav_mom = down_mom
+                fav_zscore = self.calc.calc_zscore(down.trades, down.last_price, window=5)
 
             base_wr = self.winrate_table.get_winrate(fav_price, time_bin, span)
             wr_str = f"{base_wr:.1f}%" if base_wr else None
@@ -3054,10 +3203,17 @@ class Dashboard:
 
             price_ok = min_price <= fav_price <= max_price
             time_ok = elapsed_sec >= min_elapsed
-            dev_ok = fav_dev > min_dev and fav_dev < max_dev
-            mom_ok = fav_mom is not None and fav_mom > self.config.strategy.momentum_min_pct
+            dev_raw_ok = fav_dev > min_dev and fav_dev < max_dev
+            mom_min_pct = float(getattr(self.config.strategy, "momentum_min_pct", 0.0) or 0.0)
+            mom_raw_ok = fav_mom is not None and fav_mom > mom_min_pct
+            z_raw_ok = fav_zscore is not None and abs(fav_zscore) >= self._zscore_abs_min
+            controls = self.get_indicator_controls()
+            dev_ok = dev_raw_ok if controls["vwap_deviation"] else True
+            mom_ok = mom_raw_ok if controls["momentum"] else True
+            zscore_ok = z_raw_ok if controls["zscore"] else True
             time_cutoff_ok = time_left > no_entry_cutoff
             btc_buffer_ok = btc_buffer is not None and btc_buffer["ok"]
+            window_checks = self._favorite_window_checks()
 
             # Check price trend over last 10 seconds
             up_trend = self.calc.calc_price_trend(up.trades, window=10.0) if up and up.trades else None
@@ -3197,13 +3353,15 @@ class Dashboard:
                     signal = f"⏳ WAIT ({label}: P not in range)"
             elif not time_cutoff_ok:
                 signal = f"🚫 NO ENTRY (< {no_entry_cutoff}s left)"
-            elif price_ok and time_ok and dev_ok and mom_ok and btc_buffer_ok and fav_trend_ok and vol_gate_ok:
+            elif price_ok and time_ok and dev_ok and mom_ok and zscore_ok and btc_buffer_ok and fav_trend_ok and vol_gate_ok:
                 signal = f"✅ BUY {fav_name}"
             elif fav_price >= 0.70 and time_ok:
                 if not fav_trend_ok:
                     signal = f"🟡 ALMOST (need {fav_name} trending {'up' if fav_name == 'UP' else 'down'})"
                 elif not mom_ok:
                     signal = "🟡 ALMOST (need Mom>0%)"
+                elif not zscore_ok:
+                    signal = f"🟡 ALMOST (need |Z|>={self._zscore_abs_min:.2f})"
                 elif vol_check_enabled and not vol_speed_ok:
                     signal = f"🟡 ALMOST (need {fav_name} current volume lead)"
                 elif not btc_buffer_ok and btc_buffer:
@@ -3224,6 +3382,8 @@ class Dashboard:
                 )
             elif not mom_ok:
                 signal = "⏳ WAIT (Mom≤0%)"
+            elif not zscore_ok:
+                signal = f"⏳ WAIT (|Z|<{self._zscore_abs_min:.2f})"
             elif vol_check_enabled and not vol_speed_ok:
                 signal = f"⏳ WAIT ({fav_name} current volume lead too small)"
             elif not fav_trend_ok:
@@ -3243,6 +3403,7 @@ class Dashboard:
                     "time": time_ok,
                     "dev": dev_ok,
                     "mom": mom_ok,
+                    "zscore": zscore_ok,
                     "volume": vol_gate_ok,
                     "volume_enabled": vol_check_enabled,
                     "trend": fav_trend_ok,
@@ -3292,6 +3453,10 @@ class Dashboard:
                 },
                 "up_line": f"{up.last_price:.3f} | Dev {up_dev:+.1f}% | Mom {up_mom if up_mom is not None else 0:.2f}% | Trend {up_trend if up_trend is not None else 0:+.4f}",
                 "down_line": f"{down.last_price:.3f} | Dev {down_dev:+.1f}% | Mom {down_mom if down_mom is not None else 0:.2f}% | Trend {down_trend if down_trend is not None else 0:+.4f}",
+                "indicator_controls": controls,
+                "window_checks": window_checks,
+                "favorite_zscore_5s": fav_zscore,
+                "zscore_abs_min": self._zscore_abs_min,
             }
 
         s = self.state
@@ -3422,6 +3587,55 @@ class Dashboard:
             "manual_buy_live_status": self.manual_buy_live_status,
         }
 
+    def build_microstructure_snapshot(self) -> Dict[str, Any]:
+        now = time.time()
+        state = self.build_web_snapshot()
+        up = state.get("up") or {}
+        down = state.get("down") or {}
+
+        def with_spread(token_block: Dict[str, Any]) -> Dict[str, Any]:
+            book = token_block.get("book") or {}
+            best_bid = float(book.get("best_bid") or 0.0)
+            best_ask = float(book.get("best_ask") or 0.0)
+            spread = (best_ask - best_bid) if best_bid > 0 and best_ask > 0 else None
+            mid = ((best_ask + best_bid) / 2.0) if best_bid > 0 and best_ask > 0 else None
+            out = dict(token_block)
+            out["micro"] = {
+                "spread": spread,
+                "mid": mid,
+            }
+            return out
+
+        btc = state.get("btc") or {}
+        btc_current = float(btc.get("btc_current_price") or 0.0)
+        btc_anchor = float(btc.get("btc_anchor_price") or 0.0)
+        btc_dev_usd = btc_current - btc_anchor if btc_current > 0 and btc_anchor > 0 else None
+        btc_dev_pct = ((btc_dev_usd / btc_anchor) * 100.0) if (btc_dev_usd is not None and btc_anchor > 0) else None
+
+        return {
+            "ts": now,
+            "iso": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+            "market_slug": (state.get("header") or {}).get("slug"),
+            "interval_minutes": (state.get("header") or {}).get("interval_minutes"),
+            "time_left_sec": (state.get("header") or {}).get("time_left_sec"),
+            "strategy": {
+                "signal": (state.get("strategy") or {}).get("signal_text"),
+                "favorite": (state.get("strategy") or {}).get("favorite"),
+                "indicator_controls": (state.get("strategy") or {}).get("indicator_controls"),
+                "window_checks": (state.get("strategy") or {}).get("window_checks"),
+            },
+            "up": with_spread(up),
+            "down": with_spread(down),
+            "btc": {
+                "price": btc_current,
+                "anchor": btc_anchor,
+                "deviation_usd": btc_dev_usd,
+                "deviation_pct": btc_dev_pct,
+                "connected": bool(btc.get("btc_connected")),
+                "fresh_sec": btc.get("fresh_sec"),
+            },
+        }
+
 
 # =============================================================================
 # MAIN BOT
@@ -3456,6 +3670,7 @@ class LiveTradingBot:
         
         # BTC price movement logger (tracks price after each buy)
         self.btc_price_movement_logger: Optional[BTCPriceMovementLogger] = None
+        self.market_microstructure_logger: Optional[MarketMicrostructureLogger] = None
         
         # Control
         self.running = False
@@ -3464,6 +3679,16 @@ class LiveTradingBot:
         self._web_snapshot_holder: Optional[WebSnapshotHolder] = None
         self._config_lock = threading.Lock()
         self._timer_alert_last_sent_slug: str = ""
+
+    def _web_get_indicator_controls(self) -> Dict[str, Any]:
+        if not self.dashboard:
+            return {"momentum": True, "vwap_deviation": True, "zscore": True}
+        return self.dashboard.get_indicator_controls()
+
+    def _web_update_indicator_controls(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.dashboard:
+            return {"momentum": True, "vwap_deviation": True, "zscore": True}
+        return self.dashboard.update_indicator_controls(payload if isinstance(payload, dict) else {})
 
     def _web_get_late_modes(self) -> Dict[str, Any]:
         with self._config_lock:
@@ -3986,6 +4211,12 @@ class LiveTradingBot:
         # BTC price movement logger
         self.btc_price_movement_logger = BTCPriceMovementLogger()
         console.print("[green]✓ BTC price movement logger initialized[/green]")
+
+        self.market_microstructure_logger = MarketMicrostructureLogger(
+            log_file="data/market_microstructure.jsonl",
+            interval_sec=5.0,
+        )
+        console.print("[green]✓ Market microstructure logger: data/market_microstructure.jsonl[/green]")
         
         # Dashboard
         self.dashboard = Dashboard(self.state, self.stats, self.config)
@@ -4012,6 +4243,8 @@ class LiveTradingBot:
                 wd.host,
                 wd.port,
                 self._web_snapshot_holder,
+                get_indicator_controls=self._web_get_indicator_controls,
+                update_indicator_controls=self._web_update_indicator_controls,
                 get_late_modes=self._web_get_late_modes,
                 update_late_modes=self._web_update_late_modes,
                 get_volume_accel_check=self._web_get_volume_accel_check,
@@ -5008,6 +5241,11 @@ class LiveTradingBot:
                     live.update(self.dashboard.render())
                     if self._web_snapshot_holder:
                         self._web_snapshot_holder.set(self.dashboard.build_web_snapshot())
+                    if self.market_microstructure_logger:
+                        self.market_microstructure_logger.maybe_log(
+                            self.dashboard.build_microstructure_snapshot(),
+                            now=time.time(),
+                        )
                     
                     # Check for entry signal - запускаем в отдельном task
                     time_left_now = max(0.0, self.state.end_time - time.time())
