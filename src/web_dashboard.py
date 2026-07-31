@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import Body, FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 import uvicorn
 
@@ -39,17 +39,6 @@ _HTML = """<!DOCTYPE html>
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.85rem; }
     .card h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
       margin: 0 0 0.5rem; }
-    .controls .row { margin-bottom: 0.35rem; align-items: center; }
-    .controls label { min-width: 105px; color: var(--muted); font-size: 0.8rem; }
-    .controls input[type="number"] { width: 86px; background: #0d1117; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 0.25rem 0.35rem; }
-    .controls select { width: 96px; background: #0d1117; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 0.25rem 0.35rem; }
-    .controls input[type="checkbox"] { transform: scale(1.05); }
-    .mode-grid { display: grid; gap: 0.55rem; }
-    .mode-box { border: 1px solid var(--border); border-radius: 8px; padding: 0.55rem; }
-    .mode-title { color: var(--blue); font-size: 0.8rem; margin-bottom: 0.35rem; }
-    .btn { background: #1f6feb; color: #fff; border: 0; border-radius: 7px; padding: 0.35rem 0.6rem; cursor: pointer; font-size: 0.8rem; }
-    .btn.secondary { background: #30363d; }
-    .status { color: var(--muted); font-size: 0.78rem; }
     .row { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.9rem; }
     .sig { font-size: 1rem; font-weight: 600; }
     .sig.wait { color: var(--yellow); }
@@ -66,14 +55,12 @@ _HTML = """<!DOCTYPE html>
   <div class="grid">
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
-    <div class="card"><h2>Volume Eval Strategy</h2><div id="volumeEvalStrategy" class="mono">Loading…</div></div>
-    <div class="card"><h2>Late Entry Strategy</h2><div id="lateEntryStrategy" class="mono">Loading…</div></div>
-    <div class="card btc"><h2>BTC / USD Sources</h2><div id="btc" class="mono"></div></div>
+    <div class="card"><h2>Indicator Controls</h2><div id="controls" class="mono"></div></div>
+    <div class="card"><h2>5s / 15s Checks</h2><div id="checks" class="mono"></div></div>
+    <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
+    <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
+    <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
-    <div class="card controls"><h2>Timer Alert</h2><div id="timerAlert" class="mono">Loading…</div></div>
-    <div class="card controls"><h2>Volume Accel Check</h2><div id="volumeAccelCheck" class="mono">Loading…</div></div>
-    <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalMode" class="mono">Loading…</div></div>
-    <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModes" class="mono">Loading…</div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
   <script>
@@ -95,464 +82,30 @@ _HTML = """<!DOCTYPE html>
       if (n === null || n === undefined || typeof n !== "number" || isNaN(n)) return "\u2014";
       return n.toFixed(dec);
     }
-    function numFmtSigned(n, dec) {
-      if (n === null || n === undefined || typeof n !== "number" || isNaN(n)) return "\u2014";
-      var fixed = n.toFixed(dec);
-      if (n > 0) return "+" + fixed;
-      return fixed;
-    }
-    function readNum(id, fallback) {
-      var el = document.getElementById(id);
-      if (!el) return fallback;
-      var v = parseFloat(el.value);
-      return isNaN(v) ? fallback : v;
-    }
-    function readInt(id, fallback) {
-      var el = document.getElementById(id);
-      if (!el) return fallback;
-      var v = parseInt(el.value, 10);
-      return isNaN(v) ? fallback : v;
+
+    function boolHtml(v) {
+      if (v === true) return "\u2713";
+      if (v === false) return "\u2717";
+      return "\u2014";
     }
 
-    var lateModeKeys = [];
-
-    function buildModeEditor(mode) {
-      var k = mode.key;
-      var h = [];
-      h.push('<div class="mode-box">');
-      h.push('<div class="mode-title">' + esc(k) + '</div>');
-      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="' + esc(k) + '_enabled" ' + (mode.enabled ? 'checked' : '') + '/></div>');
-      h.push('<div class="row"><label>Time Left</label><input type="number" id="' + esc(k) + '_time_left_sec" step="1" value="' + esc(mode.time_left_sec) + '"/></div>');
-      h.push('<div class="row"><label>Min Contracts</label><input type="number" id="' + esc(k) + '_min_contracts" step="1" value="' + esc(mode.min_contracts) + '"/></div>');
-      h.push('<div class="row"><label>Max Trades</label><input type="number" id="' + esc(k) + '_max_trades" step="1" value="' + esc(mode.max_trades) + '"/></div>');
-      h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="' + esc(k) + '_buffer_avg_multiplier" step="0.01" value="' + esc(mode.buffer_avg_multiplier) + '"/></div>');
-      h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="' + esc(k) + '_min_buffer_threshold_usd" step="0.1" value="' + esc(mode.min_buffer_threshold_usd) + '"/></div>');
-      h.push('<div class="row"><label>Min Price</label><input type="number" id="' + esc(k) + '_min_price" step="0.001" value="' + esc(mode.min_price) + '"/></div>');
-      h.push('<div class="row"><label>Max Price</label><input type="number" id="' + esc(k) + '_max_price" step="0.001" value="' + esc(mode.max_price) + '"/></div>');
-      h.push('</div>');
-      return h.join('');
-    }
-
-    function renderLateModes(cfg) {
-      var box = document.getElementById('lateModes');
-      if (!box) return;
-      if (!cfg || !cfg.modes) {
-        box.textContent = 'Late mode config unavailable';
-        lateModeKeys = [];
-        return;
-      }
-
-      lateModeKeys = [];
-      for (var m = 0; m < cfg.modes.length; m++) {
-        if (cfg.modes[m] && cfg.modes[m].key) lateModeKeys.push(String(cfg.modes[m].key));
-      }
-
-      var html = [];
-      html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="late_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
-      html.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="' + esc(cfg.total_max_trades) + '"/></div>');
-      html.push('<div class="mode-grid">');
-      for (var i = 0; i < cfg.modes.length; i++) {
-        html.push(buildModeEditor(cfg.modes[i]));
-      }
-      html.push('</div>');
-      html.push('<div style="margin-top:0.5rem" class="row">');
-      html.push('<button class="btn" onclick="saveLateModes()">Apply</button>');
-      html.push('<button class="btn secondary" onclick="loadLateModes()">Reload</button>');
-      html.push('</div>');
-      html.push('<div id="lateStatus" class="status"></div>');
-      box.innerHTML = html.join('');
-    }
-
-    function renderVolumeEvalMode(cfg) {
-      var box = document.getElementById('volumeEvalMode');
-      if (!box) return;
-      if (!cfg) {
-        box.textContent = 'Volume eval mode config unavailable';
-        return;
-      }
-
-      var html = [];
-      var levels = (cfg.entry_min_current_volume_diffs && cfg.entry_min_current_volume_diffs.length)
-        ? cfg.entry_min_current_volume_diffs
-        : [1000, 2000, 3000];
-      var entryTradeLimits = (cfg.entry_trade_limits && cfg.entry_trade_limits.length)
-        ? cfg.entry_trade_limits
-        : [1, 1, 1];
-      html.push('<div class="mode-box">');
-      html.push('<div class="mode-title">volume_eval_mode</div>');
-      html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="vem_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
-      html.push('<div class="row"><label>Time Left</label><input type="number" id="vem_time_left_sec" step="1" value="' + esc(cfg.time_left_sec) + '"/></div>');
-      html.push('<div class="row"><label>Min Contracts</label><input type="number" id="vem_min_contracts" step="1" value="' + esc(cfg.min_contracts != null ? cfg.min_contracts : 1) + '"/></div>');
-      html.push('<div class="row"><label>Max Trades</label><input type="number" id="vem_max_trades" step="1" value="' + esc(cfg.max_trades) + '"/></div>');
-      html.push('<div class="row"><label>Buffer Mult</label><input type="number" id="vem_buffer_avg_multiplier" step="0.01" value="' + esc(cfg.buffer_avg_multiplier) + '"/></div>');
-      html.push('<div class="row"><label>Min Buffer $</label><input type="number" id="vem_min_buffer_threshold_usd" step="0.1" value="' + esc(cfg.min_buffer_threshold_usd) + '"/></div>');
-      html.push('<div class="row"><label>Volume Check</label><input type="checkbox" id="vem_volume_check_enabled" ' + (cfg.volume_check_enabled !== false ? 'checked' : '') + '/></div>');
-      html.push('<div class="row"><label>Entry 1 MinVol</label><input type="number" id="vem_mcvd_1" step="1" value="' + esc(levels[0] != null ? levels[0] : 1000) + '"/></div>');
-      html.push('<div class="row"><label>Entry 1 Trades</label><input type="number" id="vem_entry_trades_1" step="1" value="' + esc(entryTradeLimits[0] != null ? entryTradeLimits[0] : 1) + '"/></div>');
-      html.push('<div class="row"><label>Entry 2 MinVol</label><input type="number" id="vem_mcvd_2" step="1" value="' + esc(levels[1] != null ? levels[1] : levels[0]) + '"/></div>');
-      html.push('<div class="row"><label>Entry 2 Trades</label><input type="number" id="vem_entry_trades_2" step="1" value="' + esc(entryTradeLimits[1] != null ? entryTradeLimits[1] : entryTradeLimits[0]) + '"/></div>');
-      html.push('<div class="row"><label>Entry 3 MinVol</label><input type="number" id="vem_mcvd_3" step="1" value="' + esc(levels[2] != null ? levels[2] : levels[1]) + '"/></div>');
-      html.push('<div class="row"><label>Entry 3 Trades</label><input type="number" id="vem_entry_trades_3" step="1" value="' + esc(entryTradeLimits[2] != null ? entryTradeLimits[2] : entryTradeLimits[1]) + '"/></div>');
-      html.push('<div class="row"><label>Min Price</label><input type="number" id="vem_min_price" step="0.001" value="' + esc(cfg.min_price) + '"/></div>');
-      html.push('<div class="row"><label>Max Price</label><input type="number" id="vem_max_price" step="0.001" value="' + esc(cfg.max_price) + '"/></div>');
-      html.push('</div>');
-      html.push('<div style="margin-top:0.5rem" class="row">');
-      html.push('<button class="btn" onclick="saveVolumeEvalMode()">Apply</button>');
-      html.push('<button class="btn secondary" onclick="loadVolumeEvalMode()">Reload</button>');
-      html.push('</div>');
-      html.push('<div id="vemStatus" class="status"></div>');
-      box.innerHTML = html.join('');
-    }
-
-    function renderTimerAlert(cfg) {
-      var box = document.getElementById('timerAlert');
-      if (!box) return;
-      if (!cfg) {
-        box.textContent = 'Timer alert config unavailable';
-        return;
-      }
-
-      var html = [];
-      html.push('<div class="mode-box">');
-      html.push('<div class="mode-title">telegram.timer_alert</div>');
-      html.push('<div class="row"><label>Enabled</label><input type="checkbox" id="ta_enabled" ' + (cfg.enabled ? 'checked' : '') + '/></div>');
-      html.push('<div class="row"><label>Time Left</label><input type="number" id="ta_time_left_sec" step="1" value="' + esc(cfg.time_left_sec) + '"/></div>');
-      html.push('<div class="row"><label>Min Price</label><input type="number" id="ta_min_price" step="0.001" value="' + esc(cfg.min_price) + '"/></div>');
-      html.push('<div class="row"><label>Max Price</label><input type="number" id="ta_max_price" step="0.001" value="' + esc(cfg.max_price) + '"/></div>');
-      html.push('<div class="status">Timer bot: ' + (cfg.timer_bot_ready ? 'ready' : 'missing TELEGRAM_TIMER_BOT_TOKEN or TELEGRAM_TIMER_CHAT_ID') + '</div>');
-      html.push('</div>');
-      html.push('<div style="margin-top:0.5rem" class="row">');
-      html.push('<button class="btn" onclick="saveTimerAlert()">Apply</button>');
-      html.push('<button class="btn secondary" onclick="loadTimerAlert()">Reload</button>');
-      html.push('</div>');
-      html.push('<div id="taStatus" class="status"></div>');
-      box.innerHTML = html.join('');
-    }
-
-    function renderVolumeAccelCheck(cfg) {
-      var box = document.getElementById('volumeAccelCheck');
-      if (!box) return;
-      if (!cfg) {
-        box.textContent = 'Volume accel check config unavailable';
-        return;
-      }
-
-      var basis = (String(cfg.volume_basis || '').toLowerCase() === 'buy') ? 'buy' : 'total';
-      var html = [];
-      html.push('<div class="mode-box">');
-      html.push('<div class="mode-title">volume_acceleration_check</div>');
-      html.push('<div class="row"><label>Min Curr Diff</label><input type="number" id="vac_min_current_volume_diff" step="1" value="' + esc(cfg.min_current_volume_diff != null ? cfg.min_current_volume_diff : 0) + '"/></div>');
-      html.push('<div class="row"><label>Min Accel Diff</label><input type="number" id="vac_min_accel_diff" step="1" value="' + esc(cfg.min_accel_diff != null ? cfg.min_accel_diff : 0) + '"/></div>');
-      html.push('<div class="row"><label>Volume Basis</label><select id="vac_volume_basis"><option value="total"' + (basis === 'total' ? ' selected' : '') + '>TOTAL</option><option value="buy"' + (basis === 'buy' ? ' selected' : '') + '>BUY</option></select></div>');
-      html.push('</div>');
-      html.push('<div style="margin-top:0.5rem" class="row">');
-      html.push('<button class="btn" onclick="saveVolumeAccelCheck()">Apply</button>');
-      html.push('<button class="btn secondary" onclick="loadVolumeAccelCheck()">Reload</button>');
-      html.push('</div>');
-      html.push('<div id="vacStatus" class="status"></div>');
-      box.innerHTML = html.join('');
-    }
-
-    function loadTimerAlert() {
-      var r = new XMLHttpRequest();
-      r.open('GET', '/api/timer-alert', true);
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status !== 200) {
-          var box = document.getElementById('timerAlert');
-          if (box) box.textContent = 'Could not load timer alert (HTTP ' + r.status + ')';
-          return;
-        }
-        try {
-          var cfg = JSON.parse(r.responseText);
-          renderTimerAlert(cfg);
-        } catch (e) {
-          var box2 = document.getElementById('timerAlert');
-          if (box2) box2.textContent = 'Timer alert parse error';
-        }
-      };
-      r.send();
-    }
-
-    function saveTimerAlert() {
-      var status = document.getElementById('taStatus');
+    function applyControls() {
       var payload = {
-        enabled: !!(document.getElementById('ta_enabled') && document.getElementById('ta_enabled').checked),
-        time_left_sec: readInt('ta_time_left_sec', 100),
-        min_price: readNum('ta_min_price', 0.75),
-        max_price: readNum('ta_max_price', 0.95)
+        momentum: !!document.getElementById("ctl-momentum").checked,
+        vwap_deviation: !!document.getElementById("ctl-vwap").checked,
+        zscore: !!document.getElementById("ctl-zscore").checked,
       };
-
       var r = new XMLHttpRequest();
-      r.open('POST', '/api/timer-alert', true);
-      r.setRequestHeader('Content-Type', 'application/json');
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status === 200) {
-          if (status) status.textContent = 'Applied';
-          loadTimerAlert();
-        } else {
-          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
-        }
-      };
+      r.open("POST", "/api/indicator-controls", true);
+      r.setRequestHeader("Content-Type", "application/json");
       r.send(JSON.stringify(payload));
     }
-
-    function loadVolumeAccelCheck() {
-      var r = new XMLHttpRequest();
-      r.open('GET', '/api/volume-accel-check', true);
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status !== 200) {
-          var box = document.getElementById('volumeAccelCheck');
-          if (box) box.textContent = 'Could not load volume accel check (HTTP ' + r.status + ')';
-          return;
-        }
-        try {
-          var cfg = JSON.parse(r.responseText);
-          renderVolumeAccelCheck(cfg);
-        } catch (e) {
-          var box2 = document.getElementById('volumeAccelCheck');
-          if (box2) box2.textContent = 'Volume accel check parse error';
-        }
-      };
-      r.send();
-    }
-
-    function saveVolumeAccelCheck() {
-      var status = document.getElementById('vacStatus');
-      var basisEl = document.getElementById('vac_volume_basis');
-      var basisVal = basisEl ? String(basisEl.value || 'total').toLowerCase() : 'total';
-      var payload = {
-        min_current_volume_diff: readNum('vac_min_current_volume_diff', 0),
-        min_accel_diff: readNum('vac_min_accel_diff', 0),
-        volume_basis: (basisVal === 'buy') ? 'buy' : 'total'
-      };
-
-      var r = new XMLHttpRequest();
-      r.open('POST', '/api/volume-accel-check', true);
-      r.setRequestHeader('Content-Type', 'application/json');
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status === 200) {
-          if (status) status.textContent = 'Applied';
-          loadVolumeAccelCheck();
-        } else {
-          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
-        }
-      };
-      r.send(JSON.stringify(payload));
-    }
-
-    function loadVolumeEvalMode() {
-      var r = new XMLHttpRequest();
-      r.open('GET', '/api/volume-eval-mode', true);
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status !== 200) {
-          var box = document.getElementById('volumeEvalMode');
-          if (box) box.textContent = 'Could not load volume eval mode (HTTP ' + r.status + ')';
-          return;
-        }
-        try {
-          var cfg = JSON.parse(r.responseText);
-          renderVolumeEvalMode(cfg);
-        } catch (e) {
-          var box2 = document.getElementById('volumeEvalMode');
-          if (box2) box2.textContent = 'Volume eval mode parse error';
-        }
-      };
-      r.send();
-    }
-
-    function saveVolumeEvalMode() {
-      var status = document.getElementById('vemStatus');
-      var payload = {
-        enabled: !!(document.getElementById('vem_enabled') && document.getElementById('vem_enabled').checked),
-        time_left_sec: readInt('vem_time_left_sec', 0),
-        min_contracts: readInt('vem_min_contracts', 1),
-        max_trades: readInt('vem_max_trades', 1),
-        buffer_avg_multiplier: readNum('vem_buffer_avg_multiplier', 1.0),
-        min_buffer_threshold_usd: readNum('vem_min_buffer_threshold_usd', 0.0),
-        volume_check_enabled: !!(document.getElementById('vem_volume_check_enabled') && document.getElementById('vem_volume_check_enabled').checked),
-        entry_min_current_volume_diffs: [
-          readNum('vem_mcvd_1', 1000),
-          readNum('vem_mcvd_2', 2000),
-          readNum('vem_mcvd_3', 3000)
-        ],
-        entry_trade_limits: [
-          readInt('vem_entry_trades_1', 1),
-          readInt('vem_entry_trades_2', 1),
-          readInt('vem_entry_trades_3', 1)
-        ],
-        min_price: readNum('vem_min_price', 0.0),
-        max_price: readNum('vem_max_price', 1.0)
-      };
-
-      var r = new XMLHttpRequest();
-      r.open('POST', '/api/volume-eval-mode', true);
-      r.setRequestHeader('Content-Type', 'application/json');
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status === 200) {
-          if (status) status.textContent = 'Applied';
-          loadVolumeEvalMode();
-        } else {
-          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
-        }
-      };
-      r.send(JSON.stringify(payload));
-    }
-
-    function loadLateModes() {
-      var r = new XMLHttpRequest();
-      r.open('GET', '/api/late-modes', true);
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status !== 200) {
-          var box = document.getElementById('lateModes');
-          if (box) box.textContent = 'Could not load late mode config (HTTP ' + r.status + ')';
-          return;
-        }
-        try {
-          var cfg = JSON.parse(r.responseText);
-          renderLateModes(cfg);
-        } catch (e) {
-          var box2 = document.getElementById('lateModes');
-          if (box2) box2.textContent = 'Late mode parse error';
-        }
-      };
-      r.send();
-    }
-
-    function saveLateModes() {
-      var status = document.getElementById('lateStatus');
-      var keys = lateModeKeys && lateModeKeys.length
-        ? lateModeKeys
-        : ['mode_70s', 'mode_60s', 'mode_40s', 'mode_30s', 'mode_20s'];
-      var modes = [];
-      for (var i = 0; i < keys.length; i++) {
-        var k = keys[i];
-        modes.push({
-          key: k,
-          enabled: !!(document.getElementById(k + '_enabled') && document.getElementById(k + '_enabled').checked),
-          time_left_sec: readInt(k + '_time_left_sec', 0),
-          min_contracts: readInt(k + '_min_contracts', 1),
-          max_trades: readInt(k + '_max_trades', 1),
-          buffer_avg_multiplier: readNum(k + '_buffer_avg_multiplier', 1.0),
-          min_buffer_threshold_usd: readNum(k + '_min_buffer_threshold_usd', 0.0),
-          min_price: readNum(k + '_min_price', 0.0),
-          max_price: readNum(k + '_max_price', 1.0)
-        });
-      }
-
-      var payload = {
-        enabled: !!(document.getElementById('late_enabled') && document.getElementById('late_enabled').checked),
-        total_max_trades: readInt('late_total_max_trades', 1),
-        modes: modes
-      };
-
-      var r = new XMLHttpRequest();
-      r.open('POST', '/api/late-modes', true);
-      r.setRequestHeader('Content-Type', 'application/json');
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        if (r.status === 200) {
-          if (status) status.textContent = 'Applied';
-          loadLateModes();
-        } else {
-          if (status) status.textContent = 'Apply failed (HTTP ' + r.status + ')';
-        }
-      };
-      r.send(JSON.stringify(payload));
-    }
-
-    function manualBuyWithDirection(direction) {
-      var status = document.getElementById('buyStatus');
-      var amount = readNum('buyAmount', 0);
-      if (!(amount > 0)) {
-        if (status) status.textContent = 'Amount must be > 0';
-        return;
-      }
-      if (status) status.textContent = 'Submitting...';
-
-      var r = new XMLHttpRequest();
-      r.open('POST', '/api/manual-buy', true);
-      r.setRequestHeader('Content-Type', 'application/json');
-      r.onreadystatechange = function() {
-        if (r.readyState !== 4) return;
-        var txt = '';
-        if (r.status === 200) {
-          try {
-            var out = JSON.parse(r.responseText);
-            txt = out.message || (out.signal ? ('Queued ' + out.signal) : 'Queued');
-          } catch (e) {
-            txt = 'Queued';
-          }
-        } else {
-          try {
-            var err = JSON.parse(r.responseText);
-            txt = (err && err.error) ? err.error : ('Request failed (HTTP ' + r.status + ')');
-          } catch (e2) {
-            txt = 'Request failed (HTTP ' + r.status + ')';
-          }
-        }
-        if (status) status.textContent = txt;
-      };
-      r.send(JSON.stringify({ amount_usd: amount, direction: direction }));
-    }
-
-    function manualBuyUp() {
-      manualBuyWithDirection('UP');
-    }
-
-    function manualBuyDown() {
-      manualBuyWithDirection('DOWN');
-    }
-
-    function setManualAmount(amount) {
-      var input = document.getElementById('buyAmount');
-      if (!input) return;
-      input.value = String(amount);
-      input.focus();
-    }
-
-    var pollTimer = null;
-    var pollInFlight = false;
-    var lastPanelReloadMs = 0;
-
-    function scheduleTick(delayMs) {
-      if (pollTimer) {
-        clearTimeout(pollTimer);
-        pollTimer = null;
-      }
-      var d = (typeof delayMs === 'number' && delayMs >= 0) ? delayMs : 0;
-      pollTimer = setTimeout(function() {
-        pollTimer = null;
-        tick();
-      }, d);
-    }
-
-    function maybeReloadControlPanels(force) {
-      var nowMs = Date.now();
-      if (!force && (nowMs - lastPanelReloadMs) < 15000) return;
-      lastPanelReloadMs = nowMs;
-      loadTimerAlert();
-      loadVolumeAccelCheck();
-      loadVolumeEvalMode();
-      loadLateModes();
-    }
-
     function tick() {
-      if (pollInFlight) return;
-      pollInFlight = true;
-      var pollStartedAt = Date.now();
       var errEl = document.getElementById("err");
       var r = new XMLHttpRequest();
       r.open("GET", "/api/state", true);
       r.onreadystatechange = function () {
         if (r.readyState !== 4) return;
-        pollInFlight = false;
         try {
           if (r.status !== 200) throw new Error("HTTP " + r.status);
           var d = JSON.parse(r.responseText);
@@ -562,82 +115,26 @@ _HTML = """<!DOCTYPE html>
           var ts = "";
           if (d.ts) ts = new Date(d.ts * 1000).toISOString();
           document.getElementById("meta").innerHTML = esc(slug) + " \u00b7 " + esc(ts);
-          var existingAmountEl = document.getElementById("buyAmount");
-          var buyAmountVal = existingAmountEl ? existingAmountEl.value : "";
-          var existingBuyStatusEl = document.getElementById("buyStatus");
-          var buyStatusVal = existingBuyStatusEl ? existingBuyStatusEl.textContent : "";
-          var liveStatusVal = d.manual_buy_live_status ? String(d.manual_buy_live_status) : "idle";
-          var defaultBuyAmount = (d.trading && typeof d.trading.bet_usd === "number" && !isNaN(d.trading.bet_usd))
-            ? d.trading.bet_usd
-            : 1;
-          if (!buyAmountVal) buyAmountVal = String(defaultBuyAmount);
-          var st = d.strategy || {};
-          var vs = st.volume_speed || {};
-          var volumeBasis = (String(vs.volume_basis || "").toLowerCase() === "buy") ? "buy" : "total";
-          var upVolField = volumeBasis === "buy" ? "volume_buy" : "volume_total";
-          var downVolField = volumeBasis === "buy" ? "volume_buy" : "volume_total";
-          var upVol = (d.up && d.up.book && typeof d.up.book[upVolField] === "number" && !isNaN(d.up.book[upVolField])) ? d.up.book[upVolField] : 0;
-          var downVol = (d.down && d.down.book && typeof d.down.book[downVolField] === "number" && !isNaN(d.down.book[downVolField])) ? d.down.book[downVolField] : 0;
-          var sessionTotalVolume = upVol + downVol;
-          var sessionVolumeLabel = volumeBasis === "buy" ? "Session Buy Volume" : "Session Volume";
-
           document.getElementById("session").innerHTML = [
             "Timer: " + (hdr.time_left_sec != null ? esc(Math.floor(hdr.time_left_sec) + "s left") : "\u2014"),
             "WS: " + (hdr.ws_connected ? "live" : "disconnected"),
             "Mode: " + (hdr.simulation ? "simulation" : "real"),
-            sessionVolumeLabel + ": " + esc(Math.round(sessionTotalVolume)),
-            'Live: ' + esc(liveStatusVal),
-            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="' + esc(buyAmountVal) + '" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setManualAmount(29)">$29</button> <button class="btn secondary" onclick="setManualAmount(39)">$39</button> <button class="btn secondary" onclick="setManualAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">Buy UP</button> <button class="btn" onclick="manualBuyDown()">Buy DOWN</button> <span id="buyStatus" class="status">' + esc(buyStatusVal) + '</span></span>'
           ].join("<br/>");
+          var st = d.strategy || {};
           var sig = st.signal_text || "\u2014";
           function chk(x) { return x === true ? "\u2713" : x === false ? "\u2717" : "\u2014"; }
-          function okWait(v) { return v === true ? "OK" : v === false ? "WAIT" : "-"; }
           var ck = st.checks || {};
-          var currDiffVal = (typeof vs.curr_diff === "number" && !isNaN(vs.curr_diff))
-            ? vs.curr_diff
-            : ((typeof vs.fav_curr === "number" && typeof vs.other_curr === "number") ? (vs.fav_curr - vs.other_curr) : null);
-          var currDiffBuyVal = (typeof vs.curr_diff_buy === "number" && !isNaN(vs.curr_diff_buy))
-            ? vs.curr_diff_buy
-            : null;
-          var currDiffTotalVal = (typeof vs.curr_diff_total === "number" && !isNaN(vs.curr_diff_total))
-            ? vs.curr_diff_total
-            : null;
-          var minCurrDiffVal = (typeof vs.min_current_volume_diff === "number" && !isNaN(vs.min_current_volume_diff))
-            ? vs.min_current_volume_diff
-            : null;
-
           var strategyBits = [
             "Fav: " + esc(st.favorite) + " \u00b7 WR: " + esc(st.win_rate_str),
             "Checks: P=" + chk(ck.price) + " T=" + chk(ck.time) + " D=" + chk(ck.dev) +
-            " M=" + chk(ck.mom) + " R=" + chk(ck.trend) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
+            " M=" + chk(ck.mom) + " Z=" + chk(ck.zscore) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
           ];
-          var trend = st.trend || {};
-          if (trend.window_sec != null) {
-            strategyBits.push(
-              "Trend " + esc(trend.window_sec) + "s: " +
-              "UP " + (trend.up_delta != null ? esc(numFmt(trend.up_delta, 4)) : "\u2014") +
-              " (" + chk(trend.up_ok) + ")" +
-              " | DOWN " + (trend.down_delta != null ? esc(numFmt(trend.down_delta, 4)) : "\u2014") +
-              " (" + chk(trend.down_ok) + ")"
-            );
-          }
-          if (currDiffVal !== null || minCurrDiffVal !== null) {
-            var diffState = "-";
-            if (currDiffVal !== null && minCurrDiffVal !== null) diffState = (currDiffVal >= minCurrDiffVal) ? "OK" : "WAIT";
-            strategyBits.push(
-              "Vol curr diff (active): " +
-              esc(numFmt(currDiffVal, 0)) +
-              " vs min " +
-              esc(numFmt(minCurrDiffVal, 0)) +
-              " (" + diffState + ", basis=" + esc(volumeBasis.toUpperCase()) + ")"
-            );
-          }
-          if (currDiffBuyVal !== null) {
-            strategyBits.push("Vol curr diff (BUY): " + esc(numFmt(currDiffBuyVal, 0)));
-          }
-          if (currDiffTotalVal !== null) {
-            strategyBits.push("Vol curr diff (TOTAL): " + esc(numFmt(currDiffTotalVal, 0)));
-          }
+            if (st.up_line) {
+              strategyBits.push("UP: " + esc(st.up_line));
+            }
+            if (st.down_line) {
+              strategyBits.push("DOWN: " + esc(st.down_line));
+            }
           if (st.btc_buffer_line) {
             strategyBits.push("BTC Buffer: " + esc(st.btc_buffer_line));
           }
@@ -647,105 +144,61 @@ _HTML = """<!DOCTYPE html>
             strategyBits.join("<br/>") +
             "</div>";
 
-          var ms = st.mode_strategies || {};
-          var activeKind = st.active_mode_kind || "none";
+          var ctl = st.indicator_controls || {};
+          document.getElementById("controls").innerHTML = [
+            '<label><input id="ctl-momentum" type="checkbox" ' + (ctl.momentum ? "checked" : "") + '> Price momentum</label>',
+            '<label><input id="ctl-vwap" type="checkbox" ' + (ctl.vwap_deviation ? "checked" : "") + '> VWAP deviation</label>',
+            '<label><input id="ctl-zscore" type="checkbox" ' + (ctl.zscore ? "checked" : "") + '> z-score</label>',
+          ].join("<br/>");
 
-          function modeNameForDisplay(rawName, key) {
-            var n = rawName ? String(rawName) : "";
-            if (key === "late_entry_mode") {
-              if (/^mode_\d+s$/.test(n)) return n;
-              return "mode_unknown";
-            }
-            return "volume_eval_mode";
+          var cm = document.getElementById("ctl-momentum");
+          var cv = document.getElementById("ctl-vwap");
+          var cz = document.getElementById("ctl-zscore");
+          if (cm) cm.onchange = applyControls;
+          if (cv) cv.onchange = applyControls;
+          if (cz) cz.onchange = applyControls;
+
+          var w = st.window_checks || {};
+          var w5 = w.s5 || {};
+          var w15 = w.s15 || {};
+          function line(label, item) {
+            return label + ": M=" + boolHtml(item.momentum_ok) +
+              " D=" + boolHtml(item.vwap_deviation_ok) +
+              " Z=" + boolHtml(item.zscore_ok) +
+              " ALL=" + boolHtml(item.all_ok) +
+              " | mom=" + (item.momentum_pct != null ? numFmt(item.momentum_pct, 2) + "%" : "\u2014") +
+              " dev=" + (item.deviation_pct != null ? numFmt(item.deviation_pct, 2) + "%" : "\u2014") +
+              " z=" + (item.zscore != null ? numFmt(item.zscore, 2) : "\u2014");
           }
-
-          function renderModeStrategy(panelId, title, key) {
-            var panel = document.getElementById(panelId);
-            if (!panel) return;
-            var m = ms[key];
-            if (!m) {
-              panel.innerHTML = esc(title + ": unavailable");
-              return;
-            }
-            var lines = [];
-            lines.push("Active now: " + (m.active ? "YES" : "NO"));
-            lines.push("Selected: " + (activeKind === key ? "YES" : "NO"));
-            lines.push("Mode: " + modeNameForDisplay(m.name, key));
-            if (key === "volume_eval_mode") {
-              var entryType = m.entry_type ? String(m.entry_type) : "Entry 1 MinVol";
-              var entryMinDiff = (m.entry_min_current_volume_diff != null)
-                ? numFmt(Number(m.entry_min_current_volume_diff), 0)
-                : numFmt(minCurrDiffVal, 0);
-              lines.push("Entry type: " + esc(entryType) + " (>= " + esc(entryMinDiff) + ")");
-            }
-            if (!m.configured) {
-              lines.push("Status: disabled");
-              panel.innerHTML = lines.join("<br/>");
-              return;
-            }
-            if (!m.active) {
-              lines.push("Status: configured, inactive");
-              panel.innerHTML = lines.join("<br/>");
-              return;
-            }
-            var checks = m.checks || {};
-            lines.push("Status: " + (m.ready ? "READY" : "WAIT"));
-            lines.push(
-              "Checks: " +
-              "P=" + okWait(checks.price) +
-              " B=" + okWait(checks.btc_buffer) +
-              " Vol=" + (m.volume_gate_enabled ? okWait(checks.volume) : "OFF")
-            );
-            lines.push(
-              "Config: " +
-              "win=" + esc(numFmt(m.window_sec || 0, 0)) + "s" +
-              " range=" + esc(numFmt(m.min_price || 0, 3)) + "-" + esc(numFmt(m.max_price || 1, 3)) +
-              " minC=" + esc(String(m.min_contracts != null ? m.min_contracts : "-")) +
-              " xBuf=" + esc(numFmt(m.buffer_avg_multiplier || 1, 2))
-            );
-            if (key === "volume_eval_mode") {
-              var evalDiffState = "-";
-              if (currDiffVal !== null && minCurrDiffVal !== null) evalDiffState = (currDiffVal >= minCurrDiffVal) ? "OK" : "WAIT";
-              lines.push(
-                "Vol curr diff: " +
-                esc(numFmt(currDiffVal, 0)) +
-                " vs min " +
-                esc(numFmt(minCurrDiffVal, 0)) +
-                " (" + evalDiffState + ")"
-              );
-            }
-            panel.innerHTML = lines.join("<br/>");
+          document.getElementById("checks").innerHTML = [
+            line("5s", w5),
+            line("15s", w15),
+          ].join("<br/>");
+          function book(x, id) {
+            var el = document.getElementById(id);
+            if (!x) { el.textContent = "No data"; return; }
+            var bk = x.book || {};
+            var ind = x.indicators || {};
+            el.innerHTML = [
+              "Last " + esc(bk.last_price),
+              "Bid " + esc(bk.best_bid) + " / Ask " + esc(bk.best_ask),
+              "PM VWAP " + numFmt(ind.pm_vwap, 4) +
+                " \u00b7 BTC VWAP " + (ind.btc_vwap_weighted != null ? numFmt(ind.btc_vwap_weighted, 4) : "\u2014"),
+              "Dev " + (ind.deviation_pct != null ? numFmt(ind.deviation_pct, 2) + "%" : "\u2014") +
+                " \u00b7 BTC Vol Bias " + (ind.btc_vol_ratio != null ? numFmt(ind.btc_vol_ratio, 1) + "%" : "\u2014"),
+              "Z " + numFmt(ind.zscore, 2) +
+                " \u00b7 Mom " + (ind.momentum_pct != null ? numFmt(ind.momentum_pct, 2) + "%" : "\u2014"),
+              "Vol " + (bk.volume_total != null ? esc(Math.round(bk.volume_total)) : "\u2014"),
+            ].join("<br/>");
           }
-
-          renderModeStrategy("volumeEvalStrategy", "Volume Eval", "volume_eval_mode");
-          renderModeStrategy("lateEntryStrategy", "Late Entry", "late_entry_mode");
-
+          book(d.up, "up");
+          book(d.down, "down");
           var b = d.btc || {};
           var btcEl = document.getElementById("btc");
-          if ((b.btc_connected && b.btc_current_price > 0) || (b.binance_connected && b.binance_current_price > 0)) {
-            var sourceMap = {
-              "official_ptb": "official PTB",
-              "fallback_tick": "fallback tick",
-              "feed_tick": "feed tick",
-              "none": "pending"
-            };
-            var marketAnchorSource = sourceMap[b.btc_market_anchor_source] || (b.btc_market_anchor_source || "pending");
-            var selectedFeed = b.btc_feed_source || "chainlink";
-            var chainlinkLabel = selectedFeed === "chainlink" ? "Selected feed (Polymarket RTDS)" : "Polymarket RTDS";
-            var binanceLabel = selectedFeed === "binance" ? "Selected feed (Binance)" : "Binance";
-            var chainlinkPrice = (b.btc_current_price > 0) ? ("$" + esc(numFmt(b.btc_current_price, 2))) : "\u2014";
-            var binancePrice = (b.binance_current_price > 0) ? ("$" + esc(numFmt(b.binance_current_price, 2))) : "\u2014";
-            var chainlinkFeedLine = chainlinkLabel + ": " + chainlinkPrice +
-              " | " + (b.btc_connected ? "ok" : "off") +
-              (b.fresh_sec != null ? " \u00b7 " + Math.floor(b.fresh_sec) + "s" : "");
-            var binanceFeedLine = binanceLabel + ": " + binancePrice +
-              " | " + (b.binance_connected ? "ok" : "off") +
-              (b.binance_fresh_sec != null ? " \u00b7 " + Math.floor(b.binance_fresh_sec) + "s" : "");
+          if (b.btc_current_price > 0) {
             var btcBits = [
-              chainlinkFeedLine,
-              binanceFeedLine,
+              "$" + esc(numFmt(b.btc_current_price, 2)),
               "Anchor $" + (b.btc_anchor_price > 0 ? esc(numFmt(b.btc_anchor_price, 2)) : "\u2014"),
-              "Market Anchor $" + (b.btc_market_anchor_price > 0 ? esc(numFmt(b.btc_market_anchor_price, 2)) : "\u2014") + " (" + esc(marketAnchorSource) + ")",
               esc(b.deviation_line || ""),
             ];
             if (b.buffer_avg_abs_usd != null || b.buffer_avg_abs_pct != null) {
@@ -758,21 +211,7 @@ _HTML = """<!DOCTYPE html>
               for (var wi = 0; wi < b.buffer_windows.length; wi++) {
                 var w = b.buffer_windows[wi];
                 var wt = w.window_ts ? new Date(w.window_ts * 1000).toISOString().substr(11, 8) : "?";
-                var windowUsd = (w.signed_usd != null) ? w.signed_usd : w.abs_usd;
-                var windowPct = (w.signed_pct != null) ? w.signed_pct : w.abs_pct;
-                btcBits.push(esc(wt) + " $" + esc(numFmtSigned(windowUsd, 2)) + " (" + esc(numFmtSigned(windowPct, 4)) + "%)");
-              }
-            }
-            if (b.btc_anchor_history && b.btc_anchor_history.length) {
-              btcBits.push("\u2014 recent BTC / anchor \u2014");
-              for (var hi = b.btc_anchor_history.length - 1; hi >= 0; hi--) {
-                var h = b.btc_anchor_history[hi];
-                var ht = h.window_ts ? new Date(h.window_ts * 1000).toISOString().substr(11, 8) : (h.ts ? new Date(h.ts * 1000).toISOString().substr(11, 8) : "?");
-                btcBits.push(
-                  esc(ht) +
-                  " BTC $" + esc(numFmt(h.btc_price, 2)) +
-                  " | A $" + esc(numFmt(h.anchor_price, 2))
-                );
+                btcBits.push(esc(wt) + " $" + esc(numFmt(w.abs_usd, 2)) + " (" + esc(numFmt(w.abs_pct, 4)) + "%)");
               }
             }
             btcBits.push(
@@ -784,56 +223,23 @@ _HTML = """<!DOCTYPE html>
             ];
             btcEl.innerHTML = btcBits.join("<br/>");
           } else {
-            btcEl.textContent = "Waiting for BTC feeds\u2026";
+            btcEl.textContent = "Waiting for Chainlink\u2026";
           }
-          
           var tr = d.trading || {};
-
           var tHtml = "Markets " + esc(tr.markets_seen) + " \u00b7 Trades " + esc(tr.trade_count) +
-            " \u00b7 Vol(" + esc(volumeBasis.toUpperCase()) + ") " + esc(Math.round(sessionTotalVolume)) +
-            " \u00b7 PnL $" + (tr.total_pnl != null ? numFmtSigned(tr.total_pnl, 2) : "\u2014") + "<br/>";
-          if (tr.win_rate_by_mode) {
-            var modeWrParts = [];
-            var modeMap = tr.win_rate_by_mode;
-            var handledModes = {};
-            var modeOrder = ["normal", "manual", "volume_eval_mode", "mode_70s", "mode_60s", "mode_40s", "mode_30s", "mode_20s", "unknown"];
-
-            function pushModeLine(modeKey) {
-              if (!Object.prototype.hasOwnProperty.call(modeMap, modeKey)) return;
-              handledModes[modeKey] = true;
-              var ms = modeMap[modeKey] || {};
-              var mw = (ms.win_rate_pct != null && typeof ms.win_rate_pct === "number" && !isNaN(ms.win_rate_pct)) ? numFmt(ms.win_rate_pct, 1) + "%" : "\u2014";
-              var mt = (ms.trade_count != null) ? String(ms.trade_count) : "0";
-              var mp = (ms.total_pnl_usd != null && typeof ms.total_pnl_usd === "number" && !isNaN(ms.total_pnl_usd)) ? ("$" + numFmtSigned(ms.total_pnl_usd, 2)) : "$\u2014";
-              modeWrParts.push(esc(modeKey) + " WR " + esc(mw) + " | PnL " + esc(mp) + " (" + esc(mt) + ")");
-            }
-
-            for (var mo = 0; mo < modeOrder.length; mo++) {
-              pushModeLine(modeOrder[mo]);
-            }
-            for (var mk in modeMap) {
-              if (!Object.prototype.hasOwnProperty.call(modeMap, mk)) continue;
-              if (handledModes[mk]) continue;
-              pushModeLine(mk);
-            }
-            if (modeWrParts.length) {
-              tHtml += "By mode:<br/>" + modeWrParts.join("<br/>") + "<br/>";
-            }
-          }
+            " \u00b7 PnL $" + (tr.total_pnl != null ? numFmt(tr.total_pnl, 2) : "\u2014") + "<br/>";
           if (tr.position) {
             var p = tr.position;
             tHtml += "LONG " + esc(p.token_name) + " @ " + esc(p.entry_price) +
               " \u00d7" + esc(p.contracts) + (p.hedged ? " hedged" : "") + "<br/>";
-            tHtml += "Unreal $" + (p.unrealized_pnl != null ? numFmtSigned(p.unrealized_pnl, 2) : "\u2014") + "<br/>";
+            tHtml += "Unreal $" + (p.unrealized_pnl != null ? numFmt(p.unrealized_pnl, 2) : "\u2014") + "<br/>";
           } else {
             tHtml += "No open position<br/>";
           }
           if (tr.recent_trades && tr.recent_trades.length) {
             var lines = [];
             for (var i = 0; i < tr.recent_trades.length; i++) {
-              var rt = tr.recent_trades[i] || {};
-              var modeTag = rt.entry_mode ? (" [" + rt.entry_mode + "]") : "";
-              lines.push(esc((rt.line || "") + modeTag));
+              lines.push(esc(tr.recent_trades[i].line));
             }
             tHtml += "<br/>Recent:<br/>" + lines.join("<br/>");
           }
@@ -841,33 +247,14 @@ _HTML = """<!DOCTYPE html>
         } catch (e) {
           errEl.textContent = "Poll error: " + (e && e.message ? e.message : e);
         }
-        var targetIntervalMs = document.hidden ? 5000 : 1000;
-        var elapsedMs = Date.now() - pollStartedAt;
-        var nextDelayMs = Math.max(100, targetIntervalMs - elapsedMs);
-        scheduleTick(nextDelayMs);
+      };
+      r.onerror = function () {
+        errEl.textContent = "Network error (is the bot running?)";
       };
       r.send();
     }
-
-    document.addEventListener("visibilitychange", function () {
-      if (!document.hidden) {
-        maybeReloadControlPanels(false);
-        scheduleTick(0);
-      }
-    });
-
-    window.addEventListener("pageshow", function () {
-      maybeReloadControlPanels(true);
-      scheduleTick(0);
-    });
-
-    window.addEventListener("focus", function () {
-      maybeReloadControlPanels(false);
-      scheduleTick(0);
-    });
-
-    maybeReloadControlPanels(true);
-    scheduleTick(0);
+    tick();
+    setInterval(tick, 1000);
   </script>
 </body>
 </html>
@@ -915,14 +302,17 @@ class WebSnapshotHolder:
 
 def build_app(
   holder: WebSnapshotHolder,
+  *,
+  get_indicator_controls: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_indicator_controls: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_accel_check: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> FastAPI:
     app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
@@ -939,79 +329,71 @@ def build_app(
     async def api_state():
         return JSONResponse(_sanitize_for_json(holder.get()))
 
+    @app.get("/api/indicator-controls")
+    async def api_get_indicator_controls():
+      if not get_indicator_controls:
+        return JSONResponse({"momentum": True, "vwap_deviation": True, "zscore": True})
+      return JSONResponse(_sanitize_for_json(get_indicator_controls()))
+
+    @app.post("/api/indicator-controls")
+    async def api_update_indicator_controls(payload: Dict[str, Any] = Body(default={})):
+      if not update_indicator_controls:
+        return JSONResponse(_sanitize_for_json(payload or {}))
+      return JSONResponse(_sanitize_for_json(update_indicator_controls(payload or {})))
+
     @app.get("/api/late-modes")
-    async def api_late_modes_get():
+    async def api_get_late_modes():
       if not get_late_modes:
-        return JSONResponse({"error": "Late mode controls unavailable"}, status_code=501)
+        return JSONResponse({"enabled": False, "modes": []})
       return JSONResponse(_sanitize_for_json(get_late_modes()))
 
     @app.post("/api/late-modes")
-    async def api_late_modes_post(req: Request):
+    async def api_update_late_modes(payload: Dict[str, Any] = Body(default={})):
       if not update_late_modes:
-        return JSONResponse({"error": "Late mode controls unavailable"}, status_code=501)
-      payload = await req.json()
-      updated = update_late_modes(payload if isinstance(payload, dict) else {})
-      return JSONResponse(_sanitize_for_json(updated))
-
-    @app.get("/api/timer-alert")
-    async def api_timer_alert_get():
-      if not get_timer_alert:
-        return JSONResponse({"error": "Timer alert controls unavailable"}, status_code=501)
-      return JSONResponse(_sanitize_for_json(get_timer_alert()))
-
-    @app.post("/api/timer-alert")
-    async def api_timer_alert_post(req: Request):
-      if not update_timer_alert:
-        return JSONResponse({"error": "Timer alert controls unavailable"}, status_code=501)
-      payload = await req.json()
-      updated = update_timer_alert(payload if isinstance(payload, dict) else {})
-      return JSONResponse(_sanitize_for_json(updated))
+        return JSONResponse(_sanitize_for_json(payload or {}))
+      return JSONResponse(_sanitize_for_json(update_late_modes(payload or {})))
 
     @app.get("/api/volume-accel-check")
-    async def api_volume_accel_check_get():
+    async def api_get_volume_accel_check():
       if not get_volume_accel_check:
-        return JSONResponse({"error": "Volume accel check controls unavailable"}, status_code=501)
+        return JSONResponse({"min_current_volume_diff": 0.0, "min_accel_diff": 0.0, "volume_basis": "total"})
       return JSONResponse(_sanitize_for_json(get_volume_accel_check()))
 
     @app.post("/api/volume-accel-check")
-    async def api_volume_accel_check_post(req: Request):
+    async def api_update_volume_accel_check(payload: Dict[str, Any] = Body(default={})):
       if not update_volume_accel_check:
-        return JSONResponse({"error": "Volume accel check controls unavailable"}, status_code=501)
-      payload = await req.json()
-      updated = update_volume_accel_check(payload if isinstance(payload, dict) else {})
-      return JSONResponse(_sanitize_for_json(updated))
+        return JSONResponse(_sanitize_for_json(payload or {}))
+      return JSONResponse(_sanitize_for_json(update_volume_accel_check(payload or {})))
 
     @app.get("/api/volume-eval-mode")
-    async def api_volume_eval_mode_get():
+    async def api_get_volume_eval_mode():
       if not get_volume_eval_mode:
-        return JSONResponse({"error": "Volume eval mode controls unavailable"}, status_code=501)
+        return JSONResponse({"enabled": False})
       return JSONResponse(_sanitize_for_json(get_volume_eval_mode()))
 
     @app.post("/api/volume-eval-mode")
-    async def api_volume_eval_mode_post(req: Request):
+    async def api_update_volume_eval_mode(payload: Dict[str, Any] = Body(default={})):
       if not update_volume_eval_mode:
-        return JSONResponse({"error": "Volume eval mode controls unavailable"}, status_code=501)
-      payload = await req.json()
-      updated = update_volume_eval_mode(payload if isinstance(payload, dict) else {})
-      return JSONResponse(_sanitize_for_json(updated))
+        return JSONResponse(_sanitize_for_json(payload or {}))
+      return JSONResponse(_sanitize_for_json(update_volume_eval_mode(payload or {})))
+
+    @app.get("/api/timer-alert")
+    async def api_get_timer_alert():
+      if not get_timer_alert:
+        return JSONResponse({"enabled": False})
+      return JSONResponse(_sanitize_for_json(get_timer_alert()))
+
+    @app.post("/api/timer-alert")
+    async def api_update_timer_alert(payload: Dict[str, Any] = Body(default={})):
+      if not update_timer_alert:
+        return JSONResponse(_sanitize_for_json(payload or {}))
+      return JSONResponse(_sanitize_for_json(update_timer_alert(payload or {})))
 
     @app.post("/api/manual-buy")
-    async def api_manual_buy(req: Request):
+    async def api_manual_buy(payload: Dict[str, Any] = Body(default={})):
       if not trigger_manual_buy:
-        return JSONResponse({"error": "Manual buy unavailable"}, status_code=501)
-      payload: Dict[str, Any] = {}
-      try:
-        parsed = await req.json()
-        if isinstance(parsed, dict):
-          payload = parsed
-      except Exception:
-        payload = {}
-      result = trigger_manual_buy(payload)
-      if not isinstance(result, dict):
-        return JSONResponse({"error": "Manual buy failed"}, status_code=500)
-      if result.get("ok"):
-        return JSONResponse(_sanitize_for_json(result))
-      return JSONResponse(_sanitize_for_json(result), status_code=400)
+        return JSONResponse({"ok": False, "error": "Manual buy is not enabled"})
+      return JSONResponse(_sanitize_for_json(trigger_manual_buy(payload or {})))
 
     return app
 
@@ -1029,14 +411,17 @@ def start_web_dashboard(
   host: str,
   port: int,
   holder: WebSnapshotHolder,
+  *,
+  get_indicator_controls: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_indicator_controls: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
   update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_accel_check: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> bool:
     """
@@ -1044,16 +429,18 @@ def start_web_dashboard(
     shortly after start (False if bind failed or port is in use).
     """
     app = build_app(
-        holder,
-        get_late_modes=get_late_modes,
-        update_late_modes=update_late_modes,
+      holder,
+      get_indicator_controls=get_indicator_controls,
+      update_indicator_controls=update_indicator_controls,
+      get_late_modes=get_late_modes,
+      update_late_modes=update_late_modes,
+      get_volume_accel_check=get_volume_accel_check,
+      update_volume_accel_check=update_volume_accel_check,
+      get_volume_eval_mode=get_volume_eval_mode,
+      update_volume_eval_mode=update_volume_eval_mode,
       get_timer_alert=get_timer_alert,
       update_timer_alert=update_timer_alert,
-        get_volume_accel_check=get_volume_accel_check,
-        update_volume_accel_check=update_volume_accel_check,
-        get_volume_eval_mode=get_volume_eval_mode,
-        update_volume_eval_mode=update_volume_eval_mode,
-        trigger_manual_buy=trigger_manual_buy,
+      trigger_manual_buy=trigger_manual_buy,
     )
 
     def run() -> None:
