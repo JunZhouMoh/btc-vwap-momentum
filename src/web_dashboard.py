@@ -5,18 +5,18 @@ Runs in a daemon thread; state is updated from the bot's main loop.
 
 from __future__ import annotations
 
-import logging
 import math
+import logging
 import socket
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
+import uvicorn
 from fastapi import Body, FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-import uvicorn
 
-logger = logging.getLogger("btc_live")
+logger = logging.getLogger("web_dashboard")
 
 _HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -25,20 +25,24 @@ _HTML = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>BTC Live Bot</title>
   <style>
-    :root {
-      --bg: #0d1117; --panel: #161b22; --border: #30363d;
-      --text: #e6edf3; --muted: #8b949e; --green: #3fb950; --red: #f85149;
-      --yellow: #d29922; --blue: #58a6ff; --violet: #a371f7;
-    }
+    :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --text:#e6edf3; --muted:#8b949e; --green:#3fb950; --red:#f85149; --yellow:#d29922; --blue:#58a6ff; }
     * { box-sizing: border-box; }
-    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text);
-      margin: 0; padding: 1rem; line-height: 1.45; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 1rem; line-height: 1.45; }
     h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 0.75rem; }
     .meta { color: var(--muted); font-size: 0.85rem; margin-bottom: 1rem; }
     .grid { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.85rem; }
-    .card h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
-      margin: 0 0 0.5rem; }
+    .card h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 0.5rem; }
+    .controls .row { margin-bottom: 0.35rem; align-items: center; }
+    .controls label { min-width: 105px; color: var(--muted); font-size: 0.8rem; }
+    .controls input[type="number"] { width: 86px; background: #0d1117; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 0.25rem 0.35rem; }
+    .controls input[type="checkbox"] { transform: scale(1.05); }
+    .mode-grid { display: grid; gap: 0.55rem; }
+    .mode-box { border: 1px solid var(--border); border-radius: 8px; padding: 0.55rem; }
+    .mode-title { color: var(--blue); font-size: 0.8rem; margin-bottom: 0.35rem; }
+    .btn { background: #1f6feb; color: #fff; border: 0; border-radius: 7px; padding: 0.35rem 0.6rem; cursor: pointer; font-size: 0.8rem; }
+    .btn.secondary { background: #30363d; }
+    .status { color: var(--muted); font-size: 0.78rem; }
     .row { display: flex; justify-content: space-between; gap: 0.5rem; font-size: 0.9rem; }
     .sig { font-size: 1rem; font-weight: 600; }
     .sig.wait { color: var(--yellow); }
@@ -51,11 +55,11 @@ _HTML = """<!DOCTYPE html>
 </head>
 <body>
   <h1>BTC up/down — live</h1>
-  <div class="meta" id="meta">Loading…</div>
+  <div class="meta" id="meta">Loading...</div>
   <div class="grid">
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
-    <div class="card"><h2>Volume + Late Entry</h2><div id="modepanel" class="mono"></div></div>
+    <div class="card controls"><h2>Volume + Late Entry</h2><div id="modepanel" class="mono">Loading...</div></div>
     <div class="card"><h2>Indicator Controls</h2><div id="controls" class="mono"></div></div>
     <div class="card"><h2>5s / 15s Checks</h2><div id="checks" class="mono"></div></div>
     <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
@@ -65,329 +69,158 @@ _HTML = """<!DOCTYPE html>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
   <script>
-    /* No optional chaining (?.) — must run in older browsers / Edge legacy. */
-    function esc(s) {
-      if (s === null || s === undefined) return "";
-      var el = document.createElement("div");
-      el.textContent = String(s);
-      return el.innerHTML;
-    }
-    function sigClass(t) {
-      if (!t) return "wait";
-      if (t.indexOf("BUY") >= 0) return "buy";
-      /* Do not use \\uD83D\\uDEAB here: Python treats \\u.... in the template as escapes and emits invalid UTF-8 surrogates. */
-      if (t.indexOf("NO ENTRY") >= 0) return "block";
-      return "wait";
-    }
-    function numFmt(n, dec) {
-      if (n === null || n === undefined || typeof n !== "number" || isNaN(n)) return "\u2014";
-      return n.toFixed(dec);
+    function esc(s){ if(s===null||s===undefined) return ''; var el=document.createElement('div'); el.textContent=String(s); return el.innerHTML; }
+    function sigClass(t){ if(!t) return 'wait'; if(t.indexOf('BUY')>=0) return 'buy'; if(t.indexOf('NO ENTRY')>=0) return 'block'; return 'wait'; }
+    function numFmt(n,d){ if(n===null||n===undefined||typeof n!=='number'||isNaN(n)) return '\u2014'; return n.toFixed(d); }
+    function boolHtml(v){ if(v===true) return '\u2713'; if(v===false) return '\u2717'; return '\u2014'; }
+    function readNum(id,f){ var el=document.getElementById(id); if(!el) return f; var v=parseFloat(el.value); return isNaN(v)?f:v; }
+    function readInt(id,f){ var el=document.getElementById(id); if(!el) return f; var v=parseInt(el.value,10); return isNaN(v)?f:v; }
+    function requestJson(method,url,payload,onDone){ var r=new XMLHttpRequest(); r.open(method,url,true); if(payload!==null&&payload!==undefined){ r.setRequestHeader('Content-Type','application/json'); } r.onreadystatechange=function(){ if(r.readyState!==4) return; if(r.status<200||r.status>=300) return; try{ var d=JSON.parse(r.responseText); if(onDone) onDone(d);}catch(e){} }; r.send(payload!==null&&payload!==undefined?JSON.stringify(payload):null); }
+
+    var modeCfg={late:null,volEval:null,volAccel:null};
+
+    function buildLateModeEditor(mode){
+      var k=mode.key, h=[];
+      h.push('<div class="mode-box">');
+      h.push('<div class="mode-title">'+esc(k)+'</div>');
+      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="'+esc(k)+'_enabled" '+(mode.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Time Left</label><input type="number" id="'+esc(k)+'_time_left_sec" step="1" value="'+esc(mode.time_left_sec)+'"/></div>');
+      h.push('<div class="row"><label>Min Contracts</label><input type="number" id="'+esc(k)+'_min_contracts" step="1" value="'+esc(mode.min_contracts)+'"/></div>');
+      h.push('<div class="row"><label>Max Trades</label><input type="number" id="'+esc(k)+'_max_trades" step="1" value="'+esc(mode.max_trades)+'"/></div>');
+      h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="'+esc(k)+'_buffer_avg_multiplier" step="0.01" value="'+esc(mode.buffer_avg_multiplier)+'"/></div>');
+      h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="'+esc(k)+'_min_buffer_threshold_usd" step="0.1" value="'+esc(mode.min_buffer_threshold_usd)+'"/></div>');
+      h.push('<div class="row"><label>Min Price</label><input type="number" id="'+esc(k)+'_min_price" step="0.001" value="'+esc(mode.min_price)+'"/></div>');
+      h.push('<div class="row"><label>Max Price</label><input type="number" id="'+esc(k)+'_max_price" step="0.001" value="'+esc(mode.max_price)+'"/></div>');
+      h.push('</div>');
+      return h.join('');
     }
 
-    function boolHtml(v) {
-      if (v === true) return "\u2713";
-      if (v === false) return "\u2717";
-      return "\u2014";
+    function renderModePanelConfig(){
+      var box=document.getElementById('modepanel'); if(!box) return;
+      var ve=modeCfg.volEval||{}, lm=modeCfg.late||{}, va=modeCfg.volAccel||{};
+      if(!lm||!lm.modes){ box.textContent='Mode config unavailable'; return; }
+      var h=[];
+      h.push('<div class="row"><label>Late Enabled</label><input type="checkbox" id="late_enabled" '+(lm.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="'+esc(lm.total_max_trades!=null?lm.total_max_trades:1)+'"/></div>');
+      h.push('<div class="mode-grid">');
+      for(var i=0;i<lm.modes.length;i++){ h.push(buildLateModeEditor(lm.modes[i]||{})); }
+      h.push('</div>');
+      h.push('<div class="mode-box"><div class="mode-title">volume_eval_mode</div>');
+      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="ve_enabled" '+(ve.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Time Left</label><input type="number" id="ve_time_left_sec" step="1" value="'+esc(ve.time_left_sec!=null?ve.time_left_sec:0)+'"/></div>');
+      h.push('<div class="row"><label>Min Contracts</label><input type="number" id="ve_min_contracts" step="1" value="'+esc(ve.min_contracts!=null?ve.min_contracts:1)+'"/></div>');
+      h.push('<div class="row"><label>Max Trades</label><input type="number" id="ve_max_trades" step="1" value="'+esc(ve.max_trades!=null?ve.max_trades:1)+'"/></div>');
+      h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="ve_buffer_avg_multiplier" step="0.01" value="'+esc(ve.buffer_avg_multiplier!=null?ve.buffer_avg_multiplier:1.0)+'"/></div>');
+      h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="ve_min_buffer_threshold_usd" step="0.1" value="'+esc(ve.min_buffer_threshold_usd!=null?ve.min_buffer_threshold_usd:0.0)+'"/></div>');
+      h.push('<div class="row"><label>Vol Gate</label><input type="checkbox" id="ve_volume_check_enabled" '+(ve.volume_check_enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Min Price</label><input type="number" id="ve_min_price" step="0.001" value="'+esc(ve.min_price!=null?ve.min_price:0.0)+'"/></div>');
+      h.push('<div class="row"><label>Max Price</label><input type="number" id="ve_max_price" step="0.001" value="'+esc(ve.max_price!=null?ve.max_price:1.0)+'"/></div>');
+      h.push('</div>');
+      h.push('<div class="mode-box"><div class="mode-title">volume_accel_check</div>');
+      h.push('<div class="row"><label>Min Curr Diff</label><input type="number" id="va_min_current_volume_diff" step="1" value="'+esc(va.min_current_volume_diff!=null?va.min_current_volume_diff:0.0)+'"/></div>');
+      h.push('<div class="row"><label>Min Accel Diff</label><input type="number" id="va_min_accel_diff" step="1" value="'+esc(va.min_accel_diff!=null?va.min_accel_diff:0.0)+'"/></div>');
+      h.push('<div class="row"><label>Volume Basis</label><select id="va_volume_basis"><option value="total"'+(va.volume_basis==='total'?' selected':'')+'>total</option><option value="buy"'+(va.volume_basis==='buy'?' selected':'')+'>buy</option></select></div>');
+      h.push('</div>');
+      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveModePanelConfig()">Apply</button><button class="btn secondary" onclick="loadModePanelConfig()">Reload</button></div>');
+      h.push('<div id="modeStatus" class="status"></div>');
+      box.innerHTML=h.join('<br/>');
     }
 
-    var modeCfg = {
-      late: null,
-      volEval: null,
-      volAccel: null,
-      lastFetchTs: 0,
-    };
-
-    function requestJson(method, url, payload, onDone) {
-      var r = new XMLHttpRequest();
-      r.open(method, url, true);
-      if (payload !== null && payload !== undefined) {
-        r.setRequestHeader("Content-Type", "application/json");
-      }
-      r.onreadystatechange = function () {
-        if (r.readyState !== 4) return;
-        if (r.status < 200 || r.status >= 300) return;
-        try {
-          var d = JSON.parse(r.responseText);
-          if (onDone) onDone(d);
-        } catch (e) {
-          /* no-op */
-        }
-      };
-      r.send(payload !== null && payload !== undefined ? JSON.stringify(payload) : null);
-    }
-
-    function refreshModeConfig() {
-      requestJson("GET", "/api/late-modes", null, function (d) { modeCfg.late = d || {}; });
-      requestJson("GET", "/api/volume-eval-mode", null, function (d) { modeCfg.volEval = d || {}; });
-      requestJson("GET", "/api/volume-accel-check", null, function (d) { modeCfg.volAccel = d || {}; });
-      modeCfg.lastFetchTs = Date.now();
-    }
-
-    function applyVolEval() {
-      var cfg = modeCfg.volEval || {};
-      var payload = {
-        enabled: !!document.getElementById("ve-enabled").checked,
-        time_left_sec: Number(document.getElementById("ve-time-left").value || cfg.time_left_sec || 0),
-        min_contracts: Number(document.getElementById("ve-min-contracts").value || cfg.min_contracts || 1),
-        max_trades: Number(document.getElementById("ve-max-trades").value || cfg.max_trades || 1),
-        min_price: Number(document.getElementById("ve-min-price").value || cfg.min_price || 0),
-        max_price: Number(document.getElementById("ve-max-price").value || cfg.max_price || 1),
-        volume_check_enabled: !!document.getElementById("ve-vol-check").checked,
-      };
-      requestJson("POST", "/api/volume-eval-mode", payload, function (d) {
-        modeCfg.volEval = d || payload;
+    function loadModePanelConfig(){
+      requestJson('GET','/api/late-modes',null,function(late){
+        modeCfg.late=late||{};
+        requestJson('GET','/api/volume-eval-mode',null,function(ve){
+          modeCfg.volEval=ve||{};
+          requestJson('GET','/api/volume-accel-check',null,function(va){ modeCfg.volAccel=va||{}; renderModePanelConfig(); });
+        });
       });
     }
 
-    function applyLateModes() {
-      var cfg = modeCfg.late || {};
-      var payload = {
-        enabled: !!document.getElementById("lm-enabled").checked,
-        total_max_trades: Number(document.getElementById("lm-total-max").value || cfg.total_max_trades || 1),
-        modes: (cfg.modes || []),
-      };
-      requestJson("POST", "/api/late-modes", payload, function (d) {
-        modeCfg.late = d || payload;
+    function saveModePanelConfig(){
+      var status=document.getElementById('modeStatus'); if(status) status.textContent='Applying...';
+      var late=modeCfg.late||{}, lateModes=[], src=late.modes||[];
+      for(var i=0;i<src.length;i++){
+        var m=src[i]||{}, k=String(m.key||('mode_'+i));
+        lateModes.push({ key:k, enabled:!!(document.getElementById(k+'_enabled')&&document.getElementById(k+'_enabled').checked), time_left_sec:readInt(k+'_time_left_sec',m.time_left_sec||0), min_contracts:readInt(k+'_min_contracts',m.min_contracts||1), max_trades:readInt(k+'_max_trades',m.max_trades||1), buffer_avg_multiplier:readNum(k+'_buffer_avg_multiplier',m.buffer_avg_multiplier||1.0), min_buffer_threshold_usd:readNum(k+'_min_buffer_threshold_usd',m.min_buffer_threshold_usd||0.0), min_price:readNum(k+'_min_price',m.min_price||0.0), max_price:readNum(k+'_max_price',m.max_price||1.0) });
+      }
+      var latePayload={ enabled:!!(document.getElementById('late_enabled')&&document.getElementById('late_enabled').checked), total_max_trades:readInt('late_total_max_trades',late.total_max_trades||1), modes:lateModes };
+      var ve=modeCfg.volEval||{};
+      var vePayload={ enabled:!!(document.getElementById('ve_enabled')&&document.getElementById('ve_enabled').checked), time_left_sec:readInt('ve_time_left_sec',ve.time_left_sec||0), min_contracts:readInt('ve_min_contracts',ve.min_contracts||1), max_trades:readInt('ve_max_trades',ve.max_trades||1), buffer_avg_multiplier:readNum('ve_buffer_avg_multiplier',ve.buffer_avg_multiplier||1.0), min_buffer_threshold_usd:readNum('ve_min_buffer_threshold_usd',ve.min_buffer_threshold_usd||0.0), volume_check_enabled:!!(document.getElementById('ve_volume_check_enabled')&&document.getElementById('ve_volume_check_enabled').checked), min_price:readNum('ve_min_price',ve.min_price||0.0), max_price:readNum('ve_max_price',ve.max_price||1.0) };
+      var va=modeCfg.volAccel||{}, basisEl=document.getElementById('va_volume_basis');
+      var vaPayload={ min_current_volume_diff:readNum('va_min_current_volume_diff',va.min_current_volume_diff||0.0), min_accel_diff:readNum('va_min_accel_diff',va.min_accel_diff||0.0), volume_basis:basisEl?String(basisEl.value||'total'):'total' };
+      requestJson('POST','/api/late-modes',latePayload,function(lateResp){
+        modeCfg.late=lateResp||latePayload;
+        requestJson('POST','/api/volume-eval-mode',vePayload,function(veResp){
+          modeCfg.volEval=veResp||vePayload;
+          requestJson('POST','/api/volume-accel-check',vaPayload,function(vaResp){ modeCfg.volAccel=vaResp||vaPayload; if(status) status.textContent='Applied'; renderModePanelConfig(); });
+        });
       });
     }
 
-    function applyVolAccel() {
-      var cfg = modeCfg.volAccel || {};
-      var basisEl = document.getElementById("va-basis");
-      var basis = basisEl ? String(basisEl.value || "total") : "total";
-      var payload = {
-        min_current_volume_diff: Number(document.getElementById("va-min-curr-diff").value || cfg.min_current_volume_diff || 0),
-        min_accel_diff: Number(document.getElementById("va-min-accel-diff").value || cfg.min_accel_diff || 0),
-        volume_basis: basis,
-      };
-      requestJson("POST", "/api/volume-accel-check", payload, function (d) {
-        modeCfg.volAccel = d || payload;
-      });
+    function applyControls(){
+      var payload={ momentum:!!document.getElementById('ctl-momentum').checked, vwap_deviation:!!document.getElementById('ctl-vwap').checked, zscore:!!document.getElementById('ctl-zscore').checked };
+      requestJson('POST','/api/indicator-controls',payload,function(){});
     }
 
-    function renderModePanel(st) {
-      var modeEl = document.getElementById("modepanel");
-      if (!modeEl) return;
+    function tick(){
+      var errEl=document.getElementById('err');
+      var r=new XMLHttpRequest();
+      r.open('GET','/api/state',true);
+      r.onreadystatechange=function(){
+        if(r.readyState!==4) return;
+        try{
+          if(r.status!==200) throw new Error('HTTP '+r.status);
+          var d=JSON.parse(r.responseText);
+          errEl.textContent='';
+          var hdr=d.header||{};
+          var slug=hdr.slug!=null?String(hdr.slug):'\u2014';
+          var ts='';
+          if(d.ts) ts=new Date(d.ts*1000).toISOString();
+          document.getElementById('meta').innerHTML=esc(slug)+' \u00b7 '+esc(ts);
+          document.getElementById('session').innerHTML=['Timer: '+(hdr.time_left_sec!=null?esc(Math.floor(hdr.time_left_sec)+'s left'):'\u2014'),'WS: '+(hdr.ws_connected?'live':'disconnected'),'Mode: '+(hdr.simulation?'simulation':'real')].join('<br/>');
 
-      var ms = st.mode_strategies || {};
-      var vms = ms.volume_eval_mode || {};
-      var lms = ms.late_entry_mode || {};
-      var vs = st.volume_speed || {};
-      var ve = modeCfg.volEval || {};
-      var lm = modeCfg.late || {};
-      var va = modeCfg.volAccel || {};
+          var st=d.strategy||{}, sig=st.signal_text||'\u2014';
+          function chk(x){ return x===true?'\u2713':x===false?'\u2717':'\u2014'; }
+          var ck=st.checks||{};
+          var strategyBits=['Fav: '+esc(st.favorite)+' \u00b7 WR: '+esc(st.win_rate_str),'Checks: P='+chk(ck.price)+' T='+chk(ck.time)+' D='+chk(ck.dev)+' M='+chk(ck.mom)+' Z='+chk(ck.zscore)+' B='+chk(ck.btc_buffer)+' cutoff='+chk(ck.time_cutoff)];
+          if(st.up_line) strategyBits.push('UP: '+esc(st.up_line));
+          if(st.down_line) strategyBits.push('DOWN: '+esc(st.down_line));
+          if(st.btc_buffer_line) strategyBits.push('BTC Buffer: '+esc(st.btc_buffer_line));
+          document.getElementById('strategy').innerHTML='<div class="sig '+sigClass(sig)+'">'+esc(sig)+'</div><div class="mono" style="margin-top:0.4rem">'+strategyBits.join('<br/>')+'</div>';
 
-      var modeLines = [];
-      modeLines.push("Active volume mode: " + (vms.active ? "ON" : "OFF") + " | Ready=" + boolHtml(vms.ready));
-      modeLines.push("Active late mode: " + (lms.active ? "ON" : "OFF") + " | Ready=" + boolHtml(lms.ready));
-      modeLines.push("Vol speed: " + boolHtml(vs.ok) + " | fav=" + (vs.favorite || "\u2014") + " | basis=" + (vs.volume_basis || "\u2014"));
-      modeLines.push("");
+          var ctl=st.indicator_controls||{};
+          document.getElementById('controls').innerHTML=['<label><input id="ctl-momentum" type="checkbox" '+(ctl.momentum?'checked':'')+'> Price momentum</label>','<label><input id="ctl-vwap" type="checkbox" '+(ctl.vwap_deviation?'checked':'')+'> VWAP deviation</label>','<label><input id="ctl-zscore" type="checkbox" '+(ctl.zscore?'checked':'')+'> z-score</label>'].join('<br/>');
+          var cm=document.getElementById('ctl-momentum'), cv=document.getElementById('ctl-vwap'), cz=document.getElementById('ctl-zscore');
+          if(cm) cm.onchange=applyControls; if(cv) cv.onchange=applyControls; if(cz) cz.onchange=applyControls;
 
-      modeLines.push('<label><input id="ve-enabled" type="checkbox" ' + (ve.enabled ? "checked" : "") + '> Volume eval enabled</label>');
-      modeLines.push('VE timeLeft: <input id="ve-time-left" type="number" value="' + esc(ve.time_left_sec != null ? ve.time_left_sec : 0) + '" style="width:68px">s');
-      modeLines.push('VE minC: <input id="ve-min-contracts" type="number" value="' + esc(ve.min_contracts != null ? ve.min_contracts : 1) + '" style="width:56px">');
-      modeLines.push('VE maxTrades: <input id="ve-max-trades" type="number" value="' + esc(ve.max_trades != null ? ve.max_trades : 1) + '" style="width:56px">');
-      modeLines.push('VE P: <input id="ve-min-price" type="number" step="0.001" value="' + esc(ve.min_price != null ? ve.min_price : 0) + '" style="width:70px"> - <input id="ve-max-price" type="number" step="0.001" value="' + esc(ve.max_price != null ? ve.max_price : 1) + '" style="width:70px">');
-      modeLines.push('<label><input id="ve-vol-check" type="checkbox" ' + (ve.volume_check_enabled ? "checked" : "") + '> VE volume gate</label>');
-      modeLines.push('<button id="ve-apply" type="button">Apply VE</button>');
-      modeLines.push("");
+          var w=st.window_checks||{}, w5=w.s5||{}, w15=w.s15||{};
+          function line(label,item){ return label+': M='+boolHtml(item.momentum_ok)+' D='+boolHtml(item.vwap_deviation_ok)+' Z='+boolHtml(item.zscore_ok)+' ALL='+boolHtml(item.all_ok)+' | mom='+(item.momentum_pct!=null?numFmt(item.momentum_pct,2)+'%':'\u2014')+' dev='+(item.deviation_pct!=null?numFmt(item.deviation_pct,2)+'%':'\u2014')+' z='+(item.zscore!=null?numFmt(item.zscore,2):'\u2014'); }
+          document.getElementById('checks').innerHTML=[line('5s',w5),line('15s',w15)].join('<br/>');
 
-      modeLines.push('<label><input id="lm-enabled" type="checkbox" ' + (lm.enabled ? "checked" : "") + '> Late modes enabled</label>');
-      modeLines.push('Late total max: <input id="lm-total-max" type="number" value="' + esc(lm.total_max_trades != null ? lm.total_max_trades : 1) + '" style="width:64px">');
-      modeLines.push('<button id="lm-apply" type="button">Apply Late</button>');
+          function book(x,id){ var el=document.getElementById(id); if(!x){ el.textContent='No data'; return; } var bk=x.book||{}, ind=x.indicators||{}; el.innerHTML=['Last '+esc(bk.last_price),'Bid '+esc(bk.best_bid)+' / Ask '+esc(bk.best_ask),'PM VWAP '+numFmt(ind.pm_vwap,4)+' \u00b7 BTC VWAP '+(ind.btc_vwap_weighted!=null?numFmt(ind.btc_vwap_weighted,4):'\u2014'),'Dev '+(ind.deviation_pct!=null?numFmt(ind.deviation_pct,2)+'%':'\u2014')+' \u00b7 BTC Vol Bias '+(ind.btc_vol_ratio!=null?numFmt(ind.btc_vol_ratio,1)+'%':'\u2014'),'Z '+numFmt(ind.zscore,2)+' \u00b7 Mom '+(ind.momentum_pct!=null?numFmt(ind.momentum_pct,2)+'%':'\u2014'),'Vol '+(bk.volume_total!=null?esc(Math.round(bk.volume_total)):'\u2014')].join('<br/>'); }
+          book(d.up,'up'); book(d.down,'down');
 
-      if (lm.modes && lm.modes.length) {
-        for (var i = 0; i < lm.modes.length; i++) {
-          var m = lm.modes[i] || {};
-          modeLines.push(' - ' + esc(m.key || ("mode" + i)) + ': en=' + boolHtml(m.enabled) + ', t=' + esc(m.time_left_sec) + 's, minC=' + esc(m.min_contracts) + ', maxT=' + esc(m.max_trades));
-        }
-      }
-      modeLines.push("");
+          var b=d.btc||{}, btcEl=document.getElementById('btc');
+          if(b.btc_current_price>0){
+            var bits=['$'+esc(numFmt(b.btc_current_price,2)),'Anchor $'+(b.btc_anchor_price>0?esc(numFmt(b.btc_anchor_price,2)):'\u2014'),esc(b.deviation_line||'')];
+            if(b.buffer_avg_abs_usd!=null||b.buffer_avg_abs_pct!=null){ var usd=b.buffer_avg_abs_usd!=null?'$'+esc(numFmt(b.buffer_avg_abs_usd,2)):'\u2014'; var pct=b.buffer_avg_abs_pct!=null?esc(numFmt(b.buffer_avg_abs_pct,3))+'%':'\u2014'; bits.push('Buffer avg(5): +/-'+usd+' (+/-'+pct+')'); }
+            if(b.buffer_windows&&b.buffer_windows.length){ bits.push('\u2014 last 5 windows \u2014'); for(var wi=0;wi<b.buffer_windows.length;wi++){ var ww=b.buffer_windows[wi]; var wt=ww.window_ts?new Date(ww.window_ts*1000).toISOString().substr(11,8):'?'; bits.push(esc(wt)+' $'+esc(numFmt(ww.abs_usd,2))+' ('+esc(numFmt(ww.abs_pct,4))+'%)'); } }
+            bits.push('Feed: '+(b.btc_connected?'ok':'off')+(b.fresh_sec!=null?' \u00b7 '+Math.floor(b.fresh_sec)+'s':''));
+            btcEl.innerHTML=bits.join('<br/>');
+          } else { btcEl.textContent='Waiting for Chainlink...'; }
 
-      modeLines.push('Vol accel minCurr: <input id="va-min-curr-diff" type="number" value="' + esc(va.min_current_volume_diff != null ? va.min_current_volume_diff : 0) + '" style="width:86px">');
-      modeLines.push('Vol accel minDiff: <input id="va-min-accel-diff" type="number" value="' + esc(va.min_accel_diff != null ? va.min_accel_diff : 0) + '" style="width:86px">');
-      modeLines.push('Vol basis: <select id="va-basis"><option value="total"' + (va.volume_basis === "total" ? " selected" : "") + '>total</option><option value="buy"' + (va.volume_basis === "buy" ? " selected" : "") + '>buy</option></select>');
-      modeLines.push('<button id="va-apply" type="button">Apply Vol</button>');
-
-      modeEl.innerHTML = modeLines.join("<br/>");
-
-      var veBtn = document.getElementById("ve-apply");
-      var lmBtn = document.getElementById("lm-apply");
-      var vaBtn = document.getElementById("va-apply");
-      if (veBtn) veBtn.onclick = applyVolEval;
-      if (lmBtn) lmBtn.onclick = applyLateModes;
-      if (vaBtn) vaBtn.onclick = applyVolAccel;
-    }
-
-    function applyControls() {
-      var payload = {
-        momentum: !!document.getElementById("ctl-momentum").checked,
-        vwap_deviation: !!document.getElementById("ctl-vwap").checked,
-        zscore: !!document.getElementById("ctl-zscore").checked,
+          var tr=d.trading||{};
+          var tHtml='Markets '+esc(tr.markets_seen)+' \u00b7 Trades '+esc(tr.trade_count)+' \u00b7 PnL $'+(tr.total_pnl!=null?numFmt(tr.total_pnl,2):'\u2014')+'<br/>';
+          if(tr.position){ var p=tr.position; tHtml+='LONG '+esc(p.token_name)+' @ '+esc(p.entry_price)+' \u00d7'+esc(p.contracts)+(p.hedged?' hedged':'')+'<br/>'; tHtml+='Unreal $'+(p.unrealized_pnl!=null?numFmt(p.unrealized_pnl,2):'\u2014')+'<br/>'; } else { tHtml+='No open position<br/>'; }
+          if(tr.recent_trades&&tr.recent_trades.length){ var lines=[]; for(var ri=0;ri<tr.recent_trades.length;ri++){ lines.push(esc(tr.recent_trades[ri].line)); } tHtml+='<br/>Recent:<br/>'+lines.join('<br/>'); }
+          document.getElementById('trading').innerHTML=tHtml;
+        } catch(e){ errEl.textContent='Poll error: '+((e&&e.message)?e.message:e); }
       };
-      var r = new XMLHttpRequest();
-      r.open("POST", "/api/indicator-controls", true);
-      r.setRequestHeader("Content-Type", "application/json");
-      r.send(JSON.stringify(payload));
-    }
-    function tick() {
-      var errEl = document.getElementById("err");
-      if (!modeCfg.lastFetchTs || (Date.now() - modeCfg.lastFetchTs) > 5000) {
-        refreshModeConfig();
-      }
-      var r = new XMLHttpRequest();
-      r.open("GET", "/api/state", true);
-      r.onreadystatechange = function () {
-        if (r.readyState !== 4) return;
-        try {
-          if (r.status !== 200) throw new Error("HTTP " + r.status);
-          var d = JSON.parse(r.responseText);
-          errEl.textContent = "";
-          var hdr = d.header || {};
-          var slug = hdr.slug != null ? String(hdr.slug) : "\u2014";
-          var ts = "";
-          if (d.ts) ts = new Date(d.ts * 1000).toISOString();
-          document.getElementById("meta").innerHTML = esc(slug) + " \u00b7 " + esc(ts);
-          document.getElementById("session").innerHTML = [
-            "Timer: " + (hdr.time_left_sec != null ? esc(Math.floor(hdr.time_left_sec) + "s left") : "\u2014"),
-            "WS: " + (hdr.ws_connected ? "live" : "disconnected"),
-            "Mode: " + (hdr.simulation ? "simulation" : "real"),
-          ].join("<br/>");
-          var st = d.strategy || {};
-          var sig = st.signal_text || "\u2014";
-          function chk(x) { return x === true ? "\u2713" : x === false ? "\u2717" : "\u2014"; }
-          var ck = st.checks || {};
-          var strategyBits = [
-            "Fav: " + esc(st.favorite) + " \u00b7 WR: " + esc(st.win_rate_str),
-            "Checks: P=" + chk(ck.price) + " T=" + chk(ck.time) + " D=" + chk(ck.dev) +
-            " M=" + chk(ck.mom) + " Z=" + chk(ck.zscore) + " B=" + chk(ck.btc_buffer) + " cutoff=" + chk(ck.time_cutoff)
-          ];
-            if (st.up_line) {
-              strategyBits.push("UP: " + esc(st.up_line));
-            }
-            if (st.down_line) {
-              strategyBits.push("DOWN: " + esc(st.down_line));
-            }
-          if (st.btc_buffer_line) {
-            strategyBits.push("BTC Buffer: " + esc(st.btc_buffer_line));
-          }
-          document.getElementById("strategy").innerHTML =
-            '<div class="sig ' + sigClass(sig) + '">' + esc(sig) + "</div>" +
-            '<div class="mono" style="margin-top:0.4rem">' +
-            strategyBits.join("<br/>") +
-            "</div>";
-
-          renderModePanel(st);
-
-          var ctl = st.indicator_controls || {};
-          document.getElementById("controls").innerHTML = [
-            '<label><input id="ctl-momentum" type="checkbox" ' + (ctl.momentum ? "checked" : "") + '> Price momentum</label>',
-            '<label><input id="ctl-vwap" type="checkbox" ' + (ctl.vwap_deviation ? "checked" : "") + '> VWAP deviation</label>',
-            '<label><input id="ctl-zscore" type="checkbox" ' + (ctl.zscore ? "checked" : "") + '> z-score</label>',
-          ].join("<br/>");
-
-          var cm = document.getElementById("ctl-momentum");
-          var cv = document.getElementById("ctl-vwap");
-          var cz = document.getElementById("ctl-zscore");
-          if (cm) cm.onchange = applyControls;
-          if (cv) cv.onchange = applyControls;
-          if (cz) cz.onchange = applyControls;
-
-          var w = st.window_checks || {};
-          var w5 = w.s5 || {};
-          var w15 = w.s15 || {};
-          function line(label, item) {
-            return label + ": M=" + boolHtml(item.momentum_ok) +
-              " D=" + boolHtml(item.vwap_deviation_ok) +
-              " Z=" + boolHtml(item.zscore_ok) +
-              " ALL=" + boolHtml(item.all_ok) +
-              " | mom=" + (item.momentum_pct != null ? numFmt(item.momentum_pct, 2) + "%" : "\u2014") +
-              " dev=" + (item.deviation_pct != null ? numFmt(item.deviation_pct, 2) + "%" : "\u2014") +
-              " z=" + (item.zscore != null ? numFmt(item.zscore, 2) : "\u2014");
-          }
-          document.getElementById("checks").innerHTML = [
-            line("5s", w5),
-            line("15s", w15),
-          ].join("<br/>");
-          function book(x, id) {
-            var el = document.getElementById(id);
-            if (!x) { el.textContent = "No data"; return; }
-            var bk = x.book || {};
-            var ind = x.indicators || {};
-            el.innerHTML = [
-              "Last " + esc(bk.last_price),
-              "Bid " + esc(bk.best_bid) + " / Ask " + esc(bk.best_ask),
-              "PM VWAP " + numFmt(ind.pm_vwap, 4) +
-                " \u00b7 BTC VWAP " + (ind.btc_vwap_weighted != null ? numFmt(ind.btc_vwap_weighted, 4) : "\u2014"),
-              "Dev " + (ind.deviation_pct != null ? numFmt(ind.deviation_pct, 2) + "%" : "\u2014") +
-                " \u00b7 BTC Vol Bias " + (ind.btc_vol_ratio != null ? numFmt(ind.btc_vol_ratio, 1) + "%" : "\u2014"),
-              "Z " + numFmt(ind.zscore, 2) +
-                " \u00b7 Mom " + (ind.momentum_pct != null ? numFmt(ind.momentum_pct, 2) + "%" : "\u2014"),
-              "Vol " + (bk.volume_total != null ? esc(Math.round(bk.volume_total)) : "\u2014"),
-            ].join("<br/>");
-          }
-          book(d.up, "up");
-          book(d.down, "down");
-          var b = d.btc || {};
-          var btcEl = document.getElementById("btc");
-          if (b.btc_current_price > 0) {
-            var btcBits = [
-              "$" + esc(numFmt(b.btc_current_price, 2)),
-              "Anchor $" + (b.btc_anchor_price > 0 ? esc(numFmt(b.btc_anchor_price, 2)) : "\u2014"),
-              esc(b.deviation_line || ""),
-            ];
-            if (b.buffer_avg_abs_usd != null || b.buffer_avg_abs_pct != null) {
-              var usdPart = b.buffer_avg_abs_usd != null ? "$" + esc(numFmt(b.buffer_avg_abs_usd, 2)) : "\u2014";
-              var pctPart = b.buffer_avg_abs_pct != null ? esc(numFmt(b.buffer_avg_abs_pct, 3)) + "%" : "\u2014";
-              btcBits.push("Buffer avg(5): +/-" + usdPart + " (+/-" + pctPart + ")");
-            }
-            if (b.buffer_windows && b.buffer_windows.length) {
-              btcBits.push("\u2014 last 5 windows \u2014");
-              for (var wi = 0; wi < b.buffer_windows.length; wi++) {
-                var w = b.buffer_windows[wi];
-                var wt = w.window_ts ? new Date(w.window_ts * 1000).toISOString().substr(11, 8) : "?";
-                btcBits.push(esc(wt) + " $" + esc(numFmt(w.abs_usd, 2)) + " (" + esc(numFmt(w.abs_pct, 4)) + "%)");
-              }
-            }
-            btcBits.push(
-              "Feed: " + (b.btc_connected ? "ok" : "off") +
-                (b.fresh_sec != null ? " \u00b7 " + Math.floor(b.fresh_sec) + "s" : "")
-            );
-            btcEl.innerHTML = [
-              btcBits.join("<br/>")
-            ];
-            btcEl.innerHTML = btcBits.join("<br/>");
-          } else {
-            btcEl.textContent = "Waiting for Chainlink\u2026";
-          }
-          var tr = d.trading || {};
-          var tHtml = "Markets " + esc(tr.markets_seen) + " \u00b7 Trades " + esc(tr.trade_count) +
-            " \u00b7 PnL $" + (tr.total_pnl != null ? numFmt(tr.total_pnl, 2) : "\u2014") + "<br/>";
-          if (tr.position) {
-            var p = tr.position;
-            tHtml += "LONG " + esc(p.token_name) + " @ " + esc(p.entry_price) +
-              " \u00d7" + esc(p.contracts) + (p.hedged ? " hedged" : "") + "<br/>";
-            tHtml += "Unreal $" + (p.unrealized_pnl != null ? numFmt(p.unrealized_pnl, 2) : "\u2014") + "<br/>";
-          } else {
-            tHtml += "No open position<br/>";
-          }
-          if (tr.recent_trades && tr.recent_trades.length) {
-            var lines = [];
-            for (var i = 0; i < tr.recent_trades.length; i++) {
-              lines.push(esc(tr.recent_trades[i].line));
-            }
-            tHtml += "<br/>Recent:<br/>" + lines.join("<br/>");
-          }
-          document.getElementById("trading").innerHTML = tHtml;
-        } catch (e) {
-          errEl.textContent = "Poll error: " + (e && e.message ? e.message : e);
-        }
-      };
-      r.onerror = function () {
-        errEl.textContent = "Network error (is the bot running?)";
-      };
+      r.onerror=function(){ errEl.textContent='Network error (is the bot running?)'; };
       r.send();
     }
+
+    loadModePanelConfig();
     tick();
     setInterval(tick, 1000);
   </script>
@@ -397,9 +230,6 @@ _HTML = """<!DOCTYPE html>
 
 
 def _sanitize_for_json(obj: Any) -> Any:
-    """
-    Starlette JSONResponse serializes with allow_nan=False; NaN/Inf break the ASGI handler.
-    """
     if obj is None:
         return None
     if isinstance(obj, bool):
