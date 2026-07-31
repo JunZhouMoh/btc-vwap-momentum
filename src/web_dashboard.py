@@ -167,6 +167,27 @@ _HTML = """<!DOCTYPE html>
       });
     }
 
+    function manualBuyWithDirection(direction){
+      var status=document.getElementById('buyStatus');
+      var amount=readNum('buyAmount',0);
+      if(!(amount>0)){
+        if(status) status.textContent='Amount must be > 0';
+        return;
+      }
+      if(status) status.textContent='Submitting...';
+      requestJson('POST','/api/manual-buy',{amount_usd:amount,direction:direction},function(resp){
+        if(!status) return;
+        if(resp&&resp.ok===false){
+          status.textContent=String(resp.error||'Request failed');
+          return;
+        }
+        status.textContent=String((resp&&resp.message)||('Queued '+direction));
+      });
+    }
+
+    function manualBuyUp(){ manualBuyWithDirection('UP'); }
+    function manualBuyDown(){ manualBuyWithDirection('DOWN'); }
+
     function applyControls(){
       var payload={ momentum:!!document.getElementById('ctl-momentum').checked, vwap_deviation:!!document.getElementById('ctl-vwap').checked, zscore:!!document.getElementById('ctl-zscore').checked };
       requestJson('POST','/api/indicator-controls',payload,function(){});
@@ -187,7 +208,20 @@ _HTML = """<!DOCTYPE html>
           var ts='';
           if(d.ts) ts=new Date(d.ts*1000).toISOString();
           document.getElementById('meta').innerHTML=esc(slug)+' \u00b7 '+esc(ts);
-          document.getElementById('session').innerHTML=['Timer: '+(hdr.time_left_sec!=null?esc(Math.floor(hdr.time_left_sec)+'s left'):'\u2014'),'WS: '+(hdr.ws_connected?'live':'disconnected'),'Mode: '+(hdr.simulation?'simulation':'real')].join('<br/>');
+          var existingAmountEl=document.getElementById('buyAmount');
+          var buyAmountVal=existingAmountEl?existingAmountEl.value:'';
+          var existingBuyStatusEl=document.getElementById('buyStatus');
+          var buyStatusVal=existingBuyStatusEl?existingBuyStatusEl.textContent:'';
+          var liveStatusVal=d.manual_buy_live_status?String(d.manual_buy_live_status):'idle';
+          var defaultBuyAmount=(d.trading&&typeof d.trading.bet_usd==='number'&&!isNaN(d.trading.bet_usd))?d.trading.bet_usd:1;
+          if(!buyAmountVal) buyAmountVal=String(defaultBuyAmount);
+          document.getElementById('session').innerHTML=[
+            'Timer: '+(hdr.time_left_sec!=null?esc(Math.floor(hdr.time_left_sec)+'s left'):'\u2014'),
+            'WS: '+(hdr.ws_connected?'live':'disconnected'),
+            'Mode: '+(hdr.simulation?'simulation':'real'),
+            'Live: '+esc(liveStatusVal),
+            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn" onclick="manualBuyUp()">Buy</button> <button class="btn secondary" onclick="manualBuyDown()">Sell</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
+          ].join('<br/>');
 
           var st=d.strategy||{}, sig=st.signal_text||'\u2014';
           function chk(x){ return x===true?'\u2713':x===false?'\u2717':'\u2014'; }
