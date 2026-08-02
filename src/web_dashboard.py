@@ -61,8 +61,6 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
     <div class="card"><h2>Indicator Controls</h2><div id="controls" class="mono"></div></div>
     <div class="card"><h2>5s / 15s Checks</h2><div id="checks" class="mono"></div></div>
-    <div class="card"><h2>UP</h2><div id="up" class="mono"></div></div>
-    <div class="card"><h2>DOWN</h2><div id="down" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div>
@@ -219,7 +217,7 @@ _HTML = """<!DOCTYPE html>
           var existingBuyStatusEl=document.getElementById('buyStatus');
           var buyStatusVal=existingBuyStatusEl?existingBuyStatusEl.textContent:'';
           var liveStatusVal=d.manual_buy_live_status?String(d.manual_buy_live_status):'idle';
-          var defaultBuyAmount=(d.trading&&typeof d.trading.bet_usd==='number'&&!isNaN(d.trading.bet_usd))?d.trading.bet_usd:1;
+          var defaultBuyAmount=10;
           if(!buyAmountVal) buyAmountVal=String(defaultBuyAmount);
           document.getElementById('session').innerHTML=[
             'Timer: '+(hdr.time_left_sec!=null?esc(Math.floor(hdr.time_left_sec)+'s left'):'\u2014'),
@@ -235,6 +233,13 @@ _HTML = """<!DOCTYPE html>
           var strategyBits=['Fav: '+esc(st.favorite)+' \u00b7 WR: '+esc(st.win_rate_str),'Checks: P='+chk(ck.price)+' T='+chk(ck.time)+' D='+chk(ck.dev)+' M='+chk(ck.mom)+' Z='+chk(ck.zscore)+' B='+chk(ck.btc_buffer)+' cutoff='+chk(ck.time_cutoff)];
           if(st.up_line) strategyBits.push('UP: '+esc(st.up_line));
           if(st.down_line) strategyBits.push('DOWN: '+esc(st.down_line));
+          var vs=st.volume_speed||null;
+          if(vs){
+            var buyDiff=(vs.curr_diff_buy!=null&&typeof vs.curr_diff_buy==='number'&&!isNaN(vs.curr_diff_buy))?numFmtSigned(vs.curr_diff_buy,0):'\u2014';
+            var totalDiff=(vs.curr_diff_total!=null&&typeof vs.curr_diff_total==='number'&&!isNaN(vs.curr_diff_total))?numFmtSigned(vs.curr_diff_total,0):'\u2014';
+            var minDiff=(vs.min_current_volume_diff!=null&&typeof vs.min_current_volume_diff==='number'&&!isNaN(vs.min_current_volume_diff))?numFmt(vs.min_current_volume_diff,0):'\u2014';
+            strategyBits.push('Vol cmp: buy '+buyDiff+' | total '+totalDiff+' | min '+minDiff+' | ok '+chk(vs.ok));
+          }
           if(st.btc_buffer_line) strategyBits.push('BTC Buffer: '+esc(st.btc_buffer_line));
           document.getElementById('strategy').innerHTML='<div class="sig '+sigClass(sig)+'">'+esc(sig)+'</div><div class="mono" style="margin-top:0.4rem">'+strategyBits.join('<br/>')+'</div>';
 
@@ -247,14 +252,14 @@ _HTML = """<!DOCTYPE html>
           function line(label,item){ return label+': M='+boolHtml(item.momentum_ok)+' D='+boolHtml(item.vwap_deviation_ok)+' Z='+boolHtml(item.zscore_ok)+' ALL='+boolHtml(item.all_ok)+' | mom='+(item.momentum_pct!=null?numFmt(item.momentum_pct,2)+'%':'\u2014')+' dev='+(item.deviation_pct!=null?numFmt(item.deviation_pct,2)+'%':'\u2014')+' z='+(item.zscore!=null?numFmt(item.zscore,2):'\u2014'); }
           document.getElementById('checks').innerHTML=[line('5s',w5),line('15s',w15)].join('<br/>');
 
-          function book(x,id){ var el=document.getElementById(id); if(!x){ el.textContent='No data'; return; } var bk=x.book||{}, ind=x.indicators||{}; el.innerHTML=['Last '+esc(bk.last_price),'Bid '+esc(bk.best_bid)+' / Ask '+esc(bk.best_ask),'PM VWAP '+numFmt(ind.pm_vwap,4)+' \u00b7 BTC VWAP '+(ind.btc_vwap_weighted!=null?numFmt(ind.btc_vwap_weighted,4):'\u2014'),'Dev '+(ind.deviation_pct!=null?numFmt(ind.deviation_pct,2)+'%':'\u2014')+' \u00b7 BTC Vol Bias '+(ind.btc_vol_ratio!=null?numFmt(ind.btc_vol_ratio,1)+'%':'\u2014'),'Z '+numFmt(ind.zscore,2)+' \u00b7 Mom '+(ind.momentum_pct!=null?numFmt(ind.momentum_pct,2)+'%':'\u2014'),'Vol '+(bk.volume_total!=null?esc(Math.round(bk.volume_total)):'\u2014')].join('<br/>'); }
+          function book(x,id){ var el=document.getElementById(id); if(!el) return; if(!x){ el.textContent='No data'; return; } var bk=x.book||{}, ind=x.indicators||{}; el.innerHTML=['Last '+esc(bk.last_price),'Bid '+esc(bk.best_bid)+' / Ask '+esc(bk.best_ask),'PM VWAP '+numFmt(ind.pm_vwap,4)+' \u00b7 BTC VWAP '+(ind.btc_vwap_weighted!=null?numFmt(ind.btc_vwap_weighted,4):'\u2014'),'Dev '+(ind.deviation_pct!=null?numFmt(ind.deviation_pct,2)+'%':'\u2014')+' \u00b7 BTC Vol Bias '+(ind.btc_vol_ratio!=null?numFmt(ind.btc_vol_ratio,1)+'%':'\u2014'),'Z '+numFmt(ind.zscore,2)+' \u00b7 Mom '+(ind.momentum_pct!=null?numFmt(ind.momentum_pct,2)+'%':'\u2014'),'Vol '+(bk.volume_total!=null?esc(Math.round(bk.volume_total)):'\u2014')].join('<br/>'); }
           book(d.up,'up'); book(d.down,'down');
 
           var b=d.btc||{}, btcEl=document.getElementById('btc');
           if(b.btc_current_price>0){
             var bits=['$'+esc(numFmt(b.btc_current_price,2)),'Anchor $'+(b.btc_anchor_price>0?esc(numFmt(b.btc_anchor_price,2)):'\u2014'),esc(b.deviation_line||'')];
             if(b.buffer_avg_abs_usd!=null||b.buffer_avg_abs_pct!=null){ var usd=b.buffer_avg_abs_usd!=null?'$'+esc(numFmt(b.buffer_avg_abs_usd,2)):'\u2014'; var pct=b.buffer_avg_abs_pct!=null?esc(numFmt(b.buffer_avg_abs_pct,3))+'%':'\u2014'; bits.push('Buffer avg(5): +/-'+usd+' (+/-'+pct+')'); }
-            if(b.buffer_windows&&b.buffer_windows.length){ bits.push('\u2014 last 5 windows \u2014'); for(var wi=0;wi<b.buffer_windows.length;wi++){ var ww=b.buffer_windows[wi]; var wt=ww.window_ts?new Date(ww.window_ts*1000).toISOString().substr(11,8):'?'; bits.push(esc(wt)+' $'+esc(numFmt(ww.abs_usd,2))+' ('+esc(numFmt(ww.abs_pct,4))+'%)'); } }
+            if(b.buffer_windows&&b.buffer_windows.length){ bits.push('\u2014 last 5 windows \u2014'); for(var wi=0;wi<b.buffer_windows.length;wi++){ var ww=b.buffer_windows[wi]; var wt=ww.window_ts?new Date(ww.window_ts*1000).toISOString().substr(11,8):'?'; var sUsd=(ww.signed_usd!=null&&typeof ww.signed_usd==='number'&&!isNaN(ww.signed_usd))?numFmtSigned(ww.signed_usd,2):numFmtSigned((ww.abs_usd!=null?ww.abs_usd:0),2); var sPct=(ww.signed_pct!=null&&typeof ww.signed_pct==='number'&&!isNaN(ww.signed_pct))?numFmtSigned(ww.signed_pct,4):numFmtSigned((ww.abs_pct!=null?ww.abs_pct:0),4); bits.push(esc(wt)+' $'+esc(sUsd)+' ('+esc(sPct)+'%)'); } }
             bits.push('Feed: '+(b.btc_connected?'ok':'off')+(b.fresh_sec!=null?' \u00b7 '+Math.floor(b.fresh_sec)+'s':''));
             btcEl.innerHTML=bits.join('<br/>');
           } else { btcEl.textContent='Waiting for Chainlink...'; }
