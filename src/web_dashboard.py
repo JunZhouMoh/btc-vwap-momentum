@@ -179,6 +179,7 @@ _HTML = """<!DOCTYPE html>
     function loadTimerAlertConfig(onDone){
       requestJson('GET','/api/timer-alert',null,function(cfg){
         timerAlertCfg=cfg||{};
+        renderTimerAlertPanel(null);
         if(onDone) onDone(timerAlertCfg);
       });
     }
@@ -196,6 +197,7 @@ _HTML = """<!DOCTYPE html>
       requestJson('POST','/api/timer-alert',payload,function(resp){
         timerAlertCfg=resp||payload;
         if(status) status.textContent='Applied';
+        renderTimerAlertPanel(null);
       });
     }
 
@@ -325,7 +327,6 @@ _HTML = """<!DOCTYPE html>
           if(tr.recent_trades&&tr.recent_trades.length){ var lines=[]; for(var ri=0;ri<tr.recent_trades.length;ri++){ lines.push(esc(tr.recent_trades[ri].line)); } tHtml+='<br/>Recent:<br/>'+lines.join('<br/>'); }
           var tr=d.trading||{}, modePerfEl=document.getElementById('modePerf');
           if(modePerfEl){ var modePerfLines=[], modePerfData=tr.win_rate_by_mode||{}; window.latestModePerfData=modePerfData; var panelHandledModes={}; var panelModeOrder=['normal','manual','mode_60s','mode_40s','mode_30s','mode_20s','unknown']; function pushPanelModeLine(modeKey){ if(!Object.prototype.hasOwnProperty.call(modePerfData,modeKey)) return; panelHandledModes[modeKey]=true; var ms=modePerfData[modeKey]||{}; var wrVal=(ms.win_rate_pct!=null&&typeof ms.win_rate_pct==='number'&&!isNaN(ms.win_rate_pct))?(numFmt(ms.win_rate_pct,1)+'%'):'\u2014'; var pnlVal=(ms.total_pnl_usd!=null&&typeof ms.total_pnl_usd==='number'&&!isNaN(ms.total_pnl_usd))?('$'+numFmtSigned(ms.total_pnl_usd,2)):'$\u2014'; var countVal=(ms.trade_count!=null)?String(ms.trade_count):'0'; modePerfLines.push(esc(modeKey)+' | PnL '+esc(pnlVal)+' | Triggers '+esc(countVal)+' | WR '+esc(wrVal)); } for(var pmo=0;pmo<panelModeOrder.length;pmo++){ pushPanelModeLine(panelModeOrder[pmo]); } for(var pmk in modePerfData){ if(!Object.prototype.hasOwnProperty.call(modePerfData,pmk)) continue; if(panelHandledModes[pmk]) continue; pushPanelModeLine(pmk); } modePerfEl.innerHTML=modePerfLines.length?modePerfLines.join('<br/>'):'No mode stats yet'; }
-          renderTimerAlertPanel(d);
           document.getElementById('trading').innerHTML=tHtml;
         } catch(e){ errEl.textContent='Poll error: '+((e&&e.message)?e.message:e); }
       };
@@ -334,7 +335,7 @@ _HTML = """<!DOCTYPE html>
     }
 
     loadModePanelConfig();
-    loadTimerAlertConfig(function(){ renderTimerAlertPanel(null); });
+    loadTimerAlertConfig();
     tick();
     setInterval(tick, 1000);
   </script>
