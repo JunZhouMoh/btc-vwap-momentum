@@ -145,7 +145,7 @@ _HTML = """<!DOCTYPE html>
       h.push('<div class="row"><label>Alert Time Left</label><input type="number" id="ta_time_left_sec" step="1" min="0" value="'+esc(t.time_left_sec!=null?t.time_left_sec:100)+'"/></div>');
       h.push('<div class="row"><label>Min Price</label><input type="number" id="ta_min_price" step="0.001" min="0" max="1" value="'+esc(t.min_price!=null?t.min_price:0.75)+'"/></div>');
       h.push('<div class="row"><label>Max Price</label><input type="number" id="ta_max_price" step="0.001" min="0" max="1" value="'+esc(t.max_price!=null?t.max_price:0.95)+'"/></div>');
-      h.push('<div class="row"><label>BTC Buffer $</label><input type="number" id="ta_min_btc_buffer_threshold_usd" step="0.1" min="0" value="'+esc(t.min_btc_buffer_threshold_usd!=null?t.min_btc_buffer_threshold_usd:0)+'"/></div>');
+      h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="ta_btc_buffer_multiplier" step="0.01" min="0" value="'+esc(t.btc_buffer_multiplier!=null?t.btc_buffer_multiplier:0)+'"/></div>');
 
       var liveTimeLeft='\u2014', favLine='\u2014', btcLine='\u2014';
       if(stateData&&stateData.header&&typeof stateData.header.time_left_sec==='number'&&!isNaN(stateData.header.time_left_sec)){
@@ -192,7 +192,7 @@ _HTML = """<!DOCTYPE html>
         time_left_sec:readInt('ta_time_left_sec',t.time_left_sec||100),
         min_price:readNum('ta_min_price',t.min_price||0.75),
         max_price:readNum('ta_max_price',t.max_price||0.95),
-        min_btc_buffer_threshold_usd:readNum('ta_min_btc_buffer_threshold_usd',t.min_btc_buffer_threshold_usd||0)
+        btc_buffer_multiplier:readNum('ta_btc_buffer_multiplier',t.btc_buffer_multiplier||0)
       };
       requestJson('POST','/api/timer-alert',payload,function(resp){
         timerAlertCfg=resp||payload;
