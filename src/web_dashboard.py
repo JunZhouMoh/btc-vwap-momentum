@@ -59,6 +59,7 @@ _HTML = """<!DOCTYPE html>
   <div class="grid">
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
+    <div class="card controls"><h2>Telegram Timer Alert</h2><div id="timerAlertPanel" class="mono">Loading...</div></div>
     <div class="card"><h2>Indicator Controls</h2><div id="controls" class="mono"></div></div>
     <div class="card"><h2>5s / 15s Checks</h2><div id="checks" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
@@ -77,6 +78,7 @@ _HTML = """<!DOCTYPE html>
     function requestJson(method,url,payload,onDone){ var r=new XMLHttpRequest(); r.open(method,url,true); if(payload!==null&&payload!==undefined){ r.setRequestHeader('Content-Type','application/json'); } r.onreadystatechange=function(){ if(r.readyState!==4) return; if(r.status<200||r.status>=300) return; try{ var d=JSON.parse(r.responseText); if(onDone) onDone(d);}catch(e){} }; r.send(payload!==null&&payload!==undefined?JSON.stringify(payload):null); }
 
     var modeCfg={late:null,volEval:null,volAccel:null};
+  var timerAlertCfg=null;
     window.latestModePerfData={};
 
     function numFmtSigned(n,d){ if(n===null||n===undefined||typeof n!=='number'||isNaN(n)) return '\u2014'; var fixed=n.toFixed(d); if(n>0) return '+'+fixed; return fixed; }
@@ -134,6 +136,36 @@ _HTML = """<!DOCTYPE html>
       box.innerHTML=h.join('<br/>');
     }
 
+    function renderTimerAlertPanel(stateData){
+      var box=document.getElementById('timerAlertPanel'); if(!box) return;
+      var t=timerAlertCfg||{};
+      var h=[];
+      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="ta_enabled" '+(t.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Timer Bot</label><span>'+(t.timer_bot_ready?'ready':'missing token/chat')+'</span></div>');
+      h.push('<div class="row"><label>Alert Time Left</label><input type="number" id="ta_time_left_sec" step="1" min="0" value="'+esc(t.time_left_sec!=null?t.time_left_sec:100)+'"/></div>');
+      h.push('<div class="row"><label>Min Price</label><input type="number" id="ta_min_price" step="0.001" min="0" max="1" value="'+esc(t.min_price!=null?t.min_price:0.75)+'"/></div>');
+      h.push('<div class="row"><label>Max Price</label><input type="number" id="ta_max_price" step="0.001" min="0" max="1" value="'+esc(t.max_price!=null?t.max_price:0.95)+'"/></div>');
+      h.push('<div class="row"><label>BTC Buffer $</label><input type="number" id="ta_min_btc_buffer_threshold_usd" step="0.1" min="0" value="'+esc(t.min_btc_buffer_threshold_usd!=null?t.min_btc_buffer_threshold_usd:0)+'"/></div>');
+
+      var liveTimeLeft='\u2014', favLine='\u2014', btcLine='\u2014';
+      if(stateData&&stateData.header&&typeof stateData.header.time_left_sec==='number'&&!isNaN(stateData.header.time_left_sec)){
+        liveTimeLeft=Math.floor(stateData.header.time_left_sec)+'s';
+      }
+      if(stateData&&stateData.strategy&&stateData.strategy.favorite){
+        favLine=String(stateData.strategy.favorite);
+      }
+      var b=(stateData&&stateData.strategy&&stateData.strategy.btc_buffer_line)?String(stateData.strategy.btc_buffer_line):'';
+      if(b){
+        btcLine=b;
+      }
+      h.push('<div class="row"><label>Live Time Left</label><span>'+esc(liveTimeLeft)+'</span></div>');
+      h.push('<div class="row"><label>Live Favorite</label><span>'+esc(favLine)+'</span></div>');
+      h.push('<div class="row"><label>Live BTC Buffer</label><span>'+esc(btcLine)+'</span></div>');
+      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveTimerAlertConfig()">Apply</button><button class="btn secondary" onclick="loadTimerAlertConfig()">Reload</button></div>');
+      h.push('<div id="timerAlertStatus" class="status"></div>');
+      box.innerHTML=h.join('<br/>');
+    }
+
     function loadModePanelConfig(){
       requestJson('GET','/api/late-modes',null,function(late){
         modeCfg.late=late||{};
@@ -141,6 +173,29 @@ _HTML = """<!DOCTYPE html>
           modeCfg.volEval=ve||{};
           requestJson('GET','/api/volume-accel-check',null,function(va){ modeCfg.volAccel=va||{}; renderModePanelConfig(window.latestModePerfData||{}); });
         });
+      });
+    }
+
+    function loadTimerAlertConfig(onDone){
+      requestJson('GET','/api/timer-alert',null,function(cfg){
+        timerAlertCfg=cfg||{};
+        if(onDone) onDone(timerAlertCfg);
+      });
+    }
+
+    function saveTimerAlertConfig(){
+      var status=document.getElementById('timerAlertStatus'); if(status) status.textContent='Applying...';
+      var t=timerAlertCfg||{};
+      var payload={
+        enabled:!!(document.getElementById('ta_enabled')&&document.getElementById('ta_enabled').checked),
+        time_left_sec:readInt('ta_time_left_sec',t.time_left_sec||100),
+        min_price:readNum('ta_min_price',t.min_price||0.75),
+        max_price:readNum('ta_max_price',t.max_price||0.95),
+        min_btc_buffer_threshold_usd:readNum('ta_min_btc_buffer_threshold_usd',t.min_btc_buffer_threshold_usd||0)
+      };
+      requestJson('POST','/api/timer-alert',payload,function(resp){
+        timerAlertCfg=resp||payload;
+        if(status) status.textContent='Applied';
       });
     }
 
@@ -270,6 +325,7 @@ _HTML = """<!DOCTYPE html>
           if(tr.recent_trades&&tr.recent_trades.length){ var lines=[]; for(var ri=0;ri<tr.recent_trades.length;ri++){ lines.push(esc(tr.recent_trades[ri].line)); } tHtml+='<br/>Recent:<br/>'+lines.join('<br/>'); }
           var tr=d.trading||{}, modePerfEl=document.getElementById('modePerf');
           if(modePerfEl){ var modePerfLines=[], modePerfData=tr.win_rate_by_mode||{}; window.latestModePerfData=modePerfData; var panelHandledModes={}; var panelModeOrder=['normal','manual','mode_60s','mode_40s','mode_30s','mode_20s','unknown']; function pushPanelModeLine(modeKey){ if(!Object.prototype.hasOwnProperty.call(modePerfData,modeKey)) return; panelHandledModes[modeKey]=true; var ms=modePerfData[modeKey]||{}; var wrVal=(ms.win_rate_pct!=null&&typeof ms.win_rate_pct==='number'&&!isNaN(ms.win_rate_pct))?(numFmt(ms.win_rate_pct,1)+'%'):'\u2014'; var pnlVal=(ms.total_pnl_usd!=null&&typeof ms.total_pnl_usd==='number'&&!isNaN(ms.total_pnl_usd))?('$'+numFmtSigned(ms.total_pnl_usd,2)):'$\u2014'; var countVal=(ms.trade_count!=null)?String(ms.trade_count):'0'; modePerfLines.push(esc(modeKey)+' | PnL '+esc(pnlVal)+' | Triggers '+esc(countVal)+' | WR '+esc(wrVal)); } for(var pmo=0;pmo<panelModeOrder.length;pmo++){ pushPanelModeLine(panelModeOrder[pmo]); } for(var pmk in modePerfData){ if(!Object.prototype.hasOwnProperty.call(modePerfData,pmk)) continue; if(panelHandledModes[pmk]) continue; pushPanelModeLine(pmk); } modePerfEl.innerHTML=modePerfLines.length?modePerfLines.join('<br/>'):'No mode stats yet'; }
+          renderTimerAlertPanel(d);
           document.getElementById('trading').innerHTML=tHtml;
         } catch(e){ errEl.textContent='Poll error: '+((e&&e.message)?e.message:e); }
       };
@@ -278,6 +334,7 @@ _HTML = """<!DOCTYPE html>
     }
 
     loadModePanelConfig();
+    loadTimerAlertConfig(function(){ renderTimerAlertPanel(null); });
     tick();
     setInterval(tick, 1000);
   </script>
