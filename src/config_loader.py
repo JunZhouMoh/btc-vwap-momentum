@@ -9,8 +9,9 @@ import os
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from dotenv import load_dotenv
+from src.runtime_paths import resolve_runtime_path
 
 # Load .env from project root
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -45,66 +46,10 @@ class MarketConfig:
 
 
 @dataclass
-class LateEntryModeConfig:
-    """Single late-entry mode settings."""
-    name: str = ""
-    enabled: bool = True
-    time_left_sec: int = 60
-    min_contracts: int = 5
-    max_trades: int = 1
-    buffer_avg_multiplier: float = 1.0
-    min_buffer_threshold_usd: float = 25.0
-    volume_check_enabled: bool = True
-    min_price: float = 0.0
-    max_price: float = 1.0
-
-
-@dataclass
-class LateEntryModesConfig:
-    """Predefined late-entry windows; tightest active window wins."""
-    enabled: bool = False
-    total_max_trades: int = 3
-    mode_70s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_70s", enabled=False, time_left_sec=70, min_contracts=5, max_trades=1, buffer_avg_multiplier=1.0, min_buffer_threshold_usd=25.0, min_price=0.8, max_price=0.99))
-    mode_60s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_60s", enabled=True, time_left_sec=60, min_contracts=5, max_trades=1, buffer_avg_multiplier=1.0, min_buffer_threshold_usd=25.0, min_price=0.8, max_price=0.99))
-    mode_40s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_40s", enabled=True, time_left_sec=40, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
-    mode_30s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_30s", enabled=True, time_left_sec=30, min_contracts=8, max_trades=1, buffer_avg_multiplier=0.8, min_buffer_threshold_usd=25.0, min_price=0.85, max_price=0.99))
-    mode_20s: LateEntryModeConfig = field(default_factory=lambda: LateEntryModeConfig(name="mode_20s", enabled=True, time_left_sec=20, min_contracts=12, max_trades=1, buffer_avg_multiplier=0.5, min_buffer_threshold_usd=20.0, min_price=0.9, max_price=0.99))
-
-
-@dataclass
-class VolumeEvalModeConfig:
-    """Standalone volume-first entry mode (separate from late-entry modes)."""
-    enabled: bool = False
-    time_left_sec: int = 50
-    min_contracts: int = 1
-    max_trades: int = 1
-    buffer_avg_multiplier: float = 1.25
-    min_buffer_threshold_usd: float = 30.0
-    volume_check_enabled: bool = True
-    entry_min_current_volume_diffs: list[float] = field(default_factory=lambda: [1000.0, 2000.0, 3000.0])
-    entry_trade_limits: list[int] = field(default_factory=lambda: [1, 1, 1])
-    min_price: float = 0.84
-    max_price: float = 0.96
-
-
-@dataclass
-class VolumeAccelerationCheckConfig:
-    """Favored-side volume acceleration gate settings."""
-    enabled: bool = True
-    window_sec: float = 10.0
-    threshold: float = 5000.0
-    require_current_volume_lead: bool = True
-    min_accel_diff: float = 0.0
-    min_current_volume_diff: float = 5000.0
-    volume_basis: str = "total"  # total | buy
-
-
-@dataclass
 class StrategyConfig:
     """Strategy parameters."""
     min_price: float = 0.65
     max_price: float = 0.91
-    dangerous: bool = False
     min_elapsed_sec: int = 480
     min_deviation_pct: float = 5.0
     max_deviation_pct: float = 100.0
@@ -113,9 +58,22 @@ class StrategyConfig:
     momentum_min_pct: float = 0.0
     vwap_window_sec: int = 30
     win_rate_csv: str = "data/win_rate.csv"
-    volume_acceleration_check: VolumeAccelerationCheckConfig = field(default_factory=VolumeAccelerationCheckConfig)
-    volume_eval_mode: VolumeEvalModeConfig = field(default_factory=VolumeEvalModeConfig)
-    late_entry_modes: LateEntryModesConfig = field(default_factory=LateEntryModesConfig)
+
+
+@dataclass
+class BufferDecayConfig:
+    """Optional exponential decay for BTC buffer threshold estimation."""
+    enabled: bool = False
+    half_life_windows: float = 2.5
+    min_periods: int = 2
+
+
+@dataclass
+class InWindowBufferDecayConfig:
+    """Optional in-window decay that lowers BTC buffer threshold near market end."""
+    enabled: bool = False
+    start_before_end_sec: int = 60
+    min_multiplier: float = 0.6
 
 
 @dataclass
@@ -152,24 +110,12 @@ class RedeemConfig:
 
 
 @dataclass
-class TimerAlertConfig:
-    """One-shot timer alert sent to dedicated Telegram timer bot."""
-    enabled: bool = False
-    time_left_sec: int = 100
-    min_price: float = 0.75
-    max_price: float = 0.95
-
-
-@dataclass
 class TelegramConfig:
     """Telegram notification parameters."""
     enabled: bool = True
     bot_token: str = ""
     chat_id: str = ""
     chart_every_n_trades: int = 10
-    timer_bot_token: str = ""
-    timer_chat_id: str = ""
-    timer_alert: TimerAlertConfig = field(default_factory=TimerAlertConfig)
 
 
 @dataclass
@@ -196,13 +142,6 @@ class WebDashboardConfig:
 
 
 @dataclass
-class BTCPriceFeedConfig:
-    """BTC price feed source configuration."""
-    provider: str = "chainlink"  # chainlink | binance
-    ws_url: str = ""
-
-
-@dataclass
 class PolymarketConfig:
     """Polymarket API credentials."""
     private_key: str = ""
@@ -223,12 +162,13 @@ class Config:
     simulation: SimulationConfig
     strategy: StrategyConfig
     buffer: float
+    buffer_decay: BufferDecayConfig
+    in_window_buffer_decay: InWindowBufferDecayConfig
     entry: EntryConfig
     hedge: HedgeConfig
     redeem: RedeemConfig
     telegram: TelegramConfig
     web_dashboard: WebDashboardConfig
-    btc_price_feed: BTCPriceFeedConfig
     polymarket: PolymarketConfig
 
 
@@ -259,120 +199,17 @@ def load_config(config_path: Optional[str] = None) -> Config:
     simulation = SimulationConfig(
         enabled=bool(sim_data.get("enabled", False)),
         separate_trading_log=bool(sim_data.get("separate_trading_log", True)),
-        trading_log_path=str(sim_data.get("trading_log_path", "logs/trading_log_sim.json")),
-        history_csv_path=str(sim_data.get("history_csv_path", "logs/simulation_trades.csv")),
-        history_jsonl_path=str(sim_data.get("history_jsonl_path", "logs/simulation_history.jsonl")),
-        history_summary_path=str(sim_data.get("history_summary_path", "logs/simulation_summary.json")),
+        trading_log_path=str(resolve_runtime_path(str(sim_data.get("trading_log_path", "logs/trading_log_sim.json")))),
+        history_csv_path=str(resolve_runtime_path(str(sim_data.get("history_csv_path", "logs/simulation_trades.csv")))),
+        history_jsonl_path=str(resolve_runtime_path(str(sim_data.get("history_jsonl_path", "logs/simulation_history.jsonl")))),
+        history_summary_path=str(resolve_runtime_path(str(sim_data.get("history_summary_path", "logs/simulation_summary.json")))),
     )
 
     # Strategy
     strategy_data = data.get("strategy", {})
-    late_modes_data = strategy_data.get("late_entry_modes", {})
-
-    def _to_int(raw: Any, default: int) -> int:
-        if raw is None:
-            return int(default)
-        try:
-            txt = str(raw).strip().lower()
-            if txt in {"", "tbd", "todo", "na", "n/a", "null", "none", "-"}:
-                return int(default)
-            return int(float(txt))
-        except (TypeError, ValueError):
-            return int(default)
-
-    def _to_float(raw: Any, default: float) -> float:
-        if raw is None:
-            return float(default)
-        try:
-            txt = str(raw).strip().lower()
-            if txt in {"", "tbd", "todo", "na", "n/a", "null", "none", "-"}:
-                return float(default)
-            return float(txt)
-        except (TypeError, ValueError):
-            return float(default)
-
-    def _load_late_mode(raw: Dict[str, Any], default_time_left: int, default_contracts: int, default_max_trades: int, default_multiplier: float, default_min_buffer_threshold_usd: float, default_min_price: float = 0.0, default_max_price: float = 1.0) -> LateEntryModeConfig:
-        return LateEntryModeConfig(
-            name=str(raw.get("name", "") or "").strip(),
-            enabled=bool(raw.get("enabled", True)),
-            time_left_sec=_to_int(raw.get("time_left_sec", default_time_left), default_time_left),
-            min_contracts=_to_int(raw.get("min_contracts", default_contracts), default_contracts),
-            max_trades=_to_int(raw.get("max_trades", default_max_trades), default_max_trades),
-            buffer_avg_multiplier=_to_float(raw.get("buffer_avg_multiplier", default_multiplier), default_multiplier),
-            min_buffer_threshold_usd=_to_float(raw.get("min_buffer_threshold_usd", default_min_buffer_threshold_usd), default_min_buffer_threshold_usd),
-            volume_check_enabled=bool(raw.get("volume_check_enabled", True)),
-            min_price=_to_float(raw.get("min_price", default_min_price), default_min_price),
-            max_price=_to_float(raw.get("max_price", default_max_price), default_max_price),
-        )
-
-    late_entry_modes = LateEntryModesConfig(
-        enabled=bool(late_modes_data.get("enabled", False)),
-        total_max_trades=_to_int(late_modes_data.get("total_max_trades", 3), 3),
-        mode_70s=_load_late_mode(late_modes_data.get("mode_70s", {}), 70, 5, 1, 1.0, 25.0, 0.8, 0.99),
-        mode_60s=_load_late_mode(late_modes_data.get("mode_60s", {}), 60, 5, 1, 1.0, 25.0, 0.8, 0.99),
-        mode_40s=_load_late_mode(late_modes_data.get("mode_40s", {}), 40, 8, 1, 0.8, 25.0, 0.85, 0.99),
-        mode_30s=_load_late_mode(late_modes_data.get("mode_30s", {}), 30, 8, 1, 0.8, 25.0, 0.85, 0.99),
-        mode_20s=_load_late_mode(late_modes_data.get("mode_20s", {}), 20, 12, 1, 0.5, 20.0, 0.9, 0.99),
-    )
-
-    for fallback_name, mode_cfg in [
-        ("mode_70s", late_entry_modes.mode_70s),
-        ("mode_60s", late_entry_modes.mode_60s),
-        ("mode_40s", late_entry_modes.mode_40s),
-        ("mode_30s", late_entry_modes.mode_30s),
-        ("mode_20s", late_entry_modes.mode_20s),
-    ]:
-        if not mode_cfg.name:
-            mode_cfg.name = fallback_name
-
-    volume_eval_data = strategy_data.get("volume_eval_mode", {})
-    raw_entry_diffs = volume_eval_data.get("entry_min_current_volume_diffs", [1000.0, 2000.0, 3000.0])
-    entry_min_current_volume_diffs: list[float] = []
-    if isinstance(raw_entry_diffs, list):
-        for raw in raw_entry_diffs:
-            val = _to_float(raw, -1.0)
-            if val >= 0.0:
-                entry_min_current_volume_diffs.append(val)
-    if not entry_min_current_volume_diffs:
-        entry_min_current_volume_diffs = [1000.0, 2000.0, 3000.0]
-
-    raw_entry_limits = volume_eval_data.get("entry_trade_limits", [1, 1, 1])
-    entry_trade_limits: list[int] = []
-    if isinstance(raw_entry_limits, list):
-        for raw in raw_entry_limits:
-            val = _to_int(raw, 0)
-            if val > 0:
-                entry_trade_limits.append(val)
-    if not entry_trade_limits:
-        entry_trade_limits = [1, 1, 1]
-
-    volume_eval_mode = VolumeEvalModeConfig(
-        enabled=bool(volume_eval_data.get("enabled", False)),
-        time_left_sec=_to_int(volume_eval_data.get("time_left_sec", 50), 50),
-        min_contracts=_to_int(volume_eval_data.get("min_contracts", 1), 1),
-        max_trades=_to_int(volume_eval_data.get("max_trades", 1), 1),
-        buffer_avg_multiplier=_to_float(volume_eval_data.get("buffer_avg_multiplier", 1.25), 1.25),
-        min_buffer_threshold_usd=_to_float(volume_eval_data.get("min_buffer_threshold_usd", 30.0), 30.0),
-        volume_check_enabled=bool(volume_eval_data.get("volume_check_enabled", True)),
-        entry_min_current_volume_diffs=entry_min_current_volume_diffs,
-        entry_trade_limits=entry_trade_limits,
-        min_price=_to_float(volume_eval_data.get("min_price", 0.84), 0.84),
-        max_price=_to_float(volume_eval_data.get("max_price", 0.96), 0.96),
-    )
-
-    vac_data = strategy_data.get("volume_acceleration_check", {})
-    threshold = _to_float(
-        vac_data.get("threshold", vac_data.get("min_current_volume_diff", 5000.0)),
-        5000.0,
-    )
-    raw_volume_basis = str(vac_data.get("volume_basis", "")).strip().lower()
-    if raw_volume_basis not in {"total", "buy"}:
-        raw_volume_basis = "buy" if bool(vac_data.get("use_buy_only_volume", False)) else "total"
-
     strategy = StrategyConfig(
         min_price=strategy_data.get("min_price", 0.65),
         max_price=strategy_data.get("max_price", 0.91),
-        dangerous=bool(strategy_data.get("dangerous", False)),
         min_elapsed_sec=strategy_data.get("min_elapsed_sec", 480),
         min_deviation_pct=strategy_data.get("min_deviation_pct", 5.0),
         max_deviation_pct=strategy_data.get("max_deviation_pct", 100.0),
@@ -381,19 +218,22 @@ def load_config(config_path: Optional[str] = None) -> Config:
         momentum_min_pct=float(strategy_data.get("momentum_min_pct", 0.0)),
         vwap_window_sec=strategy_data.get("vwap_window_sec", 30),
         win_rate_csv=strategy_data.get("win_rate_csv", "data/win_rate.csv"),
-        volume_acceleration_check=VolumeAccelerationCheckConfig(
-            enabled=bool(vac_data.get("enabled", True)),
-            window_sec=_to_float(vac_data.get("window_sec", 10.0), 10.0),
-            threshold=threshold,
-            require_current_volume_lead=bool(vac_data.get("require_current_volume_lead", True)),
-            min_accel_diff=_to_float(vac_data.get("min_accel_diff", 0.0), 0.0),
-            min_current_volume_diff=_to_float(vac_data.get("min_current_volume_diff", threshold), threshold),
-            volume_basis=raw_volume_basis,
-        ),
-        volume_eval_mode=volume_eval_mode,
-        late_entry_modes=late_entry_modes,
     )
 
+    buffer_decay_data = data.get("buffer_decay", {})
+    buffer_decay = BufferDecayConfig(
+        enabled=bool(buffer_decay_data.get("enabled", False)),
+        half_life_windows=float(buffer_decay_data.get("half_life_windows", 2.5)),
+        min_periods=int(buffer_decay_data.get("min_periods", 2)),
+    )
+
+    in_window_buffer_decay_data = data.get("in_window_buffer_decay", {})
+    in_window_buffer_decay = InWindowBufferDecayConfig(
+        enabled=bool(in_window_buffer_decay_data.get("enabled", False)),
+        start_before_end_sec=int(in_window_buffer_decay_data.get("start_before_end_sec", 60)),
+        min_multiplier=float(in_window_buffer_decay_data.get("min_multiplier", 0.6)),
+    )
+    
     # Entry
     entry_data = data.get("entry", {})
     entry = EntryConfig(
@@ -429,20 +269,11 @@ def load_config(config_path: Optional[str] = None) -> Config:
     
     # Telegram (merge JSON + env)
     telegram_data = data.get("telegram", {})
-    timer_alert_data = telegram_data.get("timer_alert", {})
     telegram = TelegramConfig(
         enabled=telegram_data.get("enabled", True),
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         chart_every_n_trades=telegram_data.get("chart_every_n_trades", 10),
-        timer_bot_token=os.getenv("TELEGRAM_TIMER_BOT_TOKEN", ""),
-        timer_chat_id=os.getenv("TELEGRAM_TIMER_CHAT_ID", ""),
-        timer_alert=TimerAlertConfig(
-            enabled=bool(timer_alert_data.get("enabled", False)),
-            time_left_sec=_to_int(timer_alert_data.get("time_left_sec", 100), 100),
-            min_price=_to_float(timer_alert_data.get("min_price", 0.75), 0.75),
-            max_price=_to_float(timer_alert_data.get("max_price", 0.95), 0.95),
-        ),
     )
 
     web_data = data.get("web_dashboard", {})
@@ -450,12 +281,6 @@ def load_config(config_path: Optional[str] = None) -> Config:
         enabled=bool(web_data.get("enabled", False)),
         host=str(web_data.get("host", "127.0.0.1")),
         port=int(web_data.get("port", 8765)),
-    )
-
-    btc_feed_data = data.get("btc_price_feed", {})
-    btc_price_feed = BTCPriceFeedConfig(
-        provider=str(btc_feed_data.get("provider", "chainlink")).strip().lower(),
-        ws_url=str(btc_feed_data.get("ws_url", "")).strip(),
     )
     
     # Polymarket (from env only - secrets)
@@ -476,12 +301,13 @@ def load_config(config_path: Optional[str] = None) -> Config:
         simulation=simulation,
         strategy=strategy,
         buffer=float(data.get("buffer", 25.0)),
+        buffer_decay=buffer_decay,
+        in_window_buffer_decay=in_window_buffer_decay,
         entry=entry,
         hedge=hedge,
         redeem=redeem,
         telegram=telegram,
         web_dashboard=web_dashboard,
-        btc_price_feed=btc_price_feed,
         polymarket=polymarket,
     )
 
@@ -547,71 +373,23 @@ def validate_config(config: Config) -> list:
             f"must be greater than min_deviation_pct ({config.strategy.min_deviation_pct})"
         )
 
-    vac = config.strategy.volume_acceleration_check
-    if vac.window_sec <= 0:
-        errors.append("strategy.volume_acceleration_check.window_sec must be > 0")
-    if vac.threshold < 0:
-        errors.append("strategy.volume_acceleration_check.threshold must be >= 0")
-    if vac.min_accel_diff < 0:
-        errors.append("strategy.volume_acceleration_check.min_accel_diff must be >= 0")
-    if vac.min_current_volume_diff < 0:
-        errors.append("strategy.volume_acceleration_check.min_current_volume_diff must be >= 0")
-    if str(getattr(vac, "volume_basis", "total")).lower() not in {"total", "buy"}:
-        errors.append("strategy.volume_acceleration_check.volume_basis must be 'total' or 'buy'")
-
-    for mode_name, mode_cfg in [
-        ("mode_70s", config.strategy.late_entry_modes.mode_70s),
-        ("mode_60s", config.strategy.late_entry_modes.mode_60s),
-        ("mode_40s", config.strategy.late_entry_modes.mode_40s),
-        ("mode_30s", config.strategy.late_entry_modes.mode_30s),
-        ("mode_20s", config.strategy.late_entry_modes.mode_20s),
-    ]:
-        if mode_cfg.min_contracts <= 0:
-            errors.append(f"strategy.late_entry_modes.{mode_name}.min_contracts must be > 0")
-        if mode_cfg.max_trades <= 0:
-            errors.append(f"strategy.late_entry_modes.{mode_name}.max_trades must be > 0")
-        if mode_cfg.buffer_avg_multiplier <= 0:
-            errors.append(f"strategy.late_entry_modes.{mode_name}.buffer_avg_multiplier must be > 0")
-        if mode_cfg.min_buffer_threshold_usd < 0:
-            errors.append(f"strategy.late_entry_modes.{mode_name}.min_buffer_threshold_usd must be >= 0")
-
-    volume_mode = config.strategy.volume_eval_mode
-    if volume_mode.time_left_sec < 0:
-        errors.append("strategy.volume_eval_mode.time_left_sec must be >= 0")
-    if volume_mode.min_contracts <= 0:
-        errors.append("strategy.volume_eval_mode.min_contracts must be > 0")
-    if volume_mode.max_trades <= 0:
-        errors.append("strategy.volume_eval_mode.max_trades must be > 0")
-    if volume_mode.buffer_avg_multiplier <= 0:
-        errors.append("strategy.volume_eval_mode.buffer_avg_multiplier must be > 0")
-    if volume_mode.min_buffer_threshold_usd < 0:
-        errors.append("strategy.volume_eval_mode.min_buffer_threshold_usd must be >= 0")
-    if not volume_mode.entry_min_current_volume_diffs:
-        errors.append("strategy.volume_eval_mode.entry_min_current_volume_diffs must have at least 1 value")
-    for i, value in enumerate(volume_mode.entry_min_current_volume_diffs, start=1):
-        if value < 0:
-            errors.append(
-                f"strategy.volume_eval_mode.entry_min_current_volume_diffs[{i}] must be >= 0"
-            )
-
     if config.buffer < 0:
         errors.append("buffer must be >= 0")
 
-    if config.btc_price_feed.provider not in {"chainlink", "binance"}:
-        errors.append("btc_price_feed.provider must be 'chainlink' or 'binance'")
+    if config.buffer_decay.half_life_windows <= 0:
+        errors.append("buffer_decay.half_life_windows must be > 0")
+
+    if config.buffer_decay.min_periods < 1:
+        errors.append("buffer_decay.min_periods must be >= 1")
+
+    if config.in_window_buffer_decay.start_before_end_sec < 1:
+        errors.append("in_window_buffer_decay.start_before_end_sec must be >= 1")
+
+    if not (0 < config.in_window_buffer_decay.min_multiplier <= 1):
+        errors.append("in_window_buffer_decay.min_multiplier must be in (0, 1]")
 
     if config.web_dashboard.enabled:
         if not (1 <= config.web_dashboard.port <= 65535):
             errors.append("web_dashboard.port must be between 1 and 65535")
-
-    timer_alert = config.telegram.timer_alert
-    if timer_alert.time_left_sec < 0:
-        errors.append("telegram.timer_alert.time_left_sec must be >= 0")
-    if timer_alert.min_price < 0 or timer_alert.min_price > 1:
-        errors.append("telegram.timer_alert.min_price must be within [0, 1]")
-    if timer_alert.max_price < 0 or timer_alert.max_price > 1:
-        errors.append("telegram.timer_alert.max_price must be within [0, 1]")
-    if timer_alert.min_price >= timer_alert.max_price:
-        errors.append("telegram.timer_alert.min_price must be less than max_price")
     
     return errors
