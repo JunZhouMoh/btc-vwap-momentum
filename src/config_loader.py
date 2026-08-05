@@ -158,6 +158,7 @@ class TimerAlertConfig:
     time_left_sec: int = 100
     min_price: float = 0.75
     max_price: float = 0.95
+    min_btc_buffer_threshold_usd: float = 0.0
 
 
 @dataclass
@@ -442,6 +443,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             time_left_sec=_to_int(timer_alert_data.get("time_left_sec", 100), 100),
             min_price=_to_float(timer_alert_data.get("min_price", 0.75), 0.75),
             max_price=_to_float(timer_alert_data.get("max_price", 0.95), 0.95),
+            min_btc_buffer_threshold_usd=_to_float(timer_alert_data.get("min_btc_buffer_threshold_usd", 0.0), 0.0),
         ),
     )
 
@@ -613,5 +615,7 @@ def validate_config(config: Config) -> list:
         errors.append("telegram.timer_alert.max_price must be within [0, 1]")
     if timer_alert.min_price >= timer_alert.max_price:
         errors.append("telegram.timer_alert.min_price must be less than max_price")
+    if timer_alert.min_btc_buffer_threshold_usd < 0:
+        errors.append("telegram.timer_alert.min_btc_buffer_threshold_usd must be >= 0")
     
     return errors
