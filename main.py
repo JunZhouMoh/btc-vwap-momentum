@@ -95,8 +95,43 @@ from src.simulation_history import SimulationHistoryLogger
 from src.btc_volume_feed import BTCVolumeFeed
 
 
-start_web_dashboard = _web_dashboard.start_web_dashboard
-build_app = _web_dashboard.build_app
+def _fallback_build_app(holder):
+    """Minimal ASGI app used when src.web_dashboard does not provide build_app."""
+    try:
+        from fastapi import FastAPI
+        from fastapi.responses import JSONResponse
+
+        app_local = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
+
+        @app_local.get("/api/state")
+        async def api_state():
+            return JSONResponse(holder.get())
+
+        return app_local
+    except Exception:
+        async def app_local(scope, receive, send):
+            if scope.get("type") != "http":
+                return
+            body = b'{"status":"dashboard_unavailable"}'
+            headers = [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ]
+            await send({"type": "http.response.start", "status": 503, "headers": headers})
+            await send({"type": "http.response.body", "body": body})
+
+        return app_local
+
+
+def _fallback_start_web_dashboard(host, port, holder):
+    logger.warning(
+        "src.web_dashboard.start_web_dashboard not available; web dashboard disabled"
+    )
+    return False
+
+
+start_web_dashboard = getattr(_web_dashboard, "start_web_dashboard", _fallback_start_web_dashboard)
+build_app = getattr(_web_dashboard, "build_app", _fallback_build_app)
 
 
 if hasattr(_web_dashboard, "WebSnapshotHolder"):
