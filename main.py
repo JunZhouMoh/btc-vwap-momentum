@@ -3871,6 +3871,7 @@ class LiveTradingBot:
                     "time_left_sec": 100,
                     "min_price": 0.75,
                     "max_price": 0.95,
+                    "min_btc_buffer_threshold_usd": 0.0,
                     "timer_bot_ready": False,
                 }
             return {
@@ -3878,6 +3879,7 @@ class LiveTradingBot:
                 "time_left_sec": int(getattr(timer_alert, "time_left_sec", 100)),
                 "min_price": float(getattr(timer_alert, "min_price", 0.75)),
                 "max_price": float(getattr(timer_alert, "max_price", 0.95)),
+                "min_btc_buffer_threshold_usd": float(getattr(timer_alert, "min_btc_buffer_threshold_usd", 0.0)),
                 "timer_bot_ready": bool(
                     getattr(self.config.telegram, "timer_bot_token", "")
                     and getattr(self.config.telegram, "timer_chat_id", "")
@@ -3898,6 +3900,10 @@ class LiveTradingBot:
                 timer_alert.time_left_sec = max(0, int(payload.get("time_left_sec", timer_alert.time_left_sec)))
                 timer_alert.min_price = min(1.0, max(0.0, float(payload.get("min_price", timer_alert.min_price))))
                 timer_alert.max_price = min(1.0, max(0.0, float(payload.get("max_price", timer_alert.max_price))))
+                timer_alert.min_btc_buffer_threshold_usd = max(
+                    0.0,
+                    float(payload.get("min_btc_buffer_threshold_usd", getattr(timer_alert, "min_btc_buffer_threshold_usd", 0.0))),
+                )
             except (TypeError, ValueError):
                 pass
 
@@ -3948,7 +3954,24 @@ class LiveTradingBot:
         if not (min_price <= fav_price <= max_price):
             return
 
+        min_btc_buffer_threshold_usd = float(getattr(timer_alert, "min_btc_buffer_threshold_usd", 0.0) or 0.0)
+        btc_buffer = self._get_btc_buffer_status()
+        current_btc_buffer_usd = None
+        if btc_buffer:
+            current_btc_buffer_usd = float(btc_buffer.get("current_abs_usd", 0.0) or 0.0)
+        if min_btc_buffer_threshold_usd > 0.0:
+            if current_btc_buffer_usd is None:
+                return
+            if current_btc_buffer_usd < min_btc_buffer_threshold_usd:
+                return
+
         self._timer_alert_last_sent_slug = market_slug
+        btc_buffer_line = ""
+        if min_btc_buffer_threshold_usd > 0.0 and current_btc_buffer_usd is not None:
+            btc_buffer_line = (
+                f"\nBTC Buffer: ${current_btc_buffer_usd:.2f} "
+                f"(threshold ${min_btc_buffer_threshold_usd:.2f})"
+            )
         sent = await self.timer_telegram.send_message(
             (
                 "⏰ <b>Timer Alert</b>\n"
@@ -3957,6 +3980,7 @@ class LiveTradingBot:
                 f"Favorite: {fav['favorite']}\n"
                 f"Price: {fav_price:.3f}\n"
                 f"Range: [{min_price:.3f}, {max_price:.3f}]"
+                f"{btc_buffer_line}"
             )
         )
         if sent:
