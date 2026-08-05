@@ -24,6 +24,7 @@ import logging
 import re
 import signal
 import sys
+import threading
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from dataclasses import dataclass, field
@@ -84,7 +85,7 @@ signal_logger.setLevel(logging.DEBUG)
 
 # Project imports
 from src.config_loader import load_config, validate_config
-from src.web_dashboard import WebSnapshotHolder, start_web_dashboard, build_app
+from src import web_dashboard as _web_dashboard
 from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
@@ -92,6 +93,38 @@ from src.telegram_notifier import TelegramNotifier
 from src.user_websocket import UserWebSocket
 from src.simulation_history import SimulationHistoryLogger
 from src.btc_volume_feed import BTCVolumeFeed
+
+
+start_web_dashboard = _web_dashboard.start_web_dashboard
+build_app = _web_dashboard.build_app
+
+
+if hasattr(_web_dashboard, "WebSnapshotHolder"):
+    WebSnapshotHolder = _web_dashboard.WebSnapshotHolder
+else:
+    # Backward compatibility for older deployments where the holder was named differently.
+    _holder_cls = getattr(_web_dashboard, "SnapshotHolder", None) or getattr(_web_dashboard, "StateHolder", None)
+    if _holder_cls is not None:
+        WebSnapshotHolder = _holder_cls
+    else:
+        class WebSnapshotHolder:
+            """Fallback thread-safe holder used when web_dashboard lacks the holder class export."""
+
+            def __init__(self) -> None:
+                self._lock = threading.Lock()
+                self._data: Dict[str, Any] = {"status": "starting"}
+
+            def set(self, data: Dict[str, Any]) -> None:
+                with self._lock:
+                    self._data = dict(data)
+
+            def get(self) -> Dict[str, Any]:
+                with self._lock:
+                    return dict(self._data)
+
+    logger.warning(
+        "src.web_dashboard does not export WebSnapshotHolder; using compatibility fallback"
+    )
 
 # Constants
 GAMMA_API = "https://gamma-api.polymarket.com"
