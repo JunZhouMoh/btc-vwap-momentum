@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from dotenv import load_dotenv
-from src.runtime_paths import resolve_runtime_path
 
 # Load .env from project root
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -199,10 +198,10 @@ def load_config(config_path: Optional[str] = None) -> Config:
     simulation = SimulationConfig(
         enabled=bool(sim_data.get("enabled", False)),
         separate_trading_log=bool(sim_data.get("separate_trading_log", True)),
-        trading_log_path=str(resolve_runtime_path(str(sim_data.get("trading_log_path", "logs/trading_log_sim.json")))),
-        history_csv_path=str(resolve_runtime_path(str(sim_data.get("history_csv_path", "logs/simulation_trades.csv")))),
-        history_jsonl_path=str(resolve_runtime_path(str(sim_data.get("history_jsonl_path", "logs/simulation_history.jsonl")))),
-        history_summary_path=str(resolve_runtime_path(str(sim_data.get("history_summary_path", "logs/simulation_summary.json")))),
+        trading_log_path=str(sim_data.get("trading_log_path", "logs/trading_log_sim.json")),
+        history_csv_path=str(sim_data.get("history_csv_path", "logs/simulation_trades.csv")),
+        history_jsonl_path=str(sim_data.get("history_jsonl_path", "logs/simulation_history.jsonl")),
+        history_summary_path=str(sim_data.get("history_summary_path", "logs/simulation_summary.json")),
     )
 
     # Strategy
