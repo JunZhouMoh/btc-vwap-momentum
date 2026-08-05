@@ -3955,10 +3955,11 @@ class LiveTradingBot:
             return
 
         min_btc_buffer_threshold_usd = float(getattr(timer_alert, "min_btc_buffer_threshold_usd", 0.0) or 0.0)
-        btc_buffer = self._get_btc_buffer_status()
         current_btc_buffer_usd = None
-        if btc_buffer:
-            current_btc_buffer_usd = float(btc_buffer.get("current_abs_usd", 0.0) or 0.0)
+        btc_now = float(getattr(self.state, "btc_current_price", 0.0) or 0.0)
+        btc_anchor = float(getattr(self.state, "btc_anchor_price", 0.0) or 0.0)
+        if btc_now > 0.0 and btc_anchor > 0.0:
+            current_btc_buffer_usd = abs(btc_now - btc_anchor)
         if min_btc_buffer_threshold_usd > 0.0:
             if current_btc_buffer_usd is None:
                 return
