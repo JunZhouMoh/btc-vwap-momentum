@@ -124,9 +124,47 @@ def _fallback_build_app(holder):
 
 
 def _fallback_start_web_dashboard(host, port, holder):
+    """Start a minimal dashboard server when src.web_dashboard has no starter."""
     logger.warning(
-        "src.web_dashboard.start_web_dashboard not available; web dashboard disabled"
+        "src.web_dashboard.start_web_dashboard not available; using fallback uvicorn starter"
     )
+    try:
+        import socket
+        import uvicorn
+
+        app_local = _fallback_build_app(holder)
+
+        def _run() -> None:
+            try:
+                uvicorn.run(
+                    app_local,
+                    host=host,
+                    port=int(port),
+                    log_level="warning",
+                    access_log=False,
+                )
+            except Exception:
+                logger.exception("Fallback web dashboard failed to start")
+
+        t = threading.Thread(target=_run, name="web-dashboard-fallback", daemon=True)
+        t.start()
+
+        probe_host = host
+        if probe_host in ("0.0.0.0", ""):
+            probe_host = "127.0.0.1"
+        elif probe_host in ("::", "[::]"):
+            probe_host = "::1"
+
+        for _ in range(60):
+            time.sleep(0.1)
+            try:
+                with socket.create_connection((probe_host, int(port)), timeout=0.4):
+                    return True
+            except OSError:
+                continue
+    except Exception:
+        logger.exception("Fallback web dashboard bootstrap error")
+
     return False
 
 
@@ -2342,6 +2380,15 @@ class LiveTradingBot:
         self.dashboard.btc_volume_feed = self.btc_volume_feed
 
         wd = self.config.web_dashboard
+        railway_runtime = bool(
+            os.getenv("RAILWAY_ENVIRONMENT")
+            or os.getenv("RAILWAY_PROJECT_ID")
+            or os.getenv("PORT")
+        )
+        if railway_runtime and not wd.enabled:
+            wd.enabled = True
+            logger.info("Railway runtime detected: forcing web_dashboard.enabled=True")
+
         if wd.enabled:
             env_port = os.getenv("PORT")
             env_host = os.getenv("HOST")
