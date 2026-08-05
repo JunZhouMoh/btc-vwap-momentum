@@ -1,430 +1,340 @@
 #!/usr/bin/env python3
-"""WebSocket Client for Market + User channels."""
-import asyncio, json, logging, time
+"""
+User WebSocket Client
+
+Subscribes to Polymarket User Channel for order/trade tracking.
+Used to verify order execution before retry.
+
+Docs: https://docs.polymarket.com/developers/CLOB/websocket/user-channel
+"""
+
+import asyncio
+import json
+import logging
+import websockets
+from typing import Optional, Dict, Callable, Any
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
-from typing import Optional, Dict, List, Callable, Set
-import websockets
-from websockets.exceptions import ConnectionClosed
 
-logger = logging.getLogger("btc_live.websocket")
-MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-USER_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+logger = logging.getLogger("btc_live.user_ws")
 
+WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
 
-def _ws_is_closed(ws) -> bool:
-    """Compatibility helper across websockets client implementations."""
-    if ws is None:
-        return True
-
-    closed = getattr(ws, "closed", None)
-    if isinstance(closed, bool):
-        return closed
-
-    state = getattr(ws, "state", None)
-    if state is not None:
-        state_text = str(state).upper()
-        if "CLOSED" in state_text:
-            return True
-
-    return False
-
-
-def _ws_is_open(ws) -> bool:
-    """Compatibility helper across websockets client implementations."""
-    if ws is None:
-        return False
-
-    opened = getattr(ws, "open", None)
-    if isinstance(opened, bool):
-        return opened
-
-    if _ws_is_closed(ws):
-        return False
-
-    state = getattr(ws, "state", None)
-    if state is not None:
-        state_text = str(state).upper()
-        if "OPEN" in state_text:
-            return True
-        if "CLOS" in state_text:
-            return False
-
-    return True
-
-class ConnectionState(Enum):
-    DISCONNECTED = "disconnected"
-    CONNECTING = "connecting"
-    CONNECTED = "connected"
-    CLOSED = "closed"
 
 @dataclass
-class TradeEvent:
-    token_id: str; price: float; size: float; side: str
-    timestamp: datetime = field(default_factory=datetime.now)
-
-@dataclass
-class PriceUpdate:
-    token_id: str; best_bid: float; best_ask: float
-    timestamp: datetime = field(default_factory=datetime.now)
-
-@dataclass
-class OrderUpdate:
+class OrderStatus:
+    """Tracks order status from WebSocket."""
     order_id: str
     asset_id: str
     side: str
     price: float
-    original_size: float
-    size_matched: float
-    event_type: str
-    status: str
+    original_size: int
+    size_matched: int = 0
+    status: str = "PENDING"  # PENDING, PLACED, MATCHED, CANCELLED
+    trades: list = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
-
-
-@dataclass
-class TradeUpdate:
-    trade_id: str
-    asset_id: str
-    price: float
-    size: float
-    side: str
-    status: str
-    taker_order_id: str = ""
-    timestamp: datetime = field(default_factory=datetime.now)
-
-
-class MarketWebSocket:
-    """WebSocket client for Market channel."""
-    
-    def __init__(self, on_trade=None, on_price=None, reconnect_delay=1.0, max_reconnect_delay=60.0):
-        self.on_trade = on_trade
-        self.on_price = on_price
-        self.reconnect_delay = reconnect_delay
-        self.max_reconnect_delay = max_reconnect_delay
-        self._ws = None
-        self._state = ConnectionState.DISCONNECTED
-        self._subscribed_tokens: Set[str] = set()
-        self._running = False
-        self._reconnect_count = 0
-        self.messages_received = 0
-        self.trades_received = 0
-    
-    @property
-    def is_connected(self) -> bool:
-        return self._state == ConnectionState.CONNECTED
-    
-    async def connect(self, token_ids: List[str]) -> bool:
-        if not token_ids:
-            return False
-        self._subscribed_tokens = set(token_ids)
-        self._state = ConnectionState.CONNECTING
-        try:
-            self._ws = await asyncio.wait_for(
-                websockets.connect(MARKET_WS_URL, ping_interval=20, ping_timeout=10),
-                timeout=30
-            )
-            await self._ws.send(json.dumps({"type": "market", "assets_ids": list(token_ids)}))
-            self._state = ConnectionState.CONNECTED
-            self._reconnect_count = 0
-            logger.info(f"Market WS connected, subscribed to {len(token_ids)} tokens")
-            return True
-        except Exception as e:
-            logger.error(f"Market WS connect error: {e}")
-            self._state = ConnectionState.DISCONNECTED
-            return False
-    
-    async def _process_message(self, data):
-        try:
-            items = data if isinstance(data, list) else [data]
-            for item in items:
-                event_type = item.get("event_type", "")
-                if event_type == "last_trade_price":
-                    trade = TradeEvent(
-                        token_id=item.get("asset_id", ""),
-                        price=float(item.get("price", 0)),
-                        size=float(item.get("size", 0)),
-                        side=item.get("side", ""),
-                    )
-                    self.trades_received += 1
-                    if self.on_trade:
-                        if asyncio.iscoroutinefunction(self.on_trade):
-                            await self.on_trade(trade)
-                        else:
-                            self.on_trade(trade)
-                elif event_type == "best_bid_ask":
-                    update = PriceUpdate(
-                        token_id=item.get("asset_id", ""),
-                        best_bid=float(item.get("best_bid", 0) or 0),
-                        best_ask=float(item.get("best_ask", 0) or 0),
-                    )
-                    if self.on_price:
-                        if asyncio.iscoroutinefunction(self.on_price):
-                            await self.on_price(update)
-                        else:
-                            self.on_price(update)
-        except Exception as e:
-            logger.error(f"Process error: {e}")
-    
-    async def _receive_loop(self):
-        while self._running and self._ws:
-            try:
-                msg = await asyncio.wait_for(self._ws.recv(), timeout=30)
-                self.messages_received += 1
-                await self._process_message(json.loads(msg))
-            except asyncio.TimeoutError:
-                if self._ws and _ws_is_open(self._ws):
-                    try:
-                        await asyncio.wait_for(self._ws.ping(), timeout=5)
-                    except:
-                        break
-                else:
-                    break
-            except ConnectionClosed:
-                break
-            except Exception as e:
-                logger.error(f"Receive error: {e}")
-                break
-    
-    async def run_loop(self, token_ids: List[str]):
-        self._running = True
-        self._subscribed_tokens = set(token_ids)
-        while self._running:
-            try:
-                if not await self.connect(list(self._subscribed_tokens)):
-                    delay = min(self.reconnect_delay * (2 ** self._reconnect_count), self.max_reconnect_delay)
-                    await asyncio.sleep(delay)
-                    self._reconnect_count += 1
-                    continue
-                await self._receive_loop()
-                if self._running:
-                    delay = min(self.reconnect_delay * (2 ** self._reconnect_count), self.max_reconnect_delay)
-                    await asyncio.sleep(delay)
-                    self._reconnect_count += 1
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Loop error: {e}")
-                await asyncio.sleep(self.reconnect_delay)
-        await self.close()
-    
-    async def close(self):
-        self._running = False
-        self._state = ConnectionState.CLOSED
-        if self._ws and not _ws_is_closed(self._ws):
-            try:
-                await self._ws.close()
-            except:
-                pass
-        self._ws = None
-    
-    def stop(self):
-        self._running = False
 
 
 class UserWebSocket:
-    """WebSocket client for User channel with auth."""
+    """
+    WebSocket client for User Channel.
     
-    def __init__(self, api_key, api_secret, api_passphrase, on_order=None, on_trade=None):
+    Tracks order placements and fills in real-time.
+    """
+    
+    def __init__(self, api_key: str, api_secret: str = "", api_passphrase: str = ""):
         self.api_key = api_key
         self.api_secret = api_secret
         self.api_passphrase = api_passphrase
-        self.on_order = on_order
-        self.on_trade = on_trade
-        self._on_order = on_order
-        self._on_trade = on_trade
-        self._ws = None
-        self._state = ConnectionState.DISCONNECTED
+        self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
-        self._reconnect_count = 0
-        self._pending_orders: Dict[str, OrderUpdate] = {}
-        self._token_fills: Dict[str, List[Dict]] = {}
+        self._connected = False
+        
+        # Order tracking
+        self._orders: Dict[str, OrderStatus] = {}
+        self._pending_orders: Dict[str, asyncio.Event] = {}
+        
+        # Token-based fill tracking (for timeout recovery)
+        self._token_fills: Dict[str, list] = {}  # asset_id -> [{"size", "price", ...}]
         self._pending_token_fills: Dict[str, asyncio.Event] = {}
-        self.messages_received = 0
+        
+        # Callbacks
+        self._on_trade: Optional[Callable] = None
+        self._on_order: Optional[Callable] = None
     
-    @property
-    def is_connected(self) -> bool:
-        return self._state == ConnectionState.CONNECTED
-
-    @property
-    def connected(self) -> bool:
-        return self.is_connected
-    
-    async def connect(self) -> bool:
-        self._state = ConnectionState.CONNECTING
+    async def connect(self):
+        """Connect to User Channel WebSocket."""
         try:
-            self._ws = await asyncio.wait_for(
-                websockets.connect(USER_WS_URL, ping_interval=20, ping_timeout=10),
-                timeout=30
-            )
-            msg = {
-                "type": "user",
-                "markets": [],
-                "auth": {"apiKey": self.api_key, "secret": self.api_secret, "passphrase": self.api_passphrase}
-            }
-            await self._ws.send(json.dumps(msg))
-            self._state = ConnectionState.CONNECTED
-            self._reconnect_count = 0
-            logger.info("User WS connected")
-            return True
-        except Exception as e:
-            logger.error(f"User WS connect error: {e}")
-            self._state = ConnectionState.DISCONNECTED
-            return False
-    
-    async def _process_message(self, data: Dict):
-        try:
-            event_type = data.get("event_type", "")
-            msg_type = data.get("type", "")
-            if event_type == "order" or msg_type in ("PLACEMENT", "UPDATE", "CANCELLATION"):
-                order = OrderUpdate(
-                    order_id=data.get("id", ""),
-                    asset_id=data.get("asset_id", ""),
-                    side=data.get("side", ""),
-                    price=float(data.get("price", 0)),
-                    original_size=float(data.get("original_size", 0)),
-                    size_matched=float(data.get("size_matched", 0)),
-                    event_type=data.get("type", msg_type),
-                    status=data.get("status", ""),
-                )
-                self._pending_orders[order.order_id] = order
-                cb_order = self._on_order or self.on_order
-                if cb_order:
-                    if asyncio.iscoroutinefunction(cb_order):
-                        await cb_order(order)
-                    else:
-                        cb_order(order)
-            elif event_type == "trade" or msg_type == "TRADE":
-                asset_id = data.get("asset_id", "")
-                status = data.get("status", "")
-                trade = TradeUpdate(
-                    trade_id=data.get("id", ""),
-                    asset_id=asset_id,
-                    price=float(data.get("price", 0)),
-                    size=float(data.get("size", 0)),
-                    side=data.get("side", ""),
-                    status=status,
-                    taker_order_id=data.get("taker_order_id", ""),
-                )
-
-                if asset_id and str(status).upper() == "MATCHED":
-                    self._token_fills.setdefault(asset_id, []).append({
-                        "size": int(float(data.get("size", 0) or 0)),
-                        "price": float(data.get("price", 0) or 0.0),
-                        "order_id": data.get("taker_order_id", "") or data.get("maker_order_id", ""),
-                        "timestamp": time.time(),
-                    })
-                    evt = self._pending_token_fills.get(asset_id)
-                    if evt:
-                        evt.set()
-
-                cb_trade = self._on_trade or self.on_trade
-                if cb_trade:
-                    if asyncio.iscoroutinefunction(cb_trade):
-                        await cb_trade(data)
-                    else:
-                        cb_trade(data)
-        except Exception as e:
-            logger.error(f"User msg error: {e}")
-    
-    async def _receive_loop(self):
-        while self._running and self._ws:
-            try:
-                msg = await asyncio.wait_for(self._ws.recv(), timeout=30)
-                self.messages_received += 1
-                await self._process_message(json.loads(msg))
-            except asyncio.TimeoutError:
-                if self._ws and _ws_is_open(self._ws):
+            self._running = True
+            
+            logger.info(f"Connecting to User WebSocket at {WS_URL}...")
+            print(f"  Connecting to {WS_URL}...")
+            
+            # Connect without extra_headers (auth via message)
+            async with websockets.connect(
+                WS_URL,
+                ping_interval=30,
+                ping_timeout=10
+            ) as ws:
+                self._ws = ws
+                self._connected = True
+                logger.info("User WebSocket connected")
+                print("  WebSocket connection established")
+                
+                # Subscribe to user channel with auth object
+                subscribe_msg = {
+                    "type": "user",
+                    "auth": {
+                        "apiKey": self.api_key,
+                        "secret": self.api_secret,
+                        "passphrase": self.api_passphrase
+                    }
+                }
+                await ws.send(json.dumps(subscribe_msg))
+                logger.info("Sent subscription message")
+                print("  Sent subscription message")
+                print(subscribe_msg)
+                # Wait for response
+                try:
+                    first_msg = await asyncio.wait_for(ws.recv(), timeout=5)
+                    logger.info(f"First message: {first_msg[:200]}")
+                    print(f"  First response: {first_msg[:100]}...")
+                    await self._process_message(first_msg)
+                except asyncio.TimeoutError:
+                    logger.warning("No initial response from WebSocket")
+                    print("  No initial response (timeout)")
+                
+                # Listen for messages
+                while self._running:
                     try:
-                        await asyncio.wait_for(self._ws.ping(), timeout=5)
-                    except:
+                        msg = await asyncio.wait_for(ws.recv(), timeout=60)
+                        logger.debug(f"WS message: {msg[:100]}")
+                        await self._process_message(msg)
+                    except asyncio.TimeoutError:
+                        # Send ping to keep alive
+                        await ws.ping()
+                    except websockets.ConnectionClosed as e:
+                        logger.warning(f"User WebSocket connection closed: {e}")
+                        print(f"  WebSocket closed: {e}")
                         break
-                else:
-                    break
-            except ConnectionClosed:
-                break
-            except Exception as e:
-                logger.error(f"User recv error: {e}")
-                break
+                        
+        except Exception as e:
+            logger.error(f"User WebSocket error: {e}")
+            print(f"  WebSocket error: {e}")
+        finally:
+            self._connected = False
+            self._ws = None
     
-    async def run_loop(self):
-        self._running = True
-        while self._running:
-            try:
-                if not await self.connect():
-                    await asyncio.sleep(min(1 * (2 ** self._reconnect_count), 60))
-                    self._reconnect_count += 1
-                    continue
-                await self._receive_loop()
-                if self._running:
-                    await asyncio.sleep(min(1 * (2 ** self._reconnect_count), 60))
-                    self._reconnect_count += 1
-            except asyncio.CancelledError:
-                break
-        await self.close()
+    async def _process_message(self, msg: str):
+        """Process incoming WebSocket message."""
+        try:
+            data = json.loads(msg)
+            event_type = data.get("event_type", "")
+            
+            if event_type == "order":
+                await self._handle_order(data)
+            elif event_type == "trade":
+                await self._handle_trade(data)
+                
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
     
-    async def close(self):
-        self._running = False
-        self._state = ConnectionState.CLOSED
-        if self._ws and not _ws_is_closed(self._ws):
-            try:
-                await self._ws.close()
-            except:
-                pass
-        self._ws = None
-
-    async def disconnect(self):
-        await self.close()
+    async def _handle_order(self, data: dict):
+        """Handle order event (PLACEMENT, UPDATE, CANCELLATION)."""
+        order_id = data.get("id", "")
+        order_type = data.get("type", "")  # PLACEMENT, UPDATE, CANCELLATION
+        
+        logger.info(f"Order event: {order_type} for {order_id[:20]}...")
+        
+        if order_id in self._orders:
+            order = self._orders[order_id]
+            order.size_matched = int(float(data.get("size_matched", 0)))
+            
+            if order_type == "CANCELLATION":
+                order.status = "CANCELLED"
+            elif order.size_matched > 0:
+                order.status = "MATCHED"
+            else:
+                order.status = "PLACED"
+        else:
+            # New order
+            self._orders[order_id] = OrderStatus(
+                order_id=order_id,
+                asset_id=data.get("asset_id", ""),
+                side=data.get("side", ""),
+                price=float(data.get("price", 0)),
+                original_size=int(float(data.get("original_size", 0))),
+                size_matched=int(float(data.get("size_matched", 0))),
+                status="PLACED" if order_type == "PLACEMENT" else order_type
+            )
+        
+        # Signal waiters
+        if order_id in self._pending_orders:
+            self._pending_orders[order_id].set()
+        
+        # Callback
+        if self._on_order:
+            await self._on_order(data)
     
-    def stop(self):
-        self._running = False
+    async def _handle_trade(self, data: dict):
+        """Handle trade event (MATCHED, MINED, CONFIRMED, etc)."""
+        order_id = data.get("taker_order_id", "")
+        asset_id = data.get("asset_id", "")
+        status = data.get("status", "")
+        size = int(float(data.get("size", 0)))
+        price = float(data.get("price", 0))
+        
+        logger.info(f"Trade event: {status} - {size} @ {price} for {order_id[:20]}...")
+        
+        if order_id in self._orders:
+            order = self._orders[order_id]
+            order.trades.append({
+                "size": size,
+                "price": price,
+                "status": status,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            if status == "MATCHED":
+                order.size_matched += size
+                order.status = "MATCHED"
+        
+        # Store trade by asset_id for token-based recovery lookups
+        if asset_id and status == "MATCHED":
+            if asset_id not in self._token_fills:
+                self._token_fills[asset_id] = []
+            self._token_fills[asset_id].append({
+                "size": size,
+                "price": price,
+                "order_id": order_id,
+                "timestamp": datetime.now().isoformat()
+            })
+            # Signal token waiters
+            if asset_id in self._pending_token_fills:
+                self._pending_token_fills[asset_id].set()
+        
+        # Signal waiters
+        if order_id in self._pending_orders:
+            self._pending_orders[order_id].set()
+        
+        # Callback
+        if self._on_trade:
+            await self._on_trade(data)
     
-    def get_order(self, order_id: str) -> Optional[OrderUpdate]:
-        return self._pending_orders.get(order_id)
-
+    async def wait_for_order(self, order_id: str, timeout: float = 2.0) -> Optional[OrderStatus]:
+        """
+        Wait for order confirmation via WebSocket.
+        
+        WebSocket responses are instant (milliseconds).
+        Timeout is just safety net, normally responds < 100ms.
+        
+        Args:
+            order_id: Order ID to wait for
+            timeout: Max seconds to wait (default 2s, normally instant)
+            
+        Returns:
+            OrderStatus if received, None if timeout
+        """
+        if order_id in self._orders:
+            return self._orders[order_id]
+        
+        # Create event to wait for
+        event = asyncio.Event()
+        self._pending_orders[order_id] = event
+        
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+            return self._orders.get(order_id)
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout waiting for order {order_id[:20]}...")
+            return None
+        finally:
+            self._pending_orders.pop(order_id, None)
+    
+    async def wait_for_fills_on_token(self, token_id: str, timeout: float = 10.0) -> Optional[Dict]:
+        """
+        Wait for fill events on a specific token (by asset_id).
+        
+        Used for timeout recovery: we don't know the order_id,
+        but we know which token we tried to buy. Check buffer first,
+        then wait for new events.
+        
+        Args:
+            token_id: The asset_id (token) we tried to buy
+            timeout: Max seconds to wait
+            
+        Returns:
+            {"contracts": int, "avg_price": float, "fills": list} or None
+        """
+        # 1. Check buffer first — event may have arrived during HTTP timeout
+        if token_id in self._token_fills and self._token_fills[token_id]:
+            fills = self._token_fills[token_id]
+            logger.info(f"Recovery: found {len(fills)} fills in buffer for {token_id[:20]}...")
+            return self._aggregate_fills(fills)
+        
+        # 2. Wait for new events
+        logger.info(f"Recovery: waiting up to {timeout}s for fills on {token_id[:20]}...")
+        event = asyncio.Event()
+        self._pending_token_fills[token_id] = event
+        
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+            
+            # Event fired — check what arrived
+            fills = self._token_fills.get(token_id, [])
+            if fills:
+                logger.info(f"Recovery: got {len(fills)} fills after waiting for {token_id[:20]}...")
+                
+                # Wait a bit more for additional partial fills to aggregate
+                await asyncio.sleep(1.0)
+                fills = self._token_fills.get(token_id, [])
+                
+                return self._aggregate_fills(fills)
+            return None
+            
+        except asyncio.TimeoutError:
+            logger.warning(f"Recovery: no fills after {timeout}s for {token_id[:20]}...")
+            return None
+        finally:
+            self._pending_token_fills.pop(token_id, None)
+    
     @staticmethod
-    def _aggregate_fills(fills: List[Dict]) -> Dict:
-        total_contracts = sum(int(f.get("size", 0) or 0) for f in fills)
-        total_cost = sum(
-            int(f.get("size", 0) or 0) * float(f.get("price", 0) or 0.0)
-            for f in fills
-        )
-        avg_price = (total_cost / total_contracts) if total_contracts > 0 else 0.0
+    def _aggregate_fills(fills: list) -> Dict:
+        """Aggregate multiple fill events into totals."""
+        total_contracts = sum(f["size"] for f in fills)
+        total_cost = sum(f["size"] * f["price"] for f in fills)
+        avg_price = total_cost / total_contracts if total_contracts > 0 else 0
         return {
             "contracts": total_contracts,
             "avg_price": avg_price,
             "total_cost": total_cost,
-            "fills": fills,
+            "fills": fills
         }
-
-    async def wait_for_fills_on_token(self, token_id: str, timeout: float = 10.0) -> Optional[Dict]:
-        fills = self._token_fills.get(token_id, [])
-        if fills:
-            return self._aggregate_fills(fills)
-
-        evt = asyncio.Event()
-        self._pending_token_fills[token_id] = evt
-        try:
-            await asyncio.wait_for(evt.wait(), timeout=timeout)
-            fills = self._token_fills.get(token_id, [])
-            if not fills:
-                return None
-            await asyncio.sleep(1.0)
-            fills = self._token_fills.get(token_id, [])
-            return self._aggregate_fills(fills) if fills else None
-        except asyncio.TimeoutError:
-            return None
-        finally:
-            self._pending_token_fills.pop(token_id, None)
-
+    
     def clear_token_fills(self):
+        """Clear token fill buffer (call on market change)."""
         self._token_fills.clear()
     
-    async def wait_for_fill(self, order_id: str, timeout: float = 5.0) -> Optional[OrderUpdate]:
-        start = time.time()
-        while time.time() - start < timeout:
-            order = self._pending_orders.get(order_id)
-            if order and (order.size_matched > 0 or order.event_type == "CANCELLATION"):
-                return order
-            await asyncio.sleep(0.1)
-        return self._pending_orders.get(order_id)
+    def get_order(self, order_id: str) -> Optional[OrderStatus]:
+        """Get order status by ID."""
+        return self._orders.get(order_id)
+    
+    def get_filled_contracts(self, order_id: str) -> int:
+        """Get number of contracts filled for an order."""
+        order = self._orders.get(order_id)
+        return order.size_matched if order else 0
+    
+    async def disconnect(self):
+        """Disconnect WebSocket."""
+        self._running = False
+        if self._ws:
+            await self._ws.close(code=1000)
+            logger.info("User WebSocket disconnected")
+    
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+
+# Backward-compatible alias for deployments importing lowercase symbol.
+user_websocket = UserWebSocket
