@@ -92,9 +92,21 @@ from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
 from src.telegram_notifier import TelegramNotifier
-from src.user_websocket import UserWebSocket
 from src.simulation_history import SimulationHistoryLogger
 from src.btc_volume_feed import BTCVolumeFeed
+
+# Compatibility import: some deployments may expose a differently named symbol
+# in src.user_websocket (e.g. lowercase alias). Prefer that module first.
+try:
+    from src.user_websocket import UserWebSocket
+except ImportError:
+    import src.user_websocket as _user_ws_module
+
+    UserWebSocket = getattr(_user_ws_module, "UserWebSocket", None)
+    if UserWebSocket is None:
+        UserWebSocket = getattr(_user_ws_module, "user_websocket", None)
+    if UserWebSocket is None:
+        from src.websocket_client import UserWebSocket
 
 # Constants
 GAMMA_API = "https://gamma-api.polymarket.com"
