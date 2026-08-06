@@ -15,6 +15,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from src.path_utils import resolve_runtime_path
 
 logger = logging.getLogger("btc_live.simulation_history")
 
@@ -56,10 +57,10 @@ class SimulationHistoryLogger:
         jsonl_path: Optional[str] = "logs/simulation_history.jsonl",
         summary_path: str = "logs/simulation_summary.json",
     ):
-        self.csv_path = Path(csv_path) if (csv_path or "").strip() else None
+        self.csv_path = resolve_runtime_path(csv_path) if (csv_path or "").strip() else None
         jp = (jsonl_path or "").strip()
-        self.jsonl_path = Path(jp) if jp else None
-        self.summary_path = Path(summary_path) if (summary_path or "").strip() else None
+        self.jsonl_path = resolve_runtime_path(jp, json_only=True) if jp else None
+        self.summary_path = resolve_runtime_path(summary_path, json_only=True) if (summary_path or "").strip() else None
         self._csv_header_written = (
             bool(self.csv_path and self.csv_path.exists() and self.csv_path.stat().st_size > 0)
         )
