@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any
+from src.path_utils import resolve_runtime_path
 
 logger = logging.getLogger("btc_live.tracker")
 
@@ -131,8 +132,8 @@ class PositionTracker:
         trades_file: str = "logs/trades.jsonl",
         state_file: str = "logs/state.json"
     ):
-        self.trades_file = Path(trades_file)
-        self.state_file = Path(state_file)
+        self.trades_file = resolve_runtime_path(trades_file, json_only=True)
+        self.state_file = resolve_runtime_path(state_file, json_only=True)
         
         # Ensure directories exist
         self.trades_file.parent.mkdir(parents=True, exist_ok=True)
