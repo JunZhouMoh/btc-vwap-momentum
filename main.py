@@ -76,6 +76,7 @@ from src.order_executor import OrderExecutor, ExecutionConfig
 from src.hedge_manager import HedgeManager, HedgeConfig as HedgeManagerConfig, HedgeResult
 from src.auto_redeemer import AsyncAutoRedeemer
 from src.telegram_notifier import TelegramNotifier
+from src.path_utils import resolve_runtime_path
 try:
     # Current layout: UserWebSocket lives in websocket_client.
     from src.websocket_client import UserWebSocket
@@ -408,7 +409,7 @@ class WinRateTable:
 
 class TradingStats:
     def __init__(self, log_file: str = "logs/trading_log.json"):
-        self.log_file = Path(log_file)
+        self.log_file = resolve_runtime_path(log_file, json_only=True)
         self.position: Optional[Position] = None
         self.trades: List[TradeRecord] = []
         self.markets_seen: int = 0
@@ -1389,7 +1390,7 @@ class BTCPriceMovementLogger:
     WINDOW_SEC = 300  # 5 minutes per buy
 
     def __init__(self, log_file: str = "logs/btc_price_movements.jsonl"):
-        self.log_file = Path(log_file)
+        self.log_file = resolve_runtime_path(log_file, json_only=True)
         self.buy_events: List[Dict[str, Any]] = []  # Each buy with its BTC price snapshots
         self._lock = threading.Lock()
 
@@ -1558,7 +1559,7 @@ class MarketMicrostructureLogger:
     """Writes periodic market microstructure snapshots into data/ as JSONL."""
 
     def __init__(self, log_file: str = "data/market_microstructure.jsonl", interval_sec: float = 5.0):
-        self.log_file = Path(log_file)
+        self.log_file = resolve_runtime_path(log_file, json_only=True)
         self.interval_sec = max(1.0, float(interval_sec))
         self._next_emit_ts = 0.0
         self._lock = threading.Lock()
@@ -1929,7 +1930,7 @@ class Dashboard:
     def _write_latest_5_windows_from_history(self, periods: int = 5) -> None:
         """Load and export latest N completed trades from trading_log.json (past events only)."""
         try:
-            trading_log = Path("logs") / "trading_log.json"
+            trading_log = self.stats.log_file
             if not trading_log.exists():
                 logger.info("No trading history to export for latest_5_windows")
                 return
@@ -3871,7 +3872,7 @@ class LiveTradingBot:
                     "time_left_sec": 100,
                     "min_price": 0.75,
                     "max_price": 0.95,
-                    "min_btc_buffer_threshold_usd": 0.0,
+                    "btc_buffer_multiplier": 0.0,
                     "timer_bot_ready": False,
                 }
             return {
@@ -3879,7 +3880,7 @@ class LiveTradingBot:
                 "time_left_sec": int(getattr(timer_alert, "time_left_sec", 100)),
                 "min_price": float(getattr(timer_alert, "min_price", 0.75)),
                 "max_price": float(getattr(timer_alert, "max_price", 0.95)),
-                "min_btc_buffer_threshold_usd": float(getattr(timer_alert, "min_btc_buffer_threshold_usd", 0.0)),
+                "btc_buffer_multiplier": float(getattr(timer_alert, "btc_buffer_multiplier", 0.0)),
                 "timer_bot_ready": bool(
                     getattr(self.config.telegram, "timer_bot_token", "")
                     and getattr(self.config.telegram, "timer_chat_id", "")
@@ -3900,9 +3901,9 @@ class LiveTradingBot:
                 timer_alert.time_left_sec = max(0, int(payload.get("time_left_sec", timer_alert.time_left_sec)))
                 timer_alert.min_price = min(1.0, max(0.0, float(payload.get("min_price", timer_alert.min_price))))
                 timer_alert.max_price = min(1.0, max(0.0, float(payload.get("max_price", timer_alert.max_price))))
-                timer_alert.min_btc_buffer_threshold_usd = max(
+                timer_alert.btc_buffer_multiplier = max(
                     0.0,
-                    float(payload.get("min_btc_buffer_threshold_usd", getattr(timer_alert, "min_btc_buffer_threshold_usd", 0.0))),
+                    float(payload.get("btc_buffer_multiplier", getattr(timer_alert, "btc_buffer_multiplier", 0.0))),
                 )
             except (TypeError, ValueError):
                 pass
@@ -3954,24 +3955,44 @@ class LiveTradingBot:
         if not (min_price <= fav_price <= max_price):
             return
 
-        min_btc_buffer_threshold_usd = float(getattr(timer_alert, "min_btc_buffer_threshold_usd", 0.0) or 0.0)
+        btc_buffer_multiplier = float(getattr(timer_alert, "btc_buffer_multiplier", 0.0) or 0.0)
         current_btc_buffer_usd = None
         btc_now = float(getattr(self.state, "btc_current_price", 0.0) or 0.0)
         btc_anchor = float(getattr(self.state, "btc_anchor_price", 0.0) or 0.0)
         if btc_now > 0.0 and btc_anchor > 0.0:
             current_btc_buffer_usd = abs(btc_now - btc_anchor)
-        if min_btc_buffer_threshold_usd > 0.0:
+
+        required_btc_buffer_usd = None
+        if btc_buffer_multiplier > 0.0:
+            recent_moves = list(self.state.btc_window_moves)[-5:]
+            if recent_moves:
+                abs_values: List[float] = []
+                for row in recent_moves:
+                    try:
+                        abs_values.append(abs(float(row.get("abs_usd", 0.0) or 0.0)))
+                    except (TypeError, ValueError):
+                        continue
+                if abs_values:
+                    required_btc_buffer_usd = (sum(abs_values) / len(abs_values)) * btc_buffer_multiplier
+
+        if btc_buffer_multiplier > 0.0:
             if current_btc_buffer_usd is None:
                 return
-            if current_btc_buffer_usd < min_btc_buffer_threshold_usd:
+            if required_btc_buffer_usd is None:
+                return
+            if current_btc_buffer_usd < required_btc_buffer_usd:
                 return
 
         self._timer_alert_last_sent_slug = market_slug
         btc_buffer_line = ""
-        if min_btc_buffer_threshold_usd > 0.0 and current_btc_buffer_usd is not None:
+        if (
+            btc_buffer_multiplier > 0.0
+            and current_btc_buffer_usd is not None
+            and required_btc_buffer_usd is not None
+        ):
             btc_buffer_line = (
                 f"\nBTC Buffer: ${current_btc_buffer_usd:.2f} "
-                f"(threshold ${min_btc_buffer_threshold_usd:.2f})"
+                f"(need >= ${required_btc_buffer_usd:.2f}, mult {btc_buffer_multiplier:.2f}x)"
             )
         sent = await self.timer_telegram.send_message(
             (
