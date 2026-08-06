@@ -3896,17 +3896,39 @@ class LiveTradingBot:
             if not timer_alert:
                 return self._web_get_timer_alert()
 
-            try:
-                timer_alert.enabled = bool(payload.get("enabled", timer_alert.enabled))
-                timer_alert.time_left_sec = max(0, int(payload.get("time_left_sec", timer_alert.time_left_sec)))
-                timer_alert.min_price = min(1.0, max(0.0, float(payload.get("min_price", timer_alert.min_price))))
-                timer_alert.max_price = min(1.0, max(0.0, float(payload.get("max_price", timer_alert.max_price))))
-                timer_alert.btc_buffer_multiplier = max(
-                    0.0,
-                    float(payload.get("btc_buffer_multiplier", getattr(timer_alert, "btc_buffer_multiplier", 0.0))),
-                )
-            except (TypeError, ValueError):
-                pass
+            # Parse fields independently so one bad value does not discard other updates.
+            if "enabled" in payload:
+                timer_alert.enabled = bool(payload.get("enabled"))
+
+            if "time_left_sec" in payload:
+                try:
+                    timer_alert.time_left_sec = max(0, int(payload.get("time_left_sec")))
+                except (TypeError, ValueError):
+                    pass
+
+            if "min_price" in payload:
+                try:
+                    timer_alert.min_price = min(1.0, max(0.0, float(payload.get("min_price"))))
+                except (TypeError, ValueError):
+                    pass
+
+            if "max_price" in payload:
+                try:
+                    timer_alert.max_price = min(1.0, max(0.0, float(payload.get("max_price"))))
+                except (TypeError, ValueError):
+                    pass
+
+            # Accept both the current key and the older alias for compatibility.
+            mult_raw = None
+            if "btc_buffer_multiplier" in payload:
+                mult_raw = payload.get("btc_buffer_multiplier")
+            elif "min_btc_buffer_threshold_usd" in payload:
+                mult_raw = payload.get("min_btc_buffer_threshold_usd")
+            if mult_raw is not None:
+                try:
+                    timer_alert.btc_buffer_multiplier = max(0.0, float(mult_raw))
+                except (TypeError, ValueError):
+                    pass
 
             if timer_alert.min_price > timer_alert.max_price:
                 timer_alert.min_price, timer_alert.max_price = timer_alert.max_price, timer_alert.min_price
