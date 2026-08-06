@@ -149,6 +149,20 @@ See the Configuration section below for parameter descriptions.
 mkdir -p logs
 ```
 
+### Step 7.1: Railway Persistent Storage (`/data`)
+
+If you deploy on Railway and want JSON/JSONL state to survive restarts:
+
+1. Add a **Volume** in Railway.
+2. Mount it at `/data`.
+3. (Optional) set env var `DATA_DIR=/data`.
+
+On Railway, the bot now automatically stores relative JSON/JSONL runtime files under `/data`, for example:
+
+- `logs/trading_log.json` -> `/data/logs/trading_log.json`
+- `logs/simulation_history.jsonl` -> `/data/logs/simulation_history.jsonl`
+- `data/market_microstructure.jsonl` -> `/data/data/market_microstructure.jsonl`
+
 ### Step 8: Run the Bot
 
 ```bash
