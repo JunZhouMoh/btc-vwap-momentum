@@ -972,6 +972,9 @@ class ChainlinkPriceClient:
         # Buffer: last price before boundary (for most accurate anchor)
         self._last_price_before_boundary: float = 0.0
         self._last_price_ts: float = 0.0
+        # Signed USD move extrema within the current window (relative to anchor).
+        self._window_min_move_usd: float = 0.0
+        self._window_max_move_usd: float = 0.0
     
     def _get_window(self, ts: float) -> int:
         """Window start timestamp (epoch) for the configured interval."""
@@ -1261,6 +1264,8 @@ class ChainlinkPriceClient:
                 # First price ever — initialize
                 self._current_window = price_window
                 self.state.btc_anchor_price = price
+                self._window_min_move_usd = 0.0
+                self._window_max_move_usd = 0.0
                 logger.info(
                     f"BTC feed init: ${price:,.2f} "
                     f"(window {self._current_window}, "
@@ -1277,16 +1282,22 @@ class ChainlinkPriceClient:
                 if old_anchor > 0 and old_close > 0:
                     signed_usd = old_close - old_anchor
                     signed_pct = (signed_usd / old_anchor * 100)
+                    min_move_usd = min(float(self._window_min_move_usd), float(self._window_max_move_usd), float(signed_usd), 0.0)
+                    max_move_usd = max(float(self._window_min_move_usd), float(self._window_max_move_usd), float(signed_usd), 0.0)
                     self.state.btc_window_moves.append({
                         "window": old_window,
                         "signed_usd": signed_usd,
                         "signed_pct": signed_pct,
                         "abs_usd": abs(signed_usd),
                         "abs_pct": abs(signed_pct),
+                        "min_usd": min_move_usd,
+                        "max_usd": max_move_usd,
                     })
                 
                 self.state.btc_anchor_price = price  # First tick of new window
                 self._current_window = price_window
+                self._window_min_move_usd = 0.0
+                self._window_max_move_usd = 0.0
                 
                 boundary_time = datetime.fromtimestamp(price_window, tz=timezone.utc).strftime('%H:%M:%S')
                 price_time = datetime.fromtimestamp(price_ts, tz=timezone.utc).strftime('%H:%M:%S.%f')[:-3]
@@ -1301,6 +1312,15 @@ class ChainlinkPriceClient:
             # Always buffer the latest price for next boundary crossing
             self._last_price_before_boundary = price
             self._last_price_ts = price_ts
+
+            # Track min/max signed move for the active window.
+            anchor = float(self.state.btc_anchor_price or 0.0)
+            if anchor > 0:
+                signed_move_usd = float(price - anchor)
+                if signed_move_usd < self._window_min_move_usd:
+                    self._window_min_move_usd = signed_move_usd
+                if signed_move_usd > self._window_max_move_usd:
+                    self._window_max_move_usd = signed_move_usd
 
             # Keep a short history for web dashboard visibility (one row per window).
             history_row = {
@@ -2053,6 +2073,8 @@ class Dashboard:
                         "signed_pct": signed_pct,
                         "abs_usd": abs(signed_usd),
                         "abs_pct": abs(signed_pct),
+                        "min_usd": min(0.0, signed_usd),
+                        "max_usd": max(0.0, signed_usd),
                         "source": "signals_csv",
                     }
 
@@ -2085,6 +2107,8 @@ class Dashboard:
                         "signed_pct": signed_pct,
                         "abs_usd": abs_usd,
                         "abs_pct": abs_pct,
+                        "min_usd": min(0.0, signed_usd),
+                        "max_usd": max(0.0, signed_usd),
                         "source": "trade_log",
                     }
 
@@ -2107,6 +2131,8 @@ class Dashboard:
                             "signed_pct": 0.0,
                             "abs_usd": 0.0,
                             "abs_pct": 0.0,
+                            "min_usd": 0.0,
+                            "max_usd": 0.0,
                             "source": "bot_log",
                         }
 
@@ -3497,6 +3523,8 @@ class Dashboard:
                 "signed_pct": round(float(r.get("signed_pct", r.get("abs_pct", 0.0))), 4),
                 "abs_usd": round(float(r.get("abs_usd", 0.0)), 2),
                 "abs_pct": round(float(r.get("abs_pct", 0.0)), 4),
+                "min_usd": round(float(r.get("min_usd", min(0.0, float(r.get("signed_usd", 0.0) or 0.0)))), 2),
+                "max_usd": round(float(r.get("max_usd", max(0.0, float(r.get("signed_usd", 0.0) or 0.0)))), 2),
             }
             for r in recent_windows
         ]
