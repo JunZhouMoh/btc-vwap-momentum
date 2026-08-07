@@ -59,13 +59,11 @@ _HTML = """<!DOCTYPE html>
   <div class="grid">
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
-    <div class="card controls"><h2>Telegram Timer Alert</h2><div id="timerAlertPanel" class="mono">Loading...</div></div>
-    <div class="card"><h2>Indicator Controls</h2><div id="controls" class="mono"></div></div>
-    <div class="card"><h2>5s / 15s Checks</h2><div id="checks" class="mono"></div></div>
     <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div>
     <div class="card controls"><h2>Volume + Late Entry</h2><div id="modepanel" class="mono">Loading...</div></div>
+    <div class="card controls"><h2>Telegram Timer Alert</h2><div id="timerAlertPanel" class="mono">Loading...</div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
   <script>
@@ -147,20 +145,6 @@ _HTML = """<!DOCTYPE html>
       h.push('<div class="row"><label>Max Price</label><input type="number" id="ta_max_price" step="0.001" min="0" max="1" value="'+esc(t.max_price!=null?t.max_price:0.95)+'"/></div>');
       h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="ta_btc_buffer_multiplier" step="0.01" min="0" value="'+esc(t.btc_buffer_multiplier!=null?t.btc_buffer_multiplier:0)+'"/></div>');
 
-      var liveTimeLeft='\u2014', favLine='\u2014', btcLine='\u2014';
-      if(stateData&&stateData.header&&typeof stateData.header.time_left_sec==='number'&&!isNaN(stateData.header.time_left_sec)){
-        liveTimeLeft=Math.floor(stateData.header.time_left_sec)+'s';
-      }
-      if(stateData&&stateData.strategy&&stateData.strategy.favorite){
-        favLine=String(stateData.strategy.favorite);
-      }
-      var b=(stateData&&stateData.strategy&&stateData.strategy.btc_buffer_line)?String(stateData.strategy.btc_buffer_line):'';
-      if(b){
-        btcLine=b;
-      }
-      h.push('<div class="row"><label>Live Time Left</label><span>'+esc(liveTimeLeft)+'</span></div>');
-      h.push('<div class="row"><label>Live Favorite</label><span>'+esc(favLine)+'</span></div>');
-      h.push('<div class="row"><label>Live BTC Buffer</label><span>'+esc(btcLine)+'</span></div>');
       h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveTimerAlertConfig()">Apply</button><button class="btn secondary" onclick="loadTimerAlertConfig()">Reload</button></div>');
       h.push('<div id="timerAlertStatus" class="status"></div>');
       box.innerHTML=h.join('<br/>');
@@ -286,8 +270,16 @@ _HTML = """<!DOCTYPE html>
 
           var st=d.strategy||{}, sig=st.signal_text||'\u2014';
           function chk(x){ return x===true?'\u2713':x===false?'\u2717':'\u2014'; }
-          var ck=st.checks||{};
-          var strategyBits=['Fav: '+esc(st.favorite)+' \u00b7 WR: '+esc(st.win_rate_str),'Checks: P='+chk(ck.price)+' T='+chk(ck.time)+' D='+chk(ck.dev)+' M='+chk(ck.mom)+' Z='+chk(ck.zscore)+' B='+chk(ck.btc_buffer)+' cutoff='+chk(ck.time_cutoff)];
+          var favKey='';
+          if(st.favorite){
+            var favText=String(st.favorite).toUpperCase();
+            if(favText.indexOf('UP')===0) favKey='up';
+            else if(favText.indexOf('DOWN')===0) favKey='down';
+          }
+          var favBook=(favKey&&(d[favKey]&&d[favKey].book))?d[favKey].book:null;
+          var buyVol=(favBook&&typeof favBook.volume_buy==='number'&&!isNaN(favBook.volume_buy))?Math.round(favBook.volume_buy):null;
+          var totalVol=(favBook&&typeof favBook.volume_total==='number'&&!isNaN(favBook.volume_total))?Math.round(favBook.volume_total):null;
+          var strategyBits=['Fav: '+esc(st.favorite)+' \u00b7 WR: '+esc(st.win_rate_str),'Volume: Buy '+esc(buyVol!=null?buyVol:'\u2014')+' | Total '+esc(totalVol!=null?totalVol:'\u2014')];
           if(st.up_line) strategyBits.push('UP: '+esc(st.up_line));
           if(st.down_line) strategyBits.push('DOWN: '+esc(st.down_line));
           var vs=st.volume_speed||null;
@@ -299,15 +291,6 @@ _HTML = """<!DOCTYPE html>
           }
           if(st.btc_buffer_line) strategyBits.push('BTC Buffer: '+esc(st.btc_buffer_line));
           document.getElementById('strategy').innerHTML='<div class="sig '+sigClass(sig)+'">'+esc(sig)+'</div><div class="mono" style="margin-top:0.4rem">'+strategyBits.join('<br/>')+'</div>';
-
-          var ctl=st.indicator_controls||{};
-          document.getElementById('controls').innerHTML=['<label><input id="ctl-momentum" type="checkbox" '+(ctl.momentum?'checked':'')+'> Price momentum</label>','<label><input id="ctl-vwap" type="checkbox" '+(ctl.vwap_deviation?'checked':'')+'> VWAP deviation</label>','<label><input id="ctl-zscore" type="checkbox" '+(ctl.zscore?'checked':'')+'> z-score</label>'].join('<br/>');
-          var cm=document.getElementById('ctl-momentum'), cv=document.getElementById('ctl-vwap'), cz=document.getElementById('ctl-zscore');
-          if(cm) cm.onchange=applyControls; if(cv) cv.onchange=applyControls; if(cz) cz.onchange=applyControls;
-
-          var w=st.window_checks||{}, w5=w.s5||{}, w15=w.s15||{};
-          function line(label,item){ return label+': M='+boolHtml(item.momentum_ok)+' D='+boolHtml(item.vwap_deviation_ok)+' Z='+boolHtml(item.zscore_ok)+' ALL='+boolHtml(item.all_ok)+' | mom='+(item.momentum_pct!=null?numFmt(item.momentum_pct,2)+'%':'\u2014')+' dev='+(item.deviation_pct!=null?numFmt(item.deviation_pct,2)+'%':'\u2014')+' z='+(item.zscore!=null?numFmt(item.zscore,2):'\u2014'); }
-          document.getElementById('checks').innerHTML=[line('5s',w5),line('15s',w15)].join('<br/>');
 
           function book(x,id){ var el=document.getElementById(id); if(!el) return; if(!x){ el.textContent='No data'; return; } var bk=x.book||{}, ind=x.indicators||{}; el.innerHTML=['Last '+esc(bk.last_price),'Bid '+esc(bk.best_bid)+' / Ask '+esc(bk.best_ask),'PM VWAP '+numFmt(ind.pm_vwap,4)+' \u00b7 BTC VWAP '+(ind.btc_vwap_weighted!=null?numFmt(ind.btc_vwap_weighted,4):'\u2014'),'Dev '+(ind.deviation_pct!=null?numFmt(ind.deviation_pct,2)+'%':'\u2014')+' \u00b7 BTC Vol Bias '+(ind.btc_vol_ratio!=null?numFmt(ind.btc_vol_ratio,1)+'%':'\u2014'),'Z '+numFmt(ind.zscore,2)+' \u00b7 Mom '+(ind.momentum_pct!=null?numFmt(ind.momentum_pct,2)+'%':'\u2014'),'Vol '+(bk.volume_total!=null?esc(Math.round(bk.volume_total)):'\u2014')].join('<br/>'); }
           book(d.up,'up'); book(d.down,'down');
