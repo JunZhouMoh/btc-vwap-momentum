@@ -339,6 +339,12 @@ _HTML = """<!DOCTYPE html>
             strategyBits.push('Vol cmp: buy '+buyDiff+' | total '+totalDiff+' | min '+minDiff+' | ok '+chk(vs.ok));
           }
           if(st.btc_buffer_line) strategyBits.push('BTC Buffer: '+esc(st.btc_buffer_line));
+          var modeBtcLines=st.btc_buffer_mode_lines||[];
+          if(modeBtcLines&&modeBtcLines.length){
+            for(var bi=0;bi<modeBtcLines.length;bi++){
+              strategyBits.push('BTC Buffer '+esc(String(modeBtcLines[bi]||'')));
+            }
+          }
           document.getElementById('strategy').innerHTML='<div class="sig '+sigClass(sig)+'">'+esc(sig)+'</div><div class="mono" style="margin-top:0.4rem">'+strategyBits.join('<br/>')+'</div>';
 
           function book(x,id){ var el=document.getElementById(id); if(!el) return; if(!x){ el.textContent='No data'; return; } var bk=x.book||{}, ind=x.indicators||{}; el.innerHTML=['Last '+esc(bk.last_price),'Bid '+esc(bk.best_bid)+' / Ask '+esc(bk.best_ask),'PM VWAP '+numFmt(ind.pm_vwap,4)+' \u00b7 BTC VWAP '+(ind.btc_vwap_weighted!=null?numFmt(ind.btc_vwap_weighted,4):'\u2014'),'Dev '+(ind.deviation_pct!=null?numFmt(ind.deviation_pct,2)+'%':'\u2014')+' \u00b7 BTC Vol Bias '+(ind.btc_vol_ratio!=null?numFmt(ind.btc_vol_ratio,1)+'%':'\u2014'),'Z '+numFmt(ind.zscore,2)+' \u00b7 Mom '+(ind.momentum_pct!=null?numFmt(ind.momentum_pct,2)+'%':'\u2014'),'Vol '+(bk.volume_total!=null?esc(Math.round(bk.volume_total)):'\u2014')].join('<br/>'); }
