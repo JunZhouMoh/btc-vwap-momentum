@@ -3054,9 +3054,6 @@ class Dashboard:
             f"Vol Speed:   {'OFF' if (not vol_speed.get('enabled', True) or not vol_check_enabled) else ('OK' if vol_speed_ok else 'WAIT')} "
             f"({fav_name} dV{int(vol_speed['window_sec'])}={vol_speed['fav_accel']:+.0f}, other={vol_speed['other_accel']:+.0f})",
             f"Elapsed:     {int(elapsed_sec)}s (need ≥{min_elapsed}s)  [bin {time_bin}]",
-            "",
-            f"Up:          {self._fmt_price(up.last_price)} | Dev: {self._fmt_dev(up_dev)} | Mom: {self._fmt_momentum(up_mom)}",
-            f"Down:        {self._fmt_price(down.last_price)} | Dev: {self._fmt_dev(down_dev)} | Mom: {self._fmt_momentum(down_mom)}",
         ]
         if btc_buffer:
             lines.insert(
@@ -4842,6 +4839,7 @@ class LiveTradingBot:
         mode_trade_cap_ok = True
 
         gate_ready_states: List[Dict[str, Any]] = []
+        parallel_mode_requests: List[Dict[str, Any]] = []
 
         if not manual_override:
             if active_modes and not eligible_mode_states:
@@ -4933,48 +4931,52 @@ class LiveTradingBot:
                     gate_ready_states.append(st)
 
             if gate_ready_states:
-                triggered_mode_names = [str(st["mode_name"]).strip() for st in gate_ready_states if str(st["mode_name"]).strip()]
-                selected_min_contracts = min(
-                    int(float(st["mode"].get("min_contracts", self.config.entry.min_contracts) or self.config.entry.min_contracts))
-                    for st in gate_ready_states
+                # Pick one deterministic primary mode for logs while executing all ready modes.
+                ranked_states = sorted(
+                    gate_ready_states,
+                    key=lambda st: (
+                        0 if (str(st.get("mode_name", "")).startswith("mode_") and str(st.get("mode_name", "")).endswith("s")) else (1 if bool(st.get("is_volume")) else 2),
+                        float(st.get("mode", {}).get("window_sec", 10**9) or 10**9),
+                        str(st.get("mode_name", "")),
+                    ),
                 )
-                if len(gate_ready_states) == 1:
-                    selected_mode_state = gate_ready_states[0]
-                    late_mode = selected_mode_state["mode"]
-                    mode_name = selected_mode_state["mode_name"]
-                    is_volume_eval_mode = bool(selected_mode_state["is_volume"])
-                    mode_max_trades = int(selected_mode_state["mode_max_trades"])
-                    mode_trade_count = int(selected_mode_state["mode_trade_count"])
-                    mode_trade_cap_ok = bool(selected_mode_state["mode_trade_cap_ok"])
-                else:
-                    # Pick one deterministic mode label instead of mixed_active_modes.
-                    # Priority: tightest late-entry mode first, then volume-eval mode.
-                    ranked_states = sorted(
-                        gate_ready_states,
-                        key=lambda st: (
-                            0 if (str(st.get("mode_name", "")).startswith("mode_") and str(st.get("mode_name", "")).endswith("s")) else (1 if bool(st.get("is_volume")) else 2),
-                            float(st.get("mode", {}).get("window_sec", 10**9) or 10**9),
-                            str(st.get("mode_name", "")),
-                        ),
-                    )
-                    selected_mode_state = ranked_states[0]
-                    late_mode = selected_mode_state["mode"]
-                    mode_name = selected_mode_state["mode_name"]
-                    is_volume_eval_mode = bool(selected_mode_state["is_volume"])
-                    mode_max_trades = int(selected_mode_state["mode_max_trades"])
-                    mode_trade_count = int(selected_mode_state["mode_trade_count"])
-                    mode_trade_cap_ok = bool(selected_mode_state["mode_trade_cap_ok"])
 
-                    if is_volume_eval_mode and volume_threshold_levels:
-                        chosen_min_curr_diff = float(vol_speed.get("min_current_volume_diff", 0.0) or 0.0)
-                        selected_entry_idx = 0
-                        best_gap = float("inf")
-                        for i, threshold_i in enumerate(volume_threshold_levels):
-                            gap = abs(float(threshold_i) - chosen_min_curr_diff)
-                            if gap < best_gap:
-                                best_gap = gap
-                                selected_entry_idx = i
-                        mode_name = f"volume_eval_entry_{selected_entry_idx + 1}"
+                selected_min_contracts = 0
+                triggered_mode_names = []
+                seen_mode_names: set[str] = set()
+                parallel_mode_requests = []
+                for st in ranked_states:
+                    mode_name_i = str(st.get("mode_name", "")).strip()
+                    if mode_name_i and mode_name_i not in seen_mode_names:
+                        seen_mode_names.add(mode_name_i)
+                        triggered_mode_names.append(mode_name_i)
+
+                    mode_contracts = int(float(st["mode"].get("min_contracts", self.config.entry.min_contracts) or self.config.entry.min_contracts))
+                    mode_contracts = max(1, mode_contracts)
+                    selected_min_contracts += mode_contracts
+                    parallel_mode_requests.append({
+                        "mode_name": mode_name_i or "mode",
+                        "min_contracts": mode_contracts,
+                    })
+
+                selected_mode_state = ranked_states[0]
+                late_mode = selected_mode_state["mode"]
+                mode_name = selected_mode_state["mode_name"]
+                is_volume_eval_mode = bool(selected_mode_state["is_volume"])
+                mode_max_trades = int(selected_mode_state["mode_max_trades"])
+                mode_trade_count = int(selected_mode_state["mode_trade_count"])
+                mode_trade_cap_ok = bool(selected_mode_state["mode_trade_cap_ok"])
+
+                if is_volume_eval_mode and volume_threshold_levels:
+                    chosen_min_curr_diff = float(vol_speed.get("min_current_volume_diff", 0.0) or 0.0)
+                    selected_entry_idx = 0
+                    best_gap = float("inf")
+                    for i, threshold_i in enumerate(volume_threshold_levels):
+                        gap = abs(float(threshold_i) - chosen_min_curr_diff)
+                        if gap < best_gap:
+                            best_gap = gap
+                            selected_entry_idx = i
+                    mode_name = f"volume_eval_entry_{selected_entry_idx + 1}"
 
         selected_mode_btc = self.dashboard._mode_btc_gate_status(late_mode, btc_buffer) if late_mode else {
             "ok": btc_buffer_ok,
@@ -4985,7 +4987,7 @@ class LiveTradingBot:
 
         if gate_ready_states:
             price_ok = True
-            if late_mode:
+            if late_mode and len(gate_ready_states) == 1:
                 min_price = float(late_mode.get("min_price", self.config.strategy.min_price))
                 max_price = float(late_mode.get("max_price", self.config.strategy.max_price))
                 vol_check_enabled = self.dashboard._is_volume_check_enabled_for_active_mode(late_mode)
@@ -5007,7 +5009,7 @@ class LiveTradingBot:
                 vol_gate_ok = True
                 selected_mode_btc = {
                     "ok": True,
-                    "metric": "mixed",
+                    "metric": "parallel_modes",
                     "current_usd": float((btc_buffer or {}).get("current_abs_usd", 0.0) or 0.0),
                     "threshold_usd": None,
                 }
@@ -5162,20 +5164,33 @@ class LiveTradingBot:
         
         logger.info(f"Executing entry: {token_name}")
 
-        if late_mode and ("min_contracts" in late_mode):
+        if late_mode and len(gate_ready_states) <= 1 and ("min_contracts" in late_mode):
             selected_min_contracts = int(late_mode["min_contracts"])
         if late_mode:
             mode_hint = ""
             if str(late_mode.get("name", "")) == "volume_eval_mode":
                 mode_hint = f"minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f} | "
-            signal_logger.info(
-                f"  Late mode active: last {int(late_mode['window_sec'])}s | "
-                f"mode={mode_name} | "
-                f"trades={mode_trade_count + 1}/{mode_max_trades} | "
-                f"late_total={total_late_mode_trade_count + 1}/{total_late_mode_max_trades} | "
-                f"{mode_hint}min_contracts={selected_min_contracts} | "
-                f"buffer_mult={late_mode['buffer_avg_multiplier']:.2f}"
-            )
+            if gate_ready_states and len(gate_ready_states) > 1:
+                mode_contracts = ", ".join(
+                    f"{req['mode_name']}:{int(req['min_contracts'])}"
+                    for req in parallel_mode_requests
+                )
+                signal_logger.info(
+                    f"  Parallel modes active: {mode_contracts} | "
+                    f"total_min_contracts={selected_min_contracts} | "
+                    f"late_total={total_late_mode_trade_count + 1}/{total_late_mode_max_trades}"
+                )
+            else:
+                buffer_mult = late_mode.get("buffer_avg_multiplier")
+                buffer_part = f" | buffer_mult={float(buffer_mult):.2f}" if buffer_mult is not None else ""
+                signal_logger.info(
+                    f"  Late mode active: last {int(late_mode['window_sec'])}s | "
+                    f"mode={mode_name} | "
+                    f"trades={mode_trade_count + 1}/{mode_max_trades} | "
+                    f"late_total={total_late_mode_trade_count + 1}/{total_late_mode_max_trades} | "
+                    f"{mode_hint}min_contracts={selected_min_contracts}"
+                    f"{buffer_part}"
+                )
         
         bet_amount_usd = self.config.entry.bet_amount_usd
         if bet_amount_override_usd is not None and bet_amount_override_usd > 0:
@@ -5204,10 +5219,52 @@ class LiveTradingBot:
         btc_anchor_at_entry = self.state.btc_anchor_price
         if manual_override:
             entry_mode = "manual"
+        elif triggered_mode_names and len(triggered_mode_names) > 1:
+            entry_mode = "parallel_modes"
         elif mode_name:
             entry_mode = mode_name
         else:
             entry_mode = "normal"
+
+        def _allocate_parallel_mode_legs(total_contracts: int, fill_price: float) -> List[Dict[str, Any]]:
+            if manual_override or total_contracts <= 0 or not parallel_mode_requests:
+                return []
+
+            total_required = int(sum(int(req.get("min_contracts", 0) or 0) for req in parallel_mode_requests))
+            if total_required <= 0:
+                return []
+
+            raw_alloc: List[Dict[str, Any]] = []
+            allocated = 0
+            for req in parallel_mode_requests:
+                req_contracts = int(req.get("min_contracts", 0) or 0)
+                exact = (float(total_contracts) * float(req_contracts)) / float(total_required)
+                base = int(math.floor(exact))
+                base = max(0, base)
+                allocated += base
+                raw_alloc.append({
+                    "mode": str(req.get("mode_name", "") or "mode"),
+                    "contracts": base,
+                    "frac": exact - float(base),
+                })
+
+            remaining = int(total_contracts - allocated)
+            if remaining > 0 and raw_alloc:
+                ranked = sorted(raw_alloc, key=lambda item: item["frac"], reverse=True)
+                for i in range(remaining):
+                    ranked[i % len(ranked)]["contracts"] += 1
+
+            legs: List[Dict[str, Any]] = []
+            for item in raw_alloc:
+                c = int(item.get("contracts", 0) or 0)
+                if c <= 0:
+                    continue
+                legs.append({
+                    "mode": str(item.get("mode", "") or "mode"),
+                    "contracts": c,
+                    "entry_price": float(fill_price),
+                })
+            return legs
         
         result = await self.executor.execute_entry(
             token_id=token.token_id,
@@ -5216,7 +5273,10 @@ class LiveTradingBot:
         )
         
         if result.success:
-            if self.stats.position is None:
+            mode_legs_alloc = _allocate_parallel_mode_legs(result.contracts_filled, result.avg_price)
+            opened_new_position = self.stats.position is None
+
+            if opened_new_position:
                 self.stats.record_entry(
                     token_name=token_name,
                     token_id=token.token_id,
@@ -5228,13 +5288,28 @@ class LiveTradingBot:
                     btc_anchor_at_entry=btc_anchor_at_entry,
                     entry_mode=entry_mode,
                 )
+                if mode_legs_alloc and self.stats.position:
+                    self.stats.position.mode_legs = mode_legs_alloc
+                    if len(mode_legs_alloc) > 1:
+                        self.stats.position.entry_mode = "parallel_modes"
+                    else:
+                        self.stats.position.entry_mode = str(mode_legs_alloc[0].get("mode", entry_mode) or entry_mode)
             else:
-                self.stats.add_to_position(
-                    price=result.avg_price,
-                    contracts=result.contracts_filled,
-                    btc_price_at_entry=btc_price_at_entry,
-                    entry_mode=entry_mode,
-                )
+                if mode_legs_alloc:
+                    for leg in mode_legs_alloc:
+                        self.stats.add_to_position(
+                            price=result.avg_price,
+                            contracts=int(leg["contracts"]),
+                            btc_price_at_entry=btc_price_at_entry,
+                            entry_mode=str(leg["mode"]),
+                        )
+                else:
+                    self.stats.add_to_position(
+                        price=result.avg_price,
+                        contracts=result.contracts_filled,
+                        btc_price_at_entry=btc_price_at_entry,
+                        entry_mode=entry_mode,
+                    )
 
             if triggered_mode_names and not manual_override:
                 for triggered_mode_name in triggered_mode_names:
@@ -5352,8 +5427,11 @@ class LiveTradingBot:
                         
                         logger.info(f"Timeout recovery: {rec_contracts} @ {rec_price:.4f}")
                         
+                        mode_legs_alloc = _allocate_parallel_mode_legs(rec_contracts, rec_price)
+                        opened_new_position = self.stats.position is None
+
                         # Record recovered fill with the same scale-in behavior as normal success path.
-                        if self.stats.position is None:
+                        if opened_new_position:
                             self.stats.record_entry(
                                 token_name=token_name,
                                 token_id=token.token_id,
@@ -5365,13 +5443,28 @@ class LiveTradingBot:
                                 btc_anchor_at_entry=btc_anchor_at_entry,
                                 entry_mode=entry_mode,
                             )
+                            if mode_legs_alloc and self.stats.position:
+                                self.stats.position.mode_legs = mode_legs_alloc
+                                if len(mode_legs_alloc) > 1:
+                                    self.stats.position.entry_mode = "parallel_modes"
+                                else:
+                                    self.stats.position.entry_mode = str(mode_legs_alloc[0].get("mode", entry_mode) or entry_mode)
                         else:
-                            self.stats.add_to_position(
-                                price=rec_price,
-                                contracts=rec_contracts,
-                                btc_price_at_entry=btc_price_at_entry,
-                                entry_mode=entry_mode,
-                            )
+                            if mode_legs_alloc:
+                                for leg in mode_legs_alloc:
+                                    self.stats.add_to_position(
+                                        price=rec_price,
+                                        contracts=int(leg["contracts"]),
+                                        btc_price_at_entry=btc_price_at_entry,
+                                        entry_mode=str(leg["mode"]),
+                                    )
+                            else:
+                                self.stats.add_to_position(
+                                    price=rec_price,
+                                    contracts=rec_contracts,
+                                    btc_price_at_entry=btc_price_at_entry,
+                                    entry_mode=entry_mode,
+                                )
 
                         if triggered_mode_names and not manual_override:
                             for triggered_mode_name in triggered_mode_names:
