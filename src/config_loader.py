@@ -88,6 +88,18 @@ class VolumeEvalModeConfig:
 
 
 @dataclass
+class MinMaxModeConfig:
+    """Standalone min/max movement entry mode configuration."""
+    enabled: bool = False
+    time_left_sec: int = 50
+    min_max_diff_threshold_usd: float = 20.0
+    max_trades: int = 1
+    min_contracts: int = 1
+    min_price: float = 0.84
+    max_price: float = 0.96
+
+
+@dataclass
 class VolumeAccelerationCheckConfig:
     """Favored-side volume acceleration gate settings."""
     enabled: bool = True
@@ -115,6 +127,7 @@ class StrategyConfig:
     win_rate_csv: str = "data/win_rate.csv"
     volume_acceleration_check: VolumeAccelerationCheckConfig = field(default_factory=VolumeAccelerationCheckConfig)
     volume_eval_mode: VolumeEvalModeConfig = field(default_factory=VolumeEvalModeConfig)
+    min_max_mode: MinMaxModeConfig = field(default_factory=MinMaxModeConfig)
     late_entry_modes: LateEntryModesConfig = field(default_factory=LateEntryModesConfig)
 
 
@@ -158,7 +171,7 @@ class TimerAlertConfig:
     time_left_sec: int = 100
     min_price: float = 0.75
     max_price: float = 0.95
-    min_btc_buffer_threshold_usd: float = 0.0
+    btc_buffer_multiplier: float = 0.0
 
 
 @dataclass
@@ -361,6 +374,20 @@ def load_config(config_path: Optional[str] = None) -> Config:
         max_price=_to_float(volume_eval_data.get("max_price", 0.96), 0.96),
     )
 
+    min_max_mode_data = strategy_data.get("min_max_mode", {})
+    min_max_mode = MinMaxModeConfig(
+        enabled=bool(min_max_mode_data.get("enabled", False)),
+        time_left_sec=_to_int(min_max_mode_data.get("time_left_sec", 50), 50),
+        min_max_diff_threshold_usd=_to_float(
+            min_max_mode_data.get("min_max_diff_threshold_usd", 20.0),
+            20.0,
+        ),
+        max_trades=_to_int(min_max_mode_data.get("max_trades", 1), 1),
+        min_contracts=_to_int(min_max_mode_data.get("min_contracts", 1), 1),
+        min_price=_to_float(min_max_mode_data.get("min_price", 0.84), 0.84),
+        max_price=_to_float(min_max_mode_data.get("max_price", 0.96), 0.96),
+    )
+
     vac_data = strategy_data.get("volume_acceleration_check", {})
     threshold = _to_float(
         vac_data.get("threshold", vac_data.get("min_current_volume_diff", 5000.0)),
@@ -392,6 +419,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
             volume_basis=raw_volume_basis,
         ),
         volume_eval_mode=volume_eval_mode,
+        min_max_mode=min_max_mode,
         late_entry_modes=late_entry_modes,
     )
 
@@ -443,7 +471,13 @@ def load_config(config_path: Optional[str] = None) -> Config:
             time_left_sec=_to_int(timer_alert_data.get("time_left_sec", 100), 100),
             min_price=_to_float(timer_alert_data.get("min_price", 0.75), 0.75),
             max_price=_to_float(timer_alert_data.get("max_price", 0.95), 0.95),
-            min_btc_buffer_threshold_usd=_to_float(timer_alert_data.get("min_btc_buffer_threshold_usd", 0.0), 0.0),
+            btc_buffer_multiplier=_to_float(
+                timer_alert_data.get(
+                    "btc_buffer_multiplier",
+                    timer_alert_data.get("min_btc_buffer_threshold_usd", 0.0),
+                ),
+                0.0,
+            ),
         ),
     )
 
@@ -596,6 +630,16 @@ def validate_config(config: Config) -> list:
                 f"strategy.volume_eval_mode.entry_min_current_volume_diffs[{i}] must be >= 0"
             )
 
+    min_max_mode = config.strategy.min_max_mode
+    if min_max_mode.time_left_sec < 0:
+        errors.append("strategy.min_max_mode.time_left_sec must be >= 0")
+    if min_max_mode.min_max_diff_threshold_usd < 0:
+        errors.append("strategy.min_max_mode.min_max_diff_threshold_usd must be >= 0")
+    if min_max_mode.max_trades <= 0:
+        errors.append("strategy.min_max_mode.max_trades must be > 0")
+    if min_max_mode.min_contracts <= 0:
+        errors.append("strategy.min_max_mode.min_contracts must be > 0")
+
     if config.buffer < 0:
         errors.append("buffer must be >= 0")
 
@@ -615,7 +659,7 @@ def validate_config(config: Config) -> list:
         errors.append("telegram.timer_alert.max_price must be within [0, 1]")
     if timer_alert.min_price >= timer_alert.max_price:
         errors.append("telegram.timer_alert.min_price must be less than max_price")
-    if timer_alert.min_btc_buffer_threshold_usd < 0:
-        errors.append("telegram.timer_alert.min_btc_buffer_threshold_usd must be >= 0")
+    if timer_alert.btc_buffer_multiplier < 0:
+        errors.append("telegram.timer_alert.btc_buffer_multiplier must be >= 0")
     
     return errors
