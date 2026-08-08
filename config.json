@@ -9,80 +9,29 @@
   "strategy": {
     "min_price": 0.9,
     "max_price": 0.99,
-    "dangerous": true,
     "_comment_5m": "Below min_elapsed / no_entry_cutoff are scaled for 5m (300s). For 15m, raise e.g. min_elapsed_sec 530, no_entry_before_end_sec 335.",
     "min_elapsed_sec": 270,
-    "min_deviation_pct": -100,
+    "min_deviation_pct": 0.5,
     "max_deviation_pct": 100,
     "no_entry_before_end_sec": 0,
     "momentum_window_sec": 60,
     "vwap_window_sec": 30,
     "win_rate_csv": "data/win_rate.csv",
-    "momentum_min_pct": -10,
-    "volume_acceleration_check": {
+    "momentum_min_pct": 0,
+    "min_max_mode": {
       "enabled": true,
-      "window_sec": 10,
-      "volume_basis": "buy",
-      "threshold": 5000.0,
-      "require_current_volume_lead": true,
-      "min_accel_diff": 0.0,
-      "min_current_volume_diff": 5000.0
-    },
-    "volume_eval_mode": {
-      "enabled": true,
-      "time_left_sec": 50,
-      "min_contracts": 15,
-      "max_trades": 3,
-      "buffer_avg_multiplier": 0.5,
-      "min_buffer_threshold_usd": 20,
-      "volume_check_enabled": true,
-      "entry_min_current_volume_diffs": [1000, 2000, 3000],
-      "entry_trade_limits": [1, 1, 1],
+      "time_left_sec": 90,
+      "min_max_diff_threshold_usd": 5,
+      "min_contracts": 5,
+      "max_trades": 1,
       "min_price": 0.84,
       "max_price": 0.96
     },
     "late_entry_modes": {
       "enabled": true,
-      "total_max_trades": 3,
-      "mode_40s": {
-        "enabled": true,
-        "time_left_sec": 40,
-        "min_contracts": 30,
-        "max_trades": 1,
-        "buffer_avg_multiplier": 1,
-        "min_buffer_threshold_usd": 25.0,
-        "min_price": 0.8,
-        "max_price": 0.97
-      },
-      "mode_30s": {
-        "enabled": true,
-        "time_left_sec": 30,
-        "min_contracts": 30,
-        "max_trades": 1,
-        "buffer_avg_multiplier": 1.0,
-        "min_buffer_threshold_usd": 25.0,
-        "min_price": 0.85,
-        "max_price": 0.97
-      },
       "mode_20s": {
-        "enabled": true,
-        "time_left_sec": 20,
-        "min_contracts": 30,
-        "max_trades": 1,
-        "buffer_avg_multiplier": 0.5,
-        "min_buffer_threshold_usd": 20.0,
-        "min_price": 0.9,
-        "max_price": 0.97
-      },
-      "mode_70s": {
-        "enabled": true,
-        "time_left_sec": 70,
-        "min_contracts": 30,
-        "max_trades": 1,
-        "buffer_avg_multiplier": 1.0,
-        "min_buffer_threshold_usd": 25.0,
-        "min_price": 0.85,
-        "max_price": 0.97
+        "buffer_avg_multiplier": 1,
+        "min_buffer_threshold_usd": 20
       }
     }
   },
@@ -116,7 +65,7 @@
 
   "simulation": {
     "_comment": "Paper trading: live market data, no CLOB orders or redeemer. API keys optional when enabled.",
-    "enabled": false,
+    "enabled": true,
     "separate_trading_log": true,
     "trading_log_path": "logs/trading_log_sim.json",
     "history_csv_path": "logs/simulation_trades.csv",
@@ -129,9 +78,8 @@
     "chart_every_n_trades": 5,
     "timer_alert": {
       "enabled": true,
-      "time_left_sec": 100,
-      "min_price": 0.75,
-      "max_price": 0.95
+      "time_left_sec": 70,
+      "btc_buffer_multiplier": 1
     }
   },
 
@@ -143,7 +91,7 @@
   },
 
   "logging": {
-    "level": "WARNING",
+    "level": "INFO",
     "file_rotation_hours": 3
   },
   "polymarket": {
@@ -152,9 +100,15 @@
     "chain_id": "",
     "signature_type": ""
   },
-  "btc_price_feed": {
-    "provider": "chainlink",
-    "ws_url": ""
+  "buffer": 25.0,
+  "buffer_decay": {
+    "enabled": true,
+    "half_life_windows": 2.5,
+    "min_periods": 2
   },
-  "buffer": 25.0
+  "in_window_buffer_decay": {
+    "enabled": true,
+    "start_before_end_sec": 60,
+    "min_multiplier": 0.6
+  }
 }
