@@ -173,6 +173,8 @@ class MarketState:
     btc_connected: bool = False      # RTDS connection status
     btc_feed_source: str = "chainlink"  # chainlink | binance
     btc_window_moves: deque = field(default_factory=lambda: deque(maxlen=50))  # Completed window abs moves
+    btc_current_window_min_usd: float = 0.0
+    btc_current_window_max_usd: float = 0.0
     
     # Binance BTC/USD price tracking (parallel to Chainlink)
     binance_current_price: float = 0.0   # Latest Binance price
@@ -1266,6 +1268,8 @@ class ChainlinkPriceClient:
                 self.state.btc_anchor_price = price
                 self._window_min_move_usd = 0.0
                 self._window_max_move_usd = 0.0
+                self.state.btc_current_window_min_usd = 0.0
+                self.state.btc_current_window_max_usd = 0.0
                 logger.info(
                     f"BTC feed init: ${price:,.2f} "
                     f"(window {self._current_window}, "
@@ -1298,6 +1302,8 @@ class ChainlinkPriceClient:
                 self._current_window = price_window
                 self._window_min_move_usd = 0.0
                 self._window_max_move_usd = 0.0
+                self.state.btc_current_window_min_usd = 0.0
+                self.state.btc_current_window_max_usd = 0.0
                 
                 boundary_time = datetime.fromtimestamp(price_window, tz=timezone.utc).strftime('%H:%M:%S')
                 price_time = datetime.fromtimestamp(price_ts, tz=timezone.utc).strftime('%H:%M:%S.%f')[:-3]
@@ -1321,6 +1327,8 @@ class ChainlinkPriceClient:
                     self._window_min_move_usd = signed_move_usd
                 if signed_move_usd > self._window_max_move_usd:
                     self._window_max_move_usd = signed_move_usd
+                self.state.btc_current_window_min_usd = float(self._window_min_move_usd)
+                self.state.btc_current_window_max_usd = float(self._window_max_move_usd)
 
             # Keep a short history for web dashboard visibility (one row per window).
             history_row = {
@@ -3504,6 +3512,8 @@ class Dashboard:
             "deviation_line": "",
             "buffer_avg_abs_usd": None,
             "buffer_avg_abs_pct": None,
+            "current_window_min_usd": s.btc_current_window_min_usd,
+            "current_window_max_usd": s.btc_current_window_max_usd,
         }
         if s.btc_current_price > 0 and s.btc_anchor_price > 0:
             dev_abs = s.btc_current_price - s.btc_anchor_price
@@ -3890,6 +3900,54 @@ class LiveTradingBot:
                 pass
 
         return self._web_get_volume_eval_mode()
+
+    def _web_get_min_max_mode(self) -> Dict[str, Any]:
+        with self._config_lock:
+            mode = getattr(self.config.strategy, "min_max_mode", None)
+            if not mode:
+                return {
+                    "enabled": False,
+                    "time_left_sec": 0,
+                    "min_max_diff_threshold_usd": 0.0,
+                    "max_trades": 1,
+                    "min_contracts": 1,
+                    "min_price": float(getattr(self.config.strategy, "min_price", 0.0)),
+                    "max_price": float(getattr(self.config.strategy, "max_price", 1.0)),
+                }
+            return {
+                "enabled": bool(getattr(mode, "enabled", False)),
+                "time_left_sec": int(getattr(mode, "time_left_sec", 0)),
+                "min_max_diff_threshold_usd": float(getattr(mode, "min_max_diff_threshold_usd", 0.0)),
+                "max_trades": int(getattr(mode, "max_trades", 1)),
+                "min_contracts": int(getattr(mode, "min_contracts", self.config.entry.min_contracts)),
+                "min_price": float(getattr(mode, "min_price", self.config.strategy.min_price)),
+                "max_price": float(getattr(mode, "max_price", self.config.strategy.max_price)),
+            }
+
+    def _web_update_min_max_mode(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return self._web_get_min_max_mode()
+
+        with self._config_lock:
+            mode = getattr(self.config.strategy, "min_max_mode", None)
+            if not mode:
+                return self._web_get_min_max_mode()
+
+            try:
+                mode.enabled = bool(payload.get("enabled", mode.enabled))
+                mode.time_left_sec = max(0, int(payload.get("time_left_sec", mode.time_left_sec)))
+                mode.min_max_diff_threshold_usd = max(
+                    0.0,
+                    float(payload.get("min_max_diff_threshold_usd", mode.min_max_diff_threshold_usd)),
+                )
+                mode.max_trades = max(1, int(payload.get("max_trades", mode.max_trades)))
+                mode.min_contracts = max(1, int(payload.get("min_contracts", mode.min_contracts)))
+                mode.min_price = float(payload.get("min_price", mode.min_price))
+                mode.max_price = float(payload.get("max_price", mode.max_price))
+            except (TypeError, ValueError):
+                pass
+
+        return self._web_get_min_max_mode()
 
     def _web_get_timer_alert(self) -> Dict[str, Any]:
         with self._config_lock:
@@ -4347,6 +4405,8 @@ class LiveTradingBot:
                 update_volume_accel_check=self._web_update_volume_accel_check,
                 get_volume_eval_mode=self._web_get_volume_eval_mode,
                 update_volume_eval_mode=self._web_update_volume_eval_mode,
+                get_min_max_mode=self._web_get_min_max_mode,
+                update_min_max_mode=self._web_update_min_max_mode,
                 get_timer_alert=self._web_get_timer_alert,
                 update_timer_alert=self._web_update_timer_alert,
                 trigger_manual_buy=self._web_trigger_manual_buy,
