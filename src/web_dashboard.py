@@ -62,9 +62,10 @@ _HTML = """<!DOCTYPE html>
     <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div>
-    <div class="card controls"><h2>Volume + Late Entry</h2><div id="modepanel" class="mono">Loading...</div></div>
     <div class="card controls"><h2>Telegram Timer Alert</h2><div id="timerAlertPanel" class="mono">Loading...</div></div>
     <div class="card controls"><h2>Min Max Mode</h2><div id="minMaxPanel" class="mono">Loading...</div></div>
+    <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModePanel" class="mono">Loading...</div></div>
+    <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalPanel" class="mono">Loading...</div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
   <script>
@@ -100,16 +101,25 @@ _HTML = """<!DOCTYPE html>
       return h.join('');
     }
 
-    function renderModePanelConfig(modePerfData){
-      var box=document.getElementById('modepanel'); if(!box) return;
-      var ve=modeCfg.volEval||{}, lm=modeCfg.late||{}, va=modeCfg.volAccel||{};
-      if(!lm||!lm.modes){ box.textContent='Mode config unavailable'; return; }
+    function renderLateModePanelConfig(modePerfData){
+      var box=document.getElementById('lateModePanel'); if(!box) return;
+      var lm=modeCfg.late||{};
+      if(!lm||!lm.modes){ box.textContent='Late mode config unavailable'; return; }
       var h=[];
       h.push('<div class="row"><label>Late Enabled</label><input type="checkbox" id="late_enabled" '+(lm.enabled?'checked':'')+'/></div>');
       h.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="'+esc(lm.total_max_trades!=null?lm.total_max_trades:1)+'"/></div>');
       h.push('<div class="mode-grid">');
       for(var i=0;i<lm.modes.length;i++){ h.push(buildLateModeEditor(lm.modes[i]||{},modePerfData)); }
       h.push('</div>');
+      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveLateModeConfig()">Apply</button><button class="btn secondary" onclick="loadLateModeConfig()">Reload</button></div>');
+      h.push('<div id="lateModeStatus" class="status"></div>');
+      box.innerHTML=h.join('<br/>');
+    }
+
+    function renderVolumeEvalPanelConfig(){
+      var box=document.getElementById('volumeEvalPanel'); if(!box) return;
+      var ve=modeCfg.volEval||{}, va=modeCfg.volAccel||{};
+      var h=[];
       h.push('<div class="mode-box"><div class="mode-title">volume_eval_mode</div>');
       h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="ve_enabled" '+(ve.enabled?'checked':'')+'/></div>');
       h.push('<div class="row"><label>Time Left</label><input type="number" id="ve_time_left_sec" step="1" value="'+esc(ve.time_left_sec!=null?ve.time_left_sec:0)+'"/></div>');
@@ -131,8 +141,8 @@ _HTML = """<!DOCTYPE html>
       h.push('<div class="row"><label>Min Accel Diff</label><input type="number" id="va_min_accel_diff" step="1" value="'+esc(va.min_accel_diff!=null?va.min_accel_diff:0.0)+'"/></div>');
       h.push('<div class="row"><label>Volume Basis</label><select id="va_volume_basis"><option value="total"'+(va.volume_basis==='total'?' selected':'')+'>total</option><option value="buy"'+(va.volume_basis==='buy'?' selected':'')+'>buy</option></select></div>');
       h.push('</div>');
-      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveModePanelConfig()">Apply</button><button class="btn secondary" onclick="loadModePanelConfig()">Reload</button></div>');
-      h.push('<div id="modeStatus" class="status"></div>');
+      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveVolumeEvalConfig()">Apply</button><button class="btn secondary" onclick="loadVolumeEvalConfig()">Reload</button></div>');
+      h.push('<div id="volumeEvalStatus" class="status"></div>');
       box.innerHTML=h.join('<br/>');
     }
 
@@ -152,12 +162,19 @@ _HTML = """<!DOCTYPE html>
       box.innerHTML=h.join('<br/>');
     }
 
-    function loadModePanelConfig(){
+    function loadLateModeConfig(){
       requestJson('GET','/api/late-modes',null,function(late){
         modeCfg.late=late||{};
-        requestJson('GET','/api/volume-eval-mode',null,function(ve){
-          modeCfg.volEval=ve||{};
-          requestJson('GET','/api/volume-accel-check',null,function(va){ modeCfg.volAccel=va||{}; renderModePanelConfig(window.latestModePerfData||{}); });
+        renderLateModePanelConfig(window.latestModePerfData||{});
+      });
+    }
+
+    function loadVolumeEvalConfig(){
+      requestJson('GET','/api/volume-eval-mode',null,function(ve){
+        modeCfg.volEval=ve||{};
+        requestJson('GET','/api/volume-accel-check',null,function(va){
+          modeCfg.volAccel=va||{};
+          renderVolumeEvalPanelConfig();
         });
       });
     }
@@ -230,23 +247,33 @@ _HTML = """<!DOCTYPE html>
       });
     }
 
-    function saveModePanelConfig(){
-      var status=document.getElementById('modeStatus'); if(status) status.textContent='Applying...';
+    function saveLateModeConfig(){
+      var status=document.getElementById('lateModeStatus'); if(status) status.textContent='Applying...';
       var late=modeCfg.late||{}, lateModes=[], src=late.modes||[];
       for(var i=0;i<src.length;i++){
         var m=src[i]||{}, k=String(m.key||('mode_'+i));
         lateModes.push({ key:k, enabled:!!(document.getElementById(k+'_enabled')&&document.getElementById(k+'_enabled').checked), time_left_sec:readInt(k+'_time_left_sec',m.time_left_sec||0), min_contracts:readInt(k+'_min_contracts',m.min_contracts||1), max_trades:readInt(k+'_max_trades',m.max_trades||1), buffer_avg_multiplier:readNum(k+'_buffer_avg_multiplier',m.buffer_avg_multiplier||1.0), min_buffer_threshold_usd:readNum(k+'_min_buffer_threshold_usd',m.min_buffer_threshold_usd||0.0), min_price:readNum(k+'_min_price',m.min_price||0.0), max_price:readNum(k+'_max_price',m.max_price||1.0) });
       }
       var latePayload={ enabled:!!(document.getElementById('late_enabled')&&document.getElementById('late_enabled').checked), total_max_trades:readInt('late_total_max_trades',late.total_max_trades||1), modes:lateModes };
+      requestJson('POST','/api/late-modes',latePayload,function(lateResp){
+        modeCfg.late=lateResp||latePayload;
+        if(status) status.textContent='Applied';
+        renderLateModePanelConfig(window.latestModePerfData||{});
+      });
+    }
+
+    function saveVolumeEvalConfig(){
+      var status=document.getElementById('volumeEvalStatus'); if(status) status.textContent='Applying...';
       var ve=modeCfg.volEval||{};
       var vePayload={ enabled:!!(document.getElementById('ve_enabled')&&document.getElementById('ve_enabled').checked), time_left_sec:readInt('ve_time_left_sec',ve.time_left_sec||0), min_contracts:readInt('ve_min_contracts',ve.min_contracts||1), max_trades:readInt('ve_max_trades',ve.max_trades||1), buffer_avg_multiplier:readNum('ve_buffer_avg_multiplier',ve.buffer_avg_multiplier||1.0), min_buffer_threshold_usd:readNum('ve_min_buffer_threshold_usd',ve.min_buffer_threshold_usd||0.0), volume_check_enabled:(document.getElementById('ve_volume_check_enabled')?!!document.getElementById('ve_volume_check_enabled').checked:!!ve.volume_check_enabled), entry_min_current_volume_diffs:[readNum('ve_entry_vol_1',1000),readNum('ve_entry_vol_2',2000),readNum('ve_entry_vol_3',3000)], entry_trade_limits:[readInt('ve_entry_limit_1',1),readInt('ve_entry_limit_2',1),readInt('ve_entry_limit_3',1)], min_price:readNum('ve_min_price',ve.min_price||0.0), max_price:readNum('ve_max_price',ve.max_price||1.0) };
       var va=modeCfg.volAccel||{}, basisEl=document.getElementById('va_volume_basis');
       var vaPayload={ min_current_volume_diff:readNum('va_min_current_volume_diff',va.min_current_volume_diff||0.0), min_accel_diff:readNum('va_min_accel_diff',va.min_accel_diff||0.0), volume_basis:basisEl?String(basisEl.value||'total'):'total' };
-      requestJson('POST','/api/late-modes',latePayload,function(lateResp){
-        modeCfg.late=lateResp||latePayload;
-        requestJson('POST','/api/volume-eval-mode',vePayload,function(veResp){
-          modeCfg.volEval=veResp||vePayload;
-          requestJson('POST','/api/volume-accel-check',vaPayload,function(vaResp){ modeCfg.volAccel=vaResp||vaPayload; if(status) status.textContent='Applied'; renderModePanelConfig(window.latestModePerfData||{}); });
+      requestJson('POST','/api/volume-eval-mode',vePayload,function(veResp){
+        modeCfg.volEval=veResp||vePayload;
+        requestJson('POST','/api/volume-accel-check',vaPayload,function(vaResp){
+          modeCfg.volAccel=vaResp||vaPayload;
+          if(status) status.textContent='Applied';
+          renderVolumeEvalPanelConfig();
         });
       });
     }
@@ -372,7 +399,8 @@ _HTML = """<!DOCTYPE html>
       r.send();
     }
 
-    loadModePanelConfig();
+    loadLateModeConfig();
+    loadVolumeEvalConfig();
     loadTimerAlertConfig();
     loadMinMaxModeConfig();
     tick();
