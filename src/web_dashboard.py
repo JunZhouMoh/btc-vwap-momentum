@@ -64,6 +64,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div>
     <div class="card controls"><h2>Volume + Late Entry</h2><div id="modepanel" class="mono">Loading...</div></div>
     <div class="card controls"><h2>Telegram Timer Alert</h2><div id="timerAlertPanel" class="mono">Loading...</div></div>
+    <div class="card controls"><h2>Min Max Mode</h2><div id="minMaxPanel" class="mono">Loading...</div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
   <script>
@@ -77,6 +78,7 @@ _HTML = """<!DOCTYPE html>
 
     var modeCfg={late:null,volEval:null,volAccel:null};
   var timerAlertCfg=null;
+    var minMaxCfg=null;
     window.latestModePerfData={};
 
     function numFmtSigned(n,d){ if(n===null||n===undefined||typeof n!=='number'||isNaN(n)) return '\u2014'; var fixed=n.toFixed(d); if(n>0) return '+'+fixed; return fixed; }
@@ -185,6 +187,49 @@ _HTML = """<!DOCTYPE html>
       });
     }
 
+    function renderMinMaxPanel(){
+      var box=document.getElementById('minMaxPanel'); if(!box) return;
+      var m=minMaxCfg||{};
+      var h=[];
+      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="mm_enabled" '+(m.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Time Left</label><input type="number" id="mm_time_left_sec" step="1" min="0" value="'+esc(m.time_left_sec!=null?m.time_left_sec:50)+'"/></div>');
+      h.push('<div class="row"><label>MinMax Diff $</label><input type="number" id="mm_min_max_diff_threshold_usd" step="0.1" min="0" value="'+esc(m.min_max_diff_threshold_usd!=null?m.min_max_diff_threshold_usd:20)+'"/></div>');
+      h.push('<div class="row"><label>Max Trades</label><input type="number" id="mm_max_trades" step="1" min="1" value="'+esc(m.max_trades!=null?m.max_trades:1)+'"/></div>');
+      h.push('<div class="row"><label>Min Contracts</label><input type="number" id="mm_min_contracts" step="1" min="1" value="'+esc(m.min_contracts!=null?m.min_contracts:1)+'"/></div>');
+      h.push('<div class="row"><label>Min Price</label><input type="number" id="mm_min_price" step="0.001" min="0" max="1" value="'+esc(m.min_price!=null?m.min_price:0.84)+'"/></div>');
+      h.push('<div class="row"><label>Max Price</label><input type="number" id="mm_max_price" step="0.001" min="0" max="1" value="'+esc(m.max_price!=null?m.max_price:0.96)+'"/></div>');
+      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveMinMaxModeConfig()">Apply</button><button class="btn secondary" onclick="loadMinMaxModeConfig()">Reload</button></div>');
+      h.push('<div id="minMaxStatus" class="status"></div>');
+      box.innerHTML=h.join('<br/>');
+    }
+
+    function loadMinMaxModeConfig(onDone){
+      requestJson('GET','/api/min-max-mode',null,function(cfg){
+        minMaxCfg=cfg||{};
+        renderMinMaxPanel();
+        if(onDone) onDone(minMaxCfg);
+      });
+    }
+
+    function saveMinMaxModeConfig(){
+      var status=document.getElementById('minMaxStatus'); if(status) status.textContent='Applying...';
+      var m=minMaxCfg||{};
+      var payload={
+        enabled:!!(document.getElementById('mm_enabled')&&document.getElementById('mm_enabled').checked),
+        time_left_sec:readInt('mm_time_left_sec',m.time_left_sec||50),
+        min_max_diff_threshold_usd:readNum('mm_min_max_diff_threshold_usd',m.min_max_diff_threshold_usd||20),
+        max_trades:readInt('mm_max_trades',m.max_trades||1),
+        min_contracts:readInt('mm_min_contracts',m.min_contracts||1),
+        min_price:readNum('mm_min_price',m.min_price||0.84),
+        max_price:readNum('mm_max_price',m.max_price||0.96)
+      };
+      requestJson('POST','/api/min-max-mode',payload,function(resp){
+        minMaxCfg=resp||payload;
+        if(status) status.textContent='Applied';
+        renderMinMaxPanel();
+      });
+    }
+
     function saveModePanelConfig(){
       var status=document.getElementById('modeStatus'); if(status) status.textContent='Applying...';
       var late=modeCfg.late||{}, lateModes=[], src=late.modes||[];
@@ -280,6 +325,10 @@ _HTML = """<!DOCTYPE html>
           var buyVol=(favBook&&typeof favBook.volume_buy==='number'&&!isNaN(favBook.volume_buy))?Math.round(favBook.volume_buy):null;
           var totalVol=(favBook&&typeof favBook.volume_total==='number'&&!isNaN(favBook.volume_total))?Math.round(favBook.volume_total):null;
           var strategyBits=['Fav: '+esc(st.favorite)+' \u00b7 WR: '+esc(st.win_rate_str),'Volume: Buy '+esc(buyVol!=null?buyVol:'\u2014')+' | Total '+esc(totalVol!=null?totalVol:'\u2014')];
+          var btcNow=d.btc||{};
+          var currMin=(typeof btcNow.current_window_min_usd==='number'&&!isNaN(btcNow.current_window_min_usd))?numFmtSigned(btcNow.current_window_min_usd,2):'\u2014';
+          var currMax=(typeof btcNow.current_window_max_usd==='number'&&!isNaN(btcNow.current_window_max_usd))?numFmtSigned(btcNow.current_window_max_usd,2):'\u2014';
+          strategyBits.push('Current BTC move min/max: $'+esc(currMin)+' / $'+esc(currMax));
           if(st.up_line) strategyBits.push('UP: '+esc(st.up_line));
           if(st.down_line) strategyBits.push('DOWN: '+esc(st.down_line));
           var vs=st.volume_speed||null;
@@ -319,6 +368,7 @@ _HTML = """<!DOCTYPE html>
 
     loadModePanelConfig();
     loadTimerAlertConfig();
+    loadMinMaxModeConfig();
     tick();
     setInterval(tick, 1000);
   </script>
@@ -374,6 +424,8 @@ def build_app(
   update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_min_max_mode: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_min_max_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -440,6 +492,18 @@ def build_app(
         return JSONResponse(_sanitize_for_json(payload or {}))
       return JSONResponse(_sanitize_for_json(update_volume_eval_mode(payload or {})))
 
+    @app.get("/api/min-max-mode")
+    async def api_get_min_max_mode():
+      if not get_min_max_mode:
+        return JSONResponse({"enabled": False})
+      return JSONResponse(_sanitize_for_json(get_min_max_mode()))
+
+    @app.post("/api/min-max-mode")
+    async def api_update_min_max_mode(payload: Dict[str, Any] = Body(default={})):
+      if not update_min_max_mode:
+        return JSONResponse(_sanitize_for_json(payload or {}))
+      return JSONResponse(_sanitize_for_json(update_min_max_mode(payload or {})))
+
     @app.get("/api/timer-alert")
     async def api_get_timer_alert():
       if not get_timer_alert:
@@ -483,6 +547,8 @@ def start_web_dashboard(
   update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
   update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_min_max_mode: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_min_max_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -501,6 +567,8 @@ def start_web_dashboard(
       update_volume_accel_check=update_volume_accel_check,
       get_volume_eval_mode=get_volume_eval_mode,
       update_volume_eval_mode=update_volume_eval_mode,
+      get_min_max_mode=get_min_max_mode,
+      update_min_max_mode=update_min_max_mode,
       get_timer_alert=get_timer_alert,
       update_timer_alert=update_timer_alert,
       trigger_manual_buy=trigger_manual_buy,
