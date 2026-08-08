@@ -2317,11 +2317,33 @@ class Dashboard:
             "name": "volume_eval_mode",
         }
 
+    def _get_min_max_mode(self, time_left: float) -> Optional[Dict[str, float]]:
+        mode_cfg = getattr(self.config.strategy, "min_max_mode", None)
+        if not mode_cfg or not bool(getattr(mode_cfg, "enabled", False)):
+            return None
+
+        window_sec = float(max(0, getattr(mode_cfg, "time_left_sec", 0)))
+        if time_left > window_sec:
+            return None
+
+        return {
+            "window_sec": window_sec,
+            "min_contracts": float(getattr(mode_cfg, "min_contracts", self.config.entry.min_contracts)),
+            "max_trades": float(getattr(mode_cfg, "max_trades", 1)),
+            "min_max_diff_threshold_usd": float(getattr(mode_cfg, "min_max_diff_threshold_usd", 0.0)),
+            "min_price": float(getattr(mode_cfg, "min_price", self.config.strategy.min_price)),
+            "max_price": float(getattr(mode_cfg, "max_price", self.config.strategy.max_price)),
+            "name": "min_max_mode",
+        }
+
     def _get_active_entry_modes(self, time_left: float) -> List[Dict[str, float]]:
         modes: List[Dict[str, float]] = []
         volume_mode = self._get_volume_eval_mode(time_left)
         if volume_mode:
             modes.append(volume_mode)
+        min_max_mode = self._get_min_max_mode(time_left)
+        if min_max_mode:
+            modes.append(min_max_mode)
         late_mode = self._get_late_entry_mode(time_left)
         if late_mode:
             modes.append(late_mode)
@@ -2401,6 +2423,66 @@ class Dashboard:
             return bool(active_mode.get("volume_check_enabled", True))
         return False
 
+    def _get_current_min_max_diff_status(self) -> Dict[str, float]:
+        min_move = float(getattr(self.state, "btc_current_window_min_usd", 0.0) or 0.0)
+        max_move = float(getattr(self.state, "btc_current_window_max_usd", 0.0) or 0.0)
+        if max_move < min_move:
+            max_move, min_move = min_move, max_move
+        return {
+            "min_usd": min_move,
+            "max_usd": max_move,
+            "diff_usd": max(0.0, max_move - min_move),
+            "abs_diff_usd": abs(abs(max_move) - abs(min_move)),
+        }
+
+    def _mode_btc_gate_status(
+        self,
+        mode: Optional[Dict[str, float]],
+        btc_buffer: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        mode_name = str((mode or {}).get("name", ""))
+        if mode_name == "min_max_mode":
+            mm = self._get_current_min_max_diff_status()
+            base_threshold = float((mode or {}).get("min_max_diff_threshold_usd", 0.0) or 0.0)
+            required_max = abs(float(mm["min_usd"])) + base_threshold
+            return {
+                "ok": bool(float(mm["max_usd"]) > float(required_max)),
+                "metric": "min_max_diff",
+                "current_usd": float(mm["max_usd"]),
+                "threshold_usd": float(required_max),
+                "base_threshold_usd": float(base_threshold),
+                "min_usd": float(mm["min_usd"]),
+                "max_usd": float(mm["max_usd"]),
+                "abs_diff_usd": float(mm["abs_diff_usd"]),
+            }
+
+        current_usd = float((btc_buffer or {}).get("current_abs_usd", 0.0) or 0.0)
+        threshold_usd = float((btc_buffer or {}).get("buffer_abs_usd", 0.0) or 0.0)
+        ok_default = bool(btc_buffer and btc_buffer.get("ok"))
+
+        if mode and btc_buffer:
+            by_name = btc_buffer.get("mode_thresholds_by_name")
+            if isinstance(by_name, dict):
+                row = by_name.get(mode_name)
+                if isinstance(row, dict):
+                    try:
+                        threshold_usd = float(row.get("threshold_usd", threshold_usd) or threshold_usd)
+                    except (TypeError, ValueError):
+                        pass
+                    return {
+                        "ok": bool(row.get("ok", ok_default)),
+                        "metric": "btc_buffer",
+                        "current_usd": current_usd,
+                        "threshold_usd": threshold_usd,
+                    }
+
+        return {
+            "ok": bool(ok_default),
+            "metric": "btc_buffer",
+            "current_usd": current_usd,
+            "threshold_usd": threshold_usd,
+        }
+
     def _get_btc_buffer_status(self) -> Optional[Dict[str, float]]:
         buffer_stats = self._get_recent_btc_buffer()
         if not buffer_stats:
@@ -2428,6 +2510,8 @@ class Dashboard:
             mode_thresholds: List[Tuple[float, Dict[str, float]]] = []
             for mode in active_modes:
                 mode_name = str(mode.get("name", "")).strip() or "mode"
+                if mode_name == "min_max_mode":
+                    continue
                 mode_floor_usd = float(mode.get("min_buffer_threshold_usd", self.config.buffer))
                 threshold_usd = max(mode_floor_usd, stats_abs_usd * float(mode.get("buffer_avg_multiplier", 1.0)))
                 mode_ok = current_abs_usd >= threshold_usd
@@ -2743,8 +2827,9 @@ class Dashboard:
         btc_buffer = self._get_btc_buffer_status()
         
         volume_eval_mode = self._get_volume_eval_mode(time_left)
+        min_max_mode = self._get_min_max_mode(time_left)
         late_entry_mode = self._get_late_entry_mode(time_left)
-        active_modes = [m for m in [volume_eval_mode, late_entry_mode] if m is not None]
+        active_modes = [m for m in [volume_eval_mode, min_max_mode, late_entry_mode] if m is not None]
         late_mode = active_modes[0] if active_modes else None
         if late_mode:
             min_price = late_mode.get("min_price", 0.0)
@@ -2792,27 +2877,12 @@ class Dashboard:
         signal = "⏳ WAIT"
         signal_color = "yellow"
 
-        def _mode_btc_status(mode: Optional[Dict[str, float]]) -> Tuple[bool, Optional[float]]:
-            if not mode or not btc_buffer:
-                return btc_buffer_ok, (btc_buffer.get("buffer_abs_usd") if btc_buffer else None)
-            by_name = btc_buffer.get("mode_thresholds_by_name")
-            if isinstance(by_name, dict):
-                key = str(mode.get("name", "")).strip()
-                row = by_name.get(key)
-                if isinstance(row, dict):
-                    try:
-                        threshold = float(row.get("threshold_usd"))
-                    except (TypeError, ValueError):
-                        threshold = btc_buffer.get("buffer_abs_usd")
-                    return bool(row.get("ok", False)), threshold
-            return btc_buffer_ok, (btc_buffer.get("buffer_abs_usd") if btc_buffer else None)
-
         ready_modes: List[Dict[str, float]] = []
         for mode in active_modes:
             mode_price_ok = mode.get("min_price", 0.0) <= fav_price <= mode.get("max_price", 1.0)
             mode_vol_enabled = self._is_volume_check_enabled_for_active_mode(mode)
             mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
-            mode_btc_ok, _ = _mode_btc_status(mode)
+            mode_btc_ok = bool(self._mode_btc_gate_status(mode, btc_buffer).get("ok", False))
             if mode_price_ok and mode_btc_ok and mode_vol_ok:
                 ready_modes.append(mode)
 
@@ -2824,15 +2894,31 @@ class Dashboard:
             mode_price_ok = mode.get("min_price", 0.0) <= fav_price <= mode.get("max_price", 1.0)
             mode_vol_enabled = self._is_volume_check_enabled_for_active_mode(mode)
             mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
-            mode_btc_ok, mode_btc_threshold = _mode_btc_status(mode)
+            mode_btc = self._mode_btc_gate_status(mode, btc_buffer)
+            mode_btc_ok = bool(mode_btc.get("ok", False))
+            mode_btc_threshold = mode_btc.get("threshold_usd")
+            mode_btc_metric = str(mode_btc.get("metric", "btc_buffer"))
             mode_ready = mode_price_ok and mode_btc_ok and mode_vol_ok
             vol_label = ("OK" if mode_vol_ok else "WAIT") if mode_vol_enabled else "OFF"
+            if mode_btc_metric == "min_max_diff":
+                mode_min_usd = mode_btc.get("min_usd")
+                btc_label = (
+                    f"MM {'OK' if mode_btc_ok else 'WAIT'}"
+                    + (
+                        f"(max>${float(mode_btc_threshold):,.2f} from min={float(mode_min_usd):+.2f})"
+                        if mode_btc_threshold is not None and mode_min_usd is not None
+                        else ""
+                    )
+                )
+            else:
+                btc_label = (
+                    f"B {'OK' if mode_btc_ok else 'WAIT'}"
+                    + (f"(≥${float(mode_btc_threshold):,.2f})" if mode_btc_threshold is not None else "")
+                )
             return (
                 f"{mode_label}: active {int(mode.get('window_sec', 0))}s | "
                 f"P {'OK' if mode_price_ok else 'WAIT'} | "
-                f"B {'OK' if mode_btc_ok else 'WAIT'}"
-                + (f"(≥${mode_btc_threshold:,.2f})" if mode_btc_threshold is not None else "")
-                + " | "
+                f"{btc_label} | "
                 f"Vol {vol_label} | "
                 f"T {'OK' if time_ok else 'WAIT'} | "
                 f"D {'OK' if dev_ok else 'WAIT'} | "
@@ -2843,10 +2929,13 @@ class Dashboard:
             )
 
         mode_status_lines.append(_build_mode_status_line("Volume mode", volume_eval_mode))
+        mode_status_lines.append(_build_mode_status_line("MinMax mode", self._get_min_max_mode(time_left)))
         mode_status_lines.append(_build_mode_status_line("Late mode", late_entry_mode))
 
         late_mode = ready_modes[0] if ready_modes else (active_modes[0] if active_modes else None)
-        late_mode_btc_ok, late_mode_btc_threshold = _mode_btc_status(late_mode)
+        late_mode_btc = self._mode_btc_gate_status(late_mode, btc_buffer)
+        late_mode_btc_ok = bool(late_mode_btc.get("ok", False))
+        late_mode_btc_threshold = late_mode_btc.get("threshold_usd")
         if late_mode:
             min_price = late_mode.get("min_price", 0.0)
             max_price = late_mode.get("max_price", 1.0)
@@ -2867,10 +2956,19 @@ class Dashboard:
                             f", minC={int(chosen_mode.get('min_contracts', self.config.entry.min_contracts))}"
                         )
                     chosen_mode_name = str(chosen_mode.get("name", "")).strip() or "mode"
+                    mode_metric = self._mode_btc_gate_status(chosen_mode, btc_buffer)
+                    if str(chosen_mode.get("name", "")) == "min_max_mode":
+                        threshold = mode_metric.get("threshold_usd")
+                        metric_hint = (
+                            f", minmax>={float(threshold):.2f}"
+                            if threshold is not None else ""
+                        )
+                    else:
+                        metric_hint = f", x{float(chosen_mode.get('buffer_avg_multiplier', 1.0)):.2f} buffer"
                     signal = (
                         f"✅ BUY {fav_name} ({chosen_mode_name}: "
                         f"last {int(chosen_mode['window_sec'])}s, "
-                        f"x{chosen_mode['buffer_avg_multiplier']:.2f} buffer, "
+                        f"{metric_hint.lstrip(', ')}, "
                         f"vol {'ON' if chosen_vol_enabled else 'OFF'}{mcvd_hint})"
                     )
                 else:
@@ -2992,6 +3090,13 @@ class Dashboard:
                     f"minCurrDiff={vol_speed.get('min_current_volume_diff', 0):.0f} | "
                     f"minC={int(late_mode.get('min_contracts', self.config.entry.min_contracts))} | "
                     f"buffer x{late_mode['buffer_avg_multiplier']:.2f}"
+                )
+            elif mode_name_for_line == "min_max_mode":
+                minmax_threshold = float(late_mode.get("min_max_diff_threshold_usd", 0.0) or 0.0)
+                chosen_mode_line = (
+                    f"Chosen mode: min_max_mode ({int(late_mode['window_sec'])}s) | "
+                    f"minmax>=${minmax_threshold:.2f} | "
+                    f"minC={int(late_mode.get('min_contracts', self.config.entry.min_contracts))}"
                 )
             else:
                 chosen_mode_line = (
@@ -3275,10 +3380,11 @@ class Dashboard:
             elapsed_sec = self.config.market.duration_sec - time_left
             btc_buffer = self._get_btc_buffer_status()
 
-            # Keep web dashboard mode context explicit: volume-eval and late-entry are shown separately.
+            # Keep web dashboard mode context explicit: volume-eval, min-max, and late-entry are shown separately.
             volume_eval_mode = self._get_volume_eval_mode(time_left)
+            min_max_mode = self._get_min_max_mode(time_left)
             late_entry_mode = self._get_late_entry_mode(time_left)
-            active_mode = volume_eval_mode or late_entry_mode
+            active_mode = volume_eval_mode or min_max_mode or late_entry_mode
             if active_mode:
                 min_price = active_mode.get("min_price", 0.0)
                 max_price = active_mode.get("max_price", 1.0)
@@ -3332,21 +3438,8 @@ class Dashboard:
             vol_speed_ok = bool(vol_speed["ok"])
             vol_check_enabled = self._is_volume_check_enabled_for_active_mode(active_mode)
             vol_gate_ok = vol_speed_ok if vol_check_enabled else True
-
-            def _mode_btc_status(mode: Optional[Dict[str, float]]) -> Tuple[bool, Optional[float]]:
-                if not mode or not btc_buffer:
-                    return btc_buffer_ok, (btc_buffer.get("buffer_abs_usd") if btc_buffer else None)
-                by_name = btc_buffer.get("mode_thresholds_by_name")
-                if isinstance(by_name, dict):
-                    key = str(mode.get("name", "")).strip()
-                    row = by_name.get(key)
-                    if isinstance(row, dict):
-                        try:
-                            threshold = float(row.get("threshold_usd"))
-                        except (TypeError, ValueError):
-                            threshold = btc_buffer.get("buffer_abs_usd")
-                        return bool(row.get("ok", False)), threshold
-                return btc_buffer_ok, (btc_buffer.get("buffer_abs_usd") if btc_buffer else None)
+            active_mode_btc = self._mode_btc_gate_status(active_mode, btc_buffer)
+            active_mode_btc_ok = bool(active_mode_btc.get("ok", False))
 
             volume_entry_index: Optional[int] = None
             volume_entry_label: Optional[str] = None
@@ -3376,6 +3469,7 @@ class Dashboard:
                 if not mode:
                     block = {
                         "configured": bool(mode_kind == "volume_eval_mode" and getattr(self.config.strategy, "volume_eval_mode", None) and getattr(self.config.strategy.volume_eval_mode, "enabled", False))
+                                      or bool(mode_kind == "min_max_mode" and getattr(self.config.strategy, "min_max_mode", None) and getattr(self.config.strategy.min_max_mode, "enabled", False))
                                       or bool(mode_kind == "late_entry_mode" and getattr(self.config.strategy, "late_entry_modes", None) and getattr(self.config.strategy.late_entry_modes, "enabled", False)),
                         "active": False,
                         "name": mode_kind,
@@ -3392,7 +3486,9 @@ class Dashboard:
                 mode_vol_enabled = self._is_volume_check_enabled_for_active_mode(mode)
                 mode_price_ok = mode.get("min_price", 0.0) <= fav_price <= mode.get("max_price", 1.0)
                 mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
-                mode_btc_ok, mode_btc_threshold = _mode_btc_status(mode)
+                mode_btc = self._mode_btc_gate_status(mode, btc_buffer)
+                mode_btc_ok = bool(mode_btc.get("ok", False))
+                mode_btc_threshold = mode_btc.get("threshold_usd")
                 block = {
                     "configured": True,
                     "active": True,
@@ -3421,21 +3517,30 @@ class Dashboard:
                 return block
 
             if price_only_gate:
-                if price_ok and btc_buffer_ok and vol_gate_ok:
+                if price_ok and active_mode_btc_ok and vol_gate_ok:
                     if volume_eval_mode and active_mode:
                         signal = f"✅ BUY {fav_name} (volume eval, last {int(active_mode['window_sec'])}s)"
+                    elif min_max_mode and active_mode:
+                        signal = f"✅ BUY {fav_name} (min max mode, last {int(active_mode['window_sec'])}s)"
                     elif late_entry_mode and active_mode:
                         signal = f"✅ BUY {fav_name} (late entry, last {int(active_mode['window_sec'])}s)"
                     else:
                         signal = f"✅ BUY {fav_name} (last 20s: price + BTC buffer)"
-                elif not btc_buffer_ok and btc_buffer:
+                elif not active_mode_btc_ok and btc_buffer:
+                    gate_threshold = active_mode_btc.get("threshold_usd")
                     if volume_eval_mode:
                         label = f"volume eval (last {int(active_mode['window_sec'])}s)"
+                    elif min_max_mode:
+                        label = f"min max mode (last {int(active_mode['window_sec'])}s)"
                     elif late_entry_mode:
                         label = f"late entry (last {int(active_mode['window_sec'])}s)"
                     else:
                         label = "last 20s"
-                    signal = f"⏳ WAIT ({label}: BTC buffer < ${btc_buffer['buffer_abs_usd']:.2f})"
+                    if active_mode_btc.get("metric") == "min_max_diff":
+                        mode_min = float(active_mode_btc.get("min_usd", 0.0) or 0.0)
+                        signal = f"⏳ WAIT ({label}: window max <= ${float(gate_threshold or 0.0):.2f}, min={mode_min:+.2f})"
+                    else:
+                        signal = f"⏳ WAIT ({label}: BTC buffer < ${float(gate_threshold or btc_buffer['buffer_abs_usd']):.2f})"
                 elif vol_check_enabled and not vol_speed_ok:
                     if volume_eval_mode:
                         label = f"volume eval (last {int(active_mode['window_sec'])}s)"
@@ -3553,11 +3658,14 @@ class Dashboard:
                 },
                 "active_mode_kind": (
                     "volume_eval_mode" if volume_eval_mode else (
+                        "min_max_mode" if min_max_mode else (
                         "late_entry_mode" if late_entry_mode else "none"
+                        )
                     )
                 ),
                 "mode_strategies": {
                     "volume_eval_mode": _mode_strategy_block(volume_eval_mode, "volume_eval_mode"),
+                    "min_max_mode": _mode_strategy_block(min_max_mode, "min_max_mode"),
                     "late_entry_mode": _mode_strategy_block(late_entry_mode, "late_entry_mode"),
                 },
                 "up_line": f"{up.last_price:.3f} | Dev {up_dev:+.1f}% | Mom {up_mom if up_mom is not None else 0:.2f}% | Trend {up_trend if up_trend is not None else 0:+.4f}",
@@ -4820,7 +4928,8 @@ class LiveTradingBot:
                 mode_price_ok = float(mode_i.get("min_price", self.config.strategy.min_price)) <= token.last_price <= float(mode_i.get("max_price", self.config.strategy.max_price))
                 mode_vol_enabled = self.dashboard._is_volume_check_enabled_for_active_mode(mode_i)
                 mode_vol_ok = vol_speed_ok if mode_vol_enabled else True
-                if mode_price_ok and btc_buffer_ok and mode_vol_ok:
+                mode_btc_ok = bool(self.dashboard._mode_btc_gate_status(mode_i, btc_buffer).get("ok", False))
+                if mode_price_ok and mode_btc_ok and mode_vol_ok:
                     gate_ready_states.append(st)
 
             if gate_ready_states:
@@ -4867,6 +4976,13 @@ class LiveTradingBot:
                                 selected_entry_idx = i
                         mode_name = f"volume_eval_entry_{selected_entry_idx + 1}"
 
+        selected_mode_btc = self.dashboard._mode_btc_gate_status(late_mode, btc_buffer) if late_mode else {
+            "ok": btc_buffer_ok,
+            "metric": "btc_buffer",
+            "current_usd": float((btc_buffer or {}).get("current_abs_usd", 0.0) or 0.0),
+            "threshold_usd": float((btc_buffer or {}).get("buffer_abs_usd", 0.0) or 0.0),
+        }
+
         if gate_ready_states:
             price_ok = True
             if late_mode:
@@ -4874,6 +4990,7 @@ class LiveTradingBot:
                 max_price = float(late_mode.get("max_price", self.config.strategy.max_price))
                 vol_check_enabled = self.dashboard._is_volume_check_enabled_for_active_mode(late_mode)
                 vol_gate_ok = vol_speed_ok if vol_check_enabled else True
+                selected_mode_btc = self.dashboard._mode_btc_gate_status(late_mode, btc_buffer)
             else:
                 min_price = min(
                     float(st["mode"].get("min_price", self.config.strategy.min_price))
@@ -4888,6 +5005,12 @@ class LiveTradingBot:
                     for st in gate_ready_states
                 )
                 vol_gate_ok = True
+                selected_mode_btc = {
+                    "ok": True,
+                    "metric": "mixed",
+                    "current_usd": float((btc_buffer or {}).get("current_abs_usd", 0.0) or 0.0),
+                    "threshold_usd": None,
+                }
 
         price_only_gate = bool(active_modes) or last_20s_price_only
         if not manual_override:
@@ -4934,18 +5057,33 @@ class LiveTradingBot:
                 )
                 return
 
-            if not btc_buffer_ok:
-                if btc_buffer:
-                    signal_logger.info(
-                        f"SIGNAL BLOCKED: {side} - BTC absolute move ${btc_buffer['current_abs_usd']:,.2f} "
-                        f"< buffer ${btc_buffer['buffer_abs_usd']:,.2f}"
-                    )
-                    logger.warning(
-                        f"Entry blocked by BTC buffer: ${btc_buffer['current_abs_usd']:,.2f} "
-                        f"< ${btc_buffer['buffer_abs_usd']:,.2f}"
-                    )
+            if not bool(selected_mode_btc.get("ok", False)):
+                metric = str(selected_mode_btc.get("metric", "btc_buffer"))
+                current_usd = float(selected_mode_btc.get("current_usd", 0.0) or 0.0)
+                threshold_usd = selected_mode_btc.get("threshold_usd")
+                if metric == "min_max_diff":
+                    if threshold_usd is not None:
+                        min_usd = float(selected_mode_btc.get("min_usd", 0.0) or 0.0)
+                        signal_logger.info(
+                            f"SIGNAL BLOCKED: {side} - window max ${current_usd:,.2f} <= required ${float(threshold_usd):,.2f} (min={min_usd:+.2f})"
+                        )
+                        logger.warning(
+                            f"Entry blocked by MinMax mode: max ${current_usd:,.2f} <= required ${float(threshold_usd):,.2f} (min={min_usd:+.2f})"
+                        )
+                    else:
+                        signal_logger.info(f"SIGNAL BLOCKED: {side} - MinMax max gate not satisfied")
                 else:
-                    signal_logger.info(f"SIGNAL BLOCKED: {side} - BTC buffer data unavailable")
+                    if threshold_usd is not None:
+                        signal_logger.info(
+                            f"SIGNAL BLOCKED: {side} - BTC absolute move ${current_usd:,.2f} "
+                            f"< buffer ${float(threshold_usd):,.2f}"
+                        )
+                        logger.warning(
+                            f"Entry blocked by BTC buffer: ${current_usd:,.2f} "
+                            f"< ${float(threshold_usd):,.2f}"
+                        )
+                    else:
+                        signal_logger.info(f"SIGNAL BLOCKED: {side} - BTC buffer data unavailable")
                 return
         
         # Log full signal snapshot
