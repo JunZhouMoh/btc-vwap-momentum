@@ -236,6 +236,54 @@ class OrderExecutor:
         
         return contracts, True
 
+    @staticmethod
+    def _as_float_amount(value: Any) -> Optional[float]:
+        """Safely parse numeric API amount strings/numbers."""
+        if value is None:
+            return None
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(num) or num <= 0:
+            return None
+        return num
+
+    def _extract_filled_contracts(
+        self,
+        response: Dict[str, Any],
+        order_size: int,
+    ) -> int:
+        """
+        Infer filled shares/contracts from API response.
+
+        Polymarket responses can expose amounts in either shares or quote units,
+        and sometimes scaled by 1e6. We pick the candidate closest to requested
+        share size to keep PnL/remaining-position accounting accurate.
+        """
+        candidates: List[float] = []
+        for key in ("takingAmount", "makingAmount", "size", "sizeMatched"):
+            raw = self._as_float_amount(response.get(key, None))
+            if raw is None:
+                continue
+            candidates.append(raw)
+            if raw >= 1000.0:
+                candidates.append(raw / 1_000_000.0)
+
+        if not candidates:
+            return 0
+
+        positive = [c for c in candidates if c > 0]
+        if not positive:
+            return 0
+
+        target = max(1.0, float(order_size))
+        best = min(positive, key=lambda c: abs(c - target))
+        filled = int(round(best))
+        if filled <= 0 and best > 0:
+            filled = 1
+        return max(0, filled)
+
     def _simulate_fill(
         self,
         config: ExecutionConfig,
@@ -820,9 +868,8 @@ class OrderExecutor:
             status = response.get("status", "")
             
             if status == "matched":
-                # Ордер исполнен - берём количество из ответа
-                api_taking = response.get("takingAmount", "")
-                filled = int(float(api_taking)) if api_taking else 0
+                # Order matched: infer share fill from response amounts robustly.
+                filled = self._extract_filled_contracts(response, order_size)
                 
                 if filled > order_size:
                     order_logger.warning(f"  ⚠️ OVERFILL: got {filled}, ordered {order_size}")
@@ -988,11 +1035,7 @@ class OrderExecutor:
             status = response.get("status", "")
             filled = 0
             if status == "matched":
-                raw = response.get("takingAmount", "") or response.get("makingAmount", "")
-                try:
-                    filled = int(float(raw)) if raw else 0
-                except (TypeError, ValueError):
-                    filled = 0
+                filled = self._extract_filled_contracts(response, order_size)
 
             if filled > 0:
                 sold += filled
