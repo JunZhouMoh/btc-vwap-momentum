@@ -28,7 +28,7 @@ from typing import Optional, Dict, Any, Tuple, List
 from py_clob_client.clob_types import ApiCreds, OrderType
 from py_clob_client_v2 import ClobClient, OrderArgs, PartialCreateOrderOptions
 
-from py_clob_client.order_builder.constants import BUY
+from py_clob_client.order_builder.constants import BUY, SELL
 
 logger = logging.getLogger("btc_live.executor")
 
@@ -38,7 +38,7 @@ order_logger.setLevel(logging.DEBUG)
 
 # Polymarket minimums
 MIN_ORDER_USD = 1.0
-MIN_CONTRACTS =20
+MIN_CONTRACTS = 2
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -81,42 +81,6 @@ def _is_auth_error(message: str) -> bool:
     )
 
 
-def _to_float_or_none(value: Any) -> Optional[float]:
-    try:
-        if value is None:
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _extract_fill_price(response: Dict[str, Any], fallback_price: float) -> float:
-    """Best-effort extraction of actual fill price from API response."""
-    if not isinstance(response, dict):
-        return float(fallback_price)
-
-    for key in ("avgPrice", "averagePrice", "fillPrice", "price"):
-        v = _to_float_or_none(response.get(key))
-        if v is not None and v > 0:
-            return float(v)
-
-    taking = _to_float_or_none(response.get("takingAmount"))
-    making = _to_float_or_none(response.get("makingAmount"))
-    if taking and making and taking > 0 and making > 0:
-        # Try both orientations and pick a plausible binary price close to limit.
-        candidates = []
-        c1 = making / taking
-        c2 = taking / making
-        if 0 < c1 <= 1.5:
-            candidates.append(c1)
-        if 0 < c2 <= 1.5:
-            candidates.append(c2)
-        if candidates:
-            return min(candidates, key=lambda x: abs(x - fallback_price))
-
-    return float(fallback_price)
-
-
 @dataclass
 class OrderResult:
     """Result of an order execution attempt."""
@@ -139,7 +103,7 @@ class ExecutionConfig:
     max_retries: int = 5
     retry_delay_ms: int = 300
     fill_timeout_ms: int = 2000
-    min_contracts: int = 20
+    min_contracts: int = 5
     min_order_usd: float = 1.0
     max_entry_price: float = 0.91
 
@@ -232,7 +196,7 @@ class OrderExecutor:
             order_logger.error(f"CLOB CLIENT INIT FAILED: {e}")
             return False
     
-    def _calculate_contracts(self, amount_usd: float, price: float, min_contracts: Optional[int] = None) -> int:
+    def _calculate_contracts(self, amount_usd: float, price: float) -> int:
         """
         Calculate number of contracts for given amount.
         
@@ -241,17 +205,15 @@ class OrderExecutor:
             price: Price per contract
         
         Returns:
-            Number of contracts (minimum min_contracts)
+            Number of contracts (minimum MIN_CONTRACTS)
         """
-        if min_contracts is None:
-            min_contracts = MIN_CONTRACTS
         if price <= 0:
-            return min_contracts
+            return MIN_CONTRACTS
         
         contracts = int(amount_usd / price)
-        return max(contracts, min_contracts)
+        return max(contracts, MIN_CONTRACTS)
     
-    def _validate_order_size(self, contracts: int, price: float, min_contracts: Optional[int] = None) -> Tuple[int, bool]:
+    def _validate_order_size(self, contracts: int, price: float) -> Tuple[int, bool]:
         """
         Validate and adjust order size to meet minimums.
         
@@ -264,12 +226,9 @@ class OrderExecutor:
         """
         order_value = contracts * price
         
-        if min_contracts is None:
-            min_contracts = MIN_CONTRACTS
-
-        # Must be at least configured minimum contracts
-        if contracts < min_contracts:
-            contracts = min_contracts
+        # Must be at least MIN_CONTRACTS
+        if contracts < MIN_CONTRACTS:
+            contracts = MIN_CONTRACTS
         
         # Must be at least MIN_ORDER_USD
         if order_value < MIN_ORDER_USD:
@@ -293,8 +252,8 @@ class OrderExecutor:
             )
             return OrderResult(success=False, error="Price exceeded max entry")
 
-        contracts_needed = self._calculate_contracts(config.bet_amount_usd, initial_price, config.min_contracts)
-        order_size, _ = self._validate_order_size(contracts_needed, order_price, config.min_contracts)
+        contracts_needed = self._calculate_contracts(config.bet_amount_usd, initial_price)
+        order_size, _ = self._validate_order_size(contracts_needed, order_price)
         total_cost = order_size * order_price
         oid = f"SIM-{uuid.uuid4().hex[:12]}"
         order_logger.info("=" * 60)
@@ -445,15 +404,17 @@ class OrderExecutor:
         self,
         token_id: str,
         price: float,
-        size: int
+        size: int,
+        side: int = BUY,
     ) -> Tuple[bool, str, Dict]:
         """
         Place a FAK (Fill-And-Kill) order.
         
         Args:
-            token_id: Token to buy
+            token_id: Token id
             price: Order price
             size: Number of contracts
+            side: BUY or SELL
         
         Returns:
             Tuple of (success, order_id, response)
@@ -466,7 +427,7 @@ class OrderExecutor:
         order_logger.info("-" * 50)
         order_logger.info(f"PLACING ORDER")
         order_logger.info(f"  Token: {token_id[:30]}...")
-        order_logger.info(f"  Side: BUY")
+        order_logger.info(f"  Side: {'BUY' if side == BUY else 'SELL'}")
         order_logger.info(f"  Price: {price:.4f}")
         order_logger.info(f"  Size: {size} contracts")
         order_logger.info(f"  Value: ${order_value:.2f}")
@@ -483,7 +444,7 @@ class OrderExecutor:
                     token_id=token_id,
                     price=price,
                     size=size,
-                    side=BUY,
+                    side=side,
                 ),
                 None,
                 OrderType.FAK,
@@ -526,19 +487,7 @@ class OrderExecutor:
             
             logger.info(f"Order placed: {success}, ID: {order_id[:20] if order_id else 'N/A'}...")
             
-            if isinstance(response, dict):
-                normalized_response = dict(response)
-            else:
-                normalized_response = {
-                    "success": success,
-                    "orderID": order_id,
-                    "status": status,
-                    "errorMsg": error_msg,
-                    "takingAmount": taking_amount,
-                    "makingAmount": making_amount,
-                }
-
-            return success, order_id, normalized_response
+            return success, order_id, response if isinstance(response, dict) else {"success": success, "orderID": order_id, "status": status}
             
         except Exception as e:
             elapsed = (time.time() - start_time) * 1000
@@ -716,7 +665,7 @@ class OrderExecutor:
             order_logger.error("ENTRY FAILED: Could not get initial price")
             return OrderResult(success=False, error="Could not get price")
         
-        contracts_needed = self._calculate_contracts(config.bet_amount_usd, initial_price, config.min_contracts)
+        contracts_needed = self._calculate_contracts(config.bet_amount_usd, initial_price)
         contracts_bought = 0
         total_cost = 0.0
         attempt = 0
@@ -763,7 +712,7 @@ class OrderExecutor:
                 order_logger.info(f"  ✅ Already filled {contracts_bought}/{contracts_needed} - no retry needed")
                 break
             
-            order_size, _ = self._validate_order_size(remaining, order_price, config.min_contracts)
+            order_size, _ = self._validate_order_size(remaining, order_price)
             
             order_logger.info(f"  Contracts bought so far: {contracts_bought}")
             order_logger.info(f"  Remaining needed: {remaining}")
@@ -879,7 +828,7 @@ class OrderExecutor:
                     order_logger.warning(f"  ⚠️ OVERFILL: got {filled}, ordered {order_size}")
                     logger.warning(f"Entry overfill: {filled} > {order_size}")
                 
-                fill_price = _extract_fill_price(response, order_price)
+                fill_price = order_price
                 
                 contracts_bought += filled
                 total_cost += filled * fill_price
@@ -896,10 +845,7 @@ class OrderExecutor:
                     "timestamp": datetime.now().isoformat()
                 })
                 
-                order_logger.info(
-                    f"  ✅ FILLED: {filled} contracts @ {fill_price:.4f} "
-                    f"(limit was {order_price:.4f})"
-                )
+                order_logger.info(f"  ✅ FILLED: {filled} contracts @ {fill_price:.4f}")
                 order_logger.info(f"  Progress: {contracts_bought}/{contracts_needed} ({contracts_bought/contracts_needed*100:.1f}%)")
                 
                 logger.info(f"Filled: {filled} @ {fill_price:.2f} (total: {contracts_bought}/{contracts_needed})")
@@ -949,6 +895,123 @@ class OrderExecutor:
         )
         
         return result
+
+    async def execute_exit(
+        self,
+        token_id: str,
+        contracts_to_sell: int,
+        config: ExecutionConfig,
+        websocket_price: Optional[float] = None,
+    ) -> OrderResult:
+        """Execute SELL order (real CLOB in live mode, simulated in sim mode)."""
+        if contracts_to_sell <= 0:
+            return OrderResult(success=False, error="Nothing to sell")
+
+        if self.simulation_mode:
+            if not websocket_price:
+                return OrderResult(success=False, error="Could not get sell price")
+            px = max(0.001, float(websocket_price) - float(config.price_offset))
+            proceeds = float(contracts_to_sell) * px
+            return OrderResult(
+                success=True,
+                order_id=f"SIM-SELL-{uuid.uuid4().hex[:12]}",
+                contracts_filled=int(contracts_to_sell),
+                avg_price=float(px),
+                total_cost=float(proceeds),
+                attempts=1,
+            )
+
+        if not self._initialized:
+            if not await self.initialize():
+                return OrderResult(success=False, error="Failed to initialize")
+
+        if not websocket_price or websocket_price <= 0:
+            return OrderResult(success=False, error="Could not get sell price")
+
+        order_price = max(0.001, float(websocket_price) - float(config.price_offset))
+        sold = 0
+        proceeds = 0.0
+        attempt = 0
+        last_error = ""
+
+        order_logger.info("=" * 60)
+        order_logger.info("EXIT EXECUTION STARTED")
+        order_logger.info(f"  Token: {token_id[:40]}...")
+        order_logger.info(f"  Contracts to Sell: {contracts_to_sell}")
+        order_logger.info(f"  Price: {order_price:.4f} (BID - {config.price_offset:.4f})")
+        order_logger.info(f"  Max Retries: {config.max_retries}")
+
+        while sold < contracts_to_sell and attempt < config.max_retries:
+            attempt += 1
+            remaining = int(contracts_to_sell - sold)
+            if remaining <= 0:
+                break
+
+            order_size = remaining
+            success, _order_id, response = await self.place_fak_order(
+                token_id,
+                order_price,
+                order_size,
+                side=SELL,
+            )
+
+            if not success:
+                error_msg = response.get("errorMsg", "") or response.get("error", "")
+                if _is_auth_error(error_msg):
+                    return OrderResult(
+                        success=False,
+                        contracts_filled=sold,
+                        avg_price=(proceeds / sold) if sold > 0 else 0.0,
+                        total_cost=proceeds,
+                        attempts=attempt,
+                        error=(
+                            "Auth failed (401 Unauthorized/Invalid api key). "
+                            "Check POLY_API_KEY / POLY_API_SECRET / POLY_API_PASSPHRASE as a matching set."
+                        ),
+                    )
+
+                if "status_code=None" in error_msg:
+                    return OrderResult(
+                        success=False,
+                        contracts_filled=sold,
+                        avg_price=(proceeds / sold) if sold > 0 else 0.0,
+                        total_cost=proceeds,
+                        attempts=attempt,
+                        error="Network timeout during sell; status unknown",
+                        was_timeout=True,
+                    )
+
+                last_error = error_msg or "Sell order failed"
+                await asyncio.sleep(config.retry_delay_ms / 1000)
+                continue
+
+            status = response.get("status", "")
+            filled = 0
+            if status == "matched":
+                raw = response.get("takingAmount", "") or response.get("makingAmount", "")
+                try:
+                    filled = int(float(raw)) if raw else 0
+                except (TypeError, ValueError):
+                    filled = 0
+
+            if filled > 0:
+                sold += filled
+                proceeds += float(filled) * float(order_price)
+                self.orders_filled += 1
+                self.total_contracts += filled
+                self.total_spent += float(filled) * float(order_price)
+
+            if sold < contracts_to_sell:
+                await asyncio.sleep(config.retry_delay_ms / 1000)
+
+        return OrderResult(
+            success=sold > 0,
+            contracts_filled=sold,
+            avg_price=(proceeds / sold) if sold > 0 else 0.0,
+            total_cost=proceeds,
+            attempts=attempt,
+            error=last_error if sold == 0 else "",
+        )
     
     def get_stats(self) -> Dict:
         """Get executor statistics."""
