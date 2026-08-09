@@ -5979,6 +5979,47 @@ class LiveTradingBot:
 
         if not result.success or result.contracts_filled <= 0:
             msg = result.error or "sell not filled"
+            insufficient = self._extract_not_enough_balance(msg)
+            if insufficient and contracts > 0:
+                # Polymarket returns raw token units in this error (typically 1e6 precision).
+                # Use ratio to estimate how many of our local contracts are still sellable.
+                avail_units, asked_units = insufficient
+                try:
+                    est_sellable = int(math.floor((float(contracts) * float(avail_units)) / float(asked_units)))
+                except Exception:
+                    est_sellable = 0
+
+                if est_sellable > 0:
+                    retry = await self.executor.execute_exit(
+                        token_id=pos.token_id,
+                        contracts_to_sell=est_sellable,
+                        config=exit_cfg,
+                        websocket_price=bid_price,
+                    )
+                    if retry.success and retry.contracts_filled > 0:
+                        result = retry
+                    else:
+                        msg = retry.error or msg
+                else:
+                    # Dust-sized remainder cannot be sold with integer contract sizing.
+                    # Clear local position so dashboard does not show a stale large holding.
+                    dust_record = self.stats.close_position_early(
+                        bid_price,
+                        btc_price_at_close=btc_close_for_log,
+                    )
+                    if dust_record is not None:
+                        self._simulation_log_close(dust_record, hedged_was)
+                        self.dashboard.entry_flash = True
+                        self.dashboard.manual_buy_live_status = (
+                            "processed: position closed locally (exchange reports dust balance)"
+                        )
+                        logger.warning(
+                            "Manual sell dust clear: exchange insufficient balance (%s), "
+                            "local position closed at %.4f for panel consistency",
+                            msg,
+                            bid_price,
+                        )
+                        return
             self.dashboard.manual_buy_live_status = f"processed: no sell fill ({msg})"
             signal_logger.error(f"MANUAL SELL FAILED: {msg}")
             return
@@ -6022,6 +6063,27 @@ class LiveTradingBot:
             )
         else:
             self.dashboard.manual_buy_live_status = f"sent: SOLD {token_name} ${result.avg_price:.3f}"
+
+    @staticmethod
+    def _extract_not_enough_balance(error_text: str) -> Optional[Tuple[int, int]]:
+        """Parse Polymarket insufficient-balance error and return (balance_units, order_units)."""
+        if not error_text:
+            return None
+        text = str(error_text)
+        if "not enough balance" not in text.lower():
+            return None
+
+        m = re.search(r"balance\s*:\s*(\d+)\s*,\s*order amount\s*:\s*(\d+)", text)
+        if not m:
+            return None
+        try:
+            bal = int(m.group(1))
+            req = int(m.group(2))
+        except (TypeError, ValueError):
+            return None
+        if bal < 0 or req <= 0:
+            return None
+        return (bal, req)
     
     async def _safe_execute_entry(self, signal: str):
         """Execute entry in separate task with error handling."""
