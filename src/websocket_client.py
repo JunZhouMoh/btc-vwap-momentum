@@ -308,8 +308,9 @@ class UserWebSocket:
                 )
 
                 if asset_id and str(status).upper() == "MATCHED":
+                    raw_size = float(data.get("size", 0) or 0)
                     self._token_fills.setdefault(asset_id, []).append({
-                        "size": int(float(data.get("size", 0) or 0)),
+                        "size": int(round(raw_size)) if raw_size > 0 else 0,
                         "price": float(data.get("price", 0) or 0.0),
                         "order_id": data.get("taker_order_id", "") or data.get("maker_order_id", ""),
                         "timestamp": time.time(),
@@ -384,9 +385,9 @@ class UserWebSocket:
 
     @staticmethod
     def _aggregate_fills(fills: List[Dict]) -> Dict:
-        total_contracts = sum(int(f.get("size", 0) or 0) for f in fills)
+        total_contracts = sum(int(round(float(f.get("size", 0) or 0))) for f in fills)
         total_cost = sum(
-            int(f.get("size", 0) or 0) * float(f.get("price", 0) or 0.0)
+            int(round(float(f.get("size", 0) or 0))) * float(f.get("price", 0) or 0.0)
             for f in fills
         )
         avg_price = (total_cost / total_contracts) if total_contracts > 0 else 0.0
