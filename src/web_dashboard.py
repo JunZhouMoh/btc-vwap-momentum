@@ -81,6 +81,26 @@ _HTML = """<!DOCTYPE html>
   var timerAlertCfg=null;
     var minMaxCfg=null;
     window.latestModePerfData={};
+    var pollTimer=null;
+    var pollInFlight=false;
+    var pollSeq=0;
+    var isMobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent||'');
+    var POLL_MS_ACTIVE=1000;
+    var POLL_MS_HIDDEN=5000;
+    var lastHtml={meta:'',session:'',strategy:'',btc:'',trading:'',modePerf:''};
+
+    function setHtmlIfChanged(id,htmlKey,html){
+      var el=document.getElementById(id);
+      if(!el) return;
+      if(lastHtml[htmlKey]===html) return;
+      lastHtml[htmlKey]=html;
+      el.innerHTML=html;
+    }
+
+    function scheduleTick(ms){
+      if(pollTimer){ clearTimeout(pollTimer); pollTimer=null; }
+      pollTimer=setTimeout(tick, Math.max(250, ms||POLL_MS_ACTIVE));
+    }
 
     function numFmtSigned(n,d){ if(n===null||n===undefined||typeof n!=='number'||isNaN(n)) return '\u2014'; var fixed=n.toFixed(d); if(n>0) return '+'+fixed; return fixed; }
 
@@ -299,6 +319,19 @@ _HTML = """<!DOCTYPE html>
     function manualBuyUp(){ manualBuyWithDirection('UP'); }
     function manualBuyDown(){ manualBuyWithDirection('DOWN'); }
 
+    function manualSell(){
+      var status=document.getElementById('buyStatus');
+      if(status) status.textContent='Submitting sell...';
+      requestJson('POST','/api/manual-sell',{},function(resp){
+        if(!status) return;
+        if(resp&&resp.ok===false){
+          status.textContent=String(resp.error||'Sell request failed');
+          return;
+        }
+        status.textContent=String((resp&&resp.message)||'Queued manual sell');
+      });
+    }
+
     function setBuyAmount(v){
       var el=document.getElementById('buyAmount');
       if(!el) return;
@@ -311,11 +344,16 @@ _HTML = """<!DOCTYPE html>
     }
 
     function tick(){
+      if(pollInFlight) return;
+      pollInFlight=true;
+      var seq=++pollSeq;
       var errEl=document.getElementById('err');
       var r=new XMLHttpRequest();
       r.open('GET','/api/state',true);
       r.onreadystatechange=function(){
         if(r.readyState!==4) return;
+        if(seq!==pollSeq) return;
+        pollInFlight=false;
         try{
           if(r.status!==200) throw new Error('HTTP '+r.status);
           var d=JSON.parse(r.responseText);
@@ -324,7 +362,8 @@ _HTML = """<!DOCTYPE html>
           var slug=hdr.slug!=null?String(hdr.slug):'\u2014';
           var ts='';
           if(d.ts) ts=new Date(d.ts*1000).toISOString();
-          document.getElementById('meta').innerHTML=esc(slug)+' \u00b7 '+esc(ts);
+          var metaHtml=esc(slug)+' \u00b7 '+esc(ts);
+          setHtmlIfChanged('meta','meta',metaHtml);
           var existingAmountEl=document.getElementById('buyAmount');
           var buyAmountVal=existingAmountEl?existingAmountEl.value:'';
           var existingBuyStatusEl=document.getElementById('buyStatus');
@@ -332,13 +371,14 @@ _HTML = """<!DOCTYPE html>
           var liveStatusVal=d.manual_buy_live_status?String(d.manual_buy_live_status):'idle';
           var defaultBuyAmount=10;
           if(!buyAmountVal) buyAmountVal=String(defaultBuyAmount);
-          document.getElementById('session').innerHTML=[
+          var sessionHtml=[
             'Timer: '+(hdr.time_left_sec!=null?esc(Math.floor(hdr.time_left_sec)+'s left'):'\u2014'),
             'WS: '+(hdr.ws_connected?'live':'disconnected'),
             'Mode: '+(hdr.simulation?'simulation':'real'),
             'Live: '+esc(liveStatusVal),
-            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">UP</button> <button class="btn secondary" onclick="manualBuyDown()">DOWN</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
+            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">UP</button> <button class="btn secondary" onclick="manualBuyDown()">DOWN</button> <button class="btn secondary" onclick="manualSell()">SELL</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
           ].join('<br/>');
+          setHtmlIfChanged('session','session',sessionHtml);
 
           var st=d.strategy||{}, sig=st.signal_text||'\u2014';
           function chk(x){ return x===true?'\u2713':x===false?'\u2717':'\u2014'; }
@@ -370,7 +410,8 @@ _HTML = """<!DOCTYPE html>
               strategyBits.push('BTC Buffer '+esc(String(modeBtcLines[bi]||'')));
             }
           }
-          document.getElementById('strategy').innerHTML='<div class="sig '+sigClass(sig)+'">'+esc(sig)+'</div><div class="mono" style="margin-top:0.4rem">'+strategyBits.join('<br/>')+'</div>';
+          var strategyHtml='<div class="sig '+sigClass(sig)+'">'+esc(sig)+'</div><div class="mono" style="margin-top:0.4rem">'+strategyBits.join('<br/>')+'</div>';
+          setHtmlIfChanged('strategy','strategy',strategyHtml);
 
           function book(x,id){ var el=document.getElementById(id); if(!el) return; if(!x){ el.textContent='No data'; return; } var bk=x.book||{}, ind=x.indicators||{}; el.innerHTML=['Last '+esc(bk.last_price),'Bid '+esc(bk.best_bid)+' / Ask '+esc(bk.best_ask),'PM VWAP '+numFmt(ind.pm_vwap,4)+' \u00b7 BTC VWAP '+(ind.btc_vwap_weighted!=null?numFmt(ind.btc_vwap_weighted,4):'\u2014'),'Dev '+(ind.deviation_pct!=null?numFmt(ind.deviation_pct,2)+'%':'\u2014')+' \u00b7 BTC Vol Bias '+(ind.btc_vol_ratio!=null?numFmt(ind.btc_vol_ratio,1)+'%':'\u2014'),'Z '+numFmt(ind.zscore,2)+' \u00b7 Mom '+(ind.momentum_pct!=null?numFmt(ind.momentum_pct,2)+'%':'\u2014'),'Vol '+(bk.volume_total!=null?esc(Math.round(bk.volume_total)):'\u2014')].join('<br/>'); }
           book(d.up,'up'); book(d.down,'down');
@@ -381,7 +422,11 @@ _HTML = """<!DOCTYPE html>
             if(b.buffer_avg_abs_usd!=null||b.buffer_avg_abs_pct!=null){ var usd=b.buffer_avg_abs_usd!=null?'$'+esc(numFmt(b.buffer_avg_abs_usd,2)):'\u2014'; var pct=b.buffer_avg_abs_pct!=null?esc(numFmt(b.buffer_avg_abs_pct,3))+'%':'\u2014'; bits.push('Buffer avg(5): +/-'+usd+' (+/-'+pct+')'); }
             if(b.buffer_windows&&b.buffer_windows.length){ bits.push('\u2014 last 5 windows \u2014'); for(var wi=0;wi<b.buffer_windows.length;wi++){ var ww=b.buffer_windows[wi]; var wt=ww.window_ts?new Date(ww.window_ts*1000).toISOString().substr(11,8):'?'; var sUsd=(ww.signed_usd!=null&&typeof ww.signed_usd==='number'&&!isNaN(ww.signed_usd))?numFmtSigned(ww.signed_usd,2):numFmtSigned((ww.abs_usd!=null?ww.abs_usd:0),2); var minUsd=(ww.min_usd!=null&&typeof ww.min_usd==='number'&&!isNaN(ww.min_usd))?numFmtSigned(ww.min_usd,2):'\u2014'; var maxUsd=(ww.max_usd!=null&&typeof ww.max_usd==='number'&&!isNaN(ww.max_usd))?numFmtSigned(ww.max_usd,2):'\u2014'; bits.push(esc(wt)+' $'+esc(sUsd)+' | min $'+esc(minUsd)+' | max $'+esc(maxUsd)); } }
             bits.push('Feed: '+(b.btc_connected?'ok':'off')+(b.fresh_sec!=null?' \u00b7 '+Math.floor(b.fresh_sec)+'s':''));
-            btcEl.innerHTML=bits.join('<br/>');
+            var btcHtml=bits.join('<br/>');
+            if(lastHtml.btc!==btcHtml){
+              lastHtml.btc=btcHtml;
+              btcEl.innerHTML=btcHtml;
+            }
           } else { btcEl.textContent='Waiting for Chainlink...'; }
 
           var tr=d.trading||{};
@@ -389,20 +434,25 @@ _HTML = """<!DOCTYPE html>
           if(tr.position){ var p=tr.position; tHtml+='LONG '+esc(p.token_name)+' @ '+esc(p.entry_price)+' \u00d7'+esc(p.contracts)+(p.hedged?' hedged':'')+'<br/>'; tHtml+='Unreal $'+(p.unrealized_pnl!=null?numFmt(p.unrealized_pnl,2):'\u2014')+'<br/>'; } else { tHtml+='No open position<br/>'; }
           if(tr.recent_trades&&tr.recent_trades.length){ var lines=[]; for(var ri=0;ri<tr.recent_trades.length;ri++){ lines.push(esc(tr.recent_trades[ri].line)); } tHtml+='<br/>Recent:<br/>'+lines.join('<br/>'); }
           var tr=d.trading||{}, modePerfEl=document.getElementById('modePerf');
-          if(modePerfEl){ var modePerfLines=[], modePerfData=tr.win_rate_by_mode||{}; window.latestModePerfData=modePerfData; var panelHandledModes={}; var panelModeOrder=['normal','manual','mode_60s','mode_40s','mode_30s','mode_20s','unknown']; function pushPanelModeLine(modeKey){ if(!Object.prototype.hasOwnProperty.call(modePerfData,modeKey)) return; panelHandledModes[modeKey]=true; var ms=modePerfData[modeKey]||{}; var wrVal=(ms.win_rate_pct!=null&&typeof ms.win_rate_pct==='number'&&!isNaN(ms.win_rate_pct))?(numFmt(ms.win_rate_pct,1)+'%'):'\u2014'; var pnlVal=(ms.total_pnl_usd!=null&&typeof ms.total_pnl_usd==='number'&&!isNaN(ms.total_pnl_usd))?('$'+numFmtSigned(ms.total_pnl_usd,2)):'$\u2014'; var countVal=(ms.trade_count!=null)?String(ms.trade_count):'0'; modePerfLines.push(esc(modeKey)+' | PnL '+esc(pnlVal)+' | Triggers '+esc(countVal)+' | WR '+esc(wrVal)); } for(var pmo=0;pmo<panelModeOrder.length;pmo++){ pushPanelModeLine(panelModeOrder[pmo]); } for(var pmk in modePerfData){ if(!Object.prototype.hasOwnProperty.call(modePerfData,pmk)) continue; if(panelHandledModes[pmk]) continue; pushPanelModeLine(pmk); } modePerfEl.innerHTML=modePerfLines.length?modePerfLines.join('<br/>'):'No mode stats yet'; }
-          document.getElementById('trading').innerHTML=tHtml;
-        } catch(e){ errEl.textContent='Poll error: '+((e&&e.message)?e.message:e); }
+          if(modePerfEl){ var modePerfLines=[], modePerfData=tr.win_rate_by_mode||{}; window.latestModePerfData=modePerfData; var panelHandledModes={}; var panelModeOrder=['normal','manual','mode_60s','mode_40s','mode_30s','mode_20s','unknown']; function pushPanelModeLine(modeKey){ if(!Object.prototype.hasOwnProperty.call(modePerfData,modeKey)) return; panelHandledModes[modeKey]=true; var ms=modePerfData[modeKey]||{}; var wrVal=(ms.win_rate_pct!=null&&typeof ms.win_rate_pct==='number'&&!isNaN(ms.win_rate_pct))?(numFmt(ms.win_rate_pct,1)+'%'):'\u2014'; var pnlVal=(ms.total_pnl_usd!=null&&typeof ms.total_pnl_usd==='number'&&!isNaN(ms.total_pnl_usd))?('$'+numFmtSigned(ms.total_pnl_usd,2)):'$\u2014'; var countVal=(ms.trade_count!=null)?String(ms.trade_count):'0'; modePerfLines.push(esc(modeKey)+' | PnL '+esc(pnlVal)+' | Triggers '+esc(countVal)+' | WR '+esc(wrVal)); } for(var pmo=0;pmo<panelModeOrder.length;pmo++){ pushPanelModeLine(panelModeOrder[pmo]); } for(var pmk in modePerfData){ if(!Object.prototype.hasOwnProperty.call(modePerfData,pmk)) continue; if(panelHandledModes[pmk]) continue; pushPanelModeLine(pmk); } var modePerfHtml=modePerfLines.length?modePerfLines.join('<br/>'):'No mode stats yet'; setHtmlIfChanged('modePerf','modePerf',modePerfHtml); }
+          setHtmlIfChanged('trading','trading',tHtml);
+          scheduleTick(document.hidden?POLL_MS_HIDDEN:POLL_MS_ACTIVE);
+        } catch(e){ errEl.textContent='Poll error: '+((e&&e.message)?e.message:e); scheduleTick(2000); }
       };
-      r.onerror=function(){ errEl.textContent='Network error (is the bot running?)'; };
+      r.onerror=function(){ pollInFlight=false; errEl.textContent='Network error (is the bot running?)'; scheduleTick(2000); };
       r.send();
     }
+
+    document.addEventListener('visibilitychange', function(){
+      scheduleTick(document.hidden?POLL_MS_HIDDEN:250);
+    });
 
     loadLateModeConfig();
     loadVolumeEvalConfig();
     loadTimerAlertConfig();
     loadMinMaxModeConfig();
     tick();
-    setInterval(tick, 1000);
+    scheduleTick(POLL_MS_ACTIVE);
   </script>
 </body>
 </html>
@@ -461,6 +511,7 @@ def build_app(
   get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> FastAPI:
     app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
 
@@ -554,6 +605,12 @@ def build_app(
         return JSONResponse({"ok": False, "error": "Manual buy is not enabled"})
       return JSONResponse(_sanitize_for_json(trigger_manual_buy(payload or {})))
 
+    @app.post("/api/manual-sell")
+    async def api_manual_sell(payload: Dict[str, Any] = Body(default={})):
+      if not trigger_manual_sell:
+        return JSONResponse({"ok": False, "error": "Manual sell is not enabled"})
+      return JSONResponse(_sanitize_for_json(trigger_manual_sell(payload or {})))
+
     return app
 
 
@@ -584,6 +641,7 @@ def start_web_dashboard(
   get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> bool:
     """
     Start uvicorn in a daemon thread. Returns True if the port accepts connections
@@ -604,6 +662,7 @@ def start_web_dashboard(
       get_timer_alert=get_timer_alert,
       update_timer_alert=update_timer_alert,
       trigger_manual_buy=trigger_manual_buy,
+      trigger_manual_sell=trigger_manual_sell,
     )
 
     def run() -> None:
