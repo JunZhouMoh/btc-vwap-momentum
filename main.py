@@ -832,6 +832,141 @@ class TradingStats:
         self.position_closed_this_market = True
         self._save()
         return record
+
+    def sell_position_contracts(self, contracts_to_sell: int, exit_price: float, btc_price_at_close: float = 0.0) -> Optional[TradeRecord]:
+        """Realize PnL for a real sell fill and reduce/close current position."""
+        if not self.position or contracts_to_sell <= 0:
+            return None
+
+        total_open = int(self.position.contracts)
+        sold = min(int(contracts_to_sell), total_open)
+        if sold <= 0:
+            return None
+
+        px = max(0.0, float(exit_price))
+        remaining = total_open - sold
+
+        # Consume legs FIFO for realized-cost calculation and breakdown.
+        old_legs = list(getattr(self.position, "mode_legs", []) or [])
+        if not old_legs:
+            old_legs = [{
+                "mode": (str(self.position.entry_mode).strip() or "unknown"),
+                "contracts": int(self.position.contracts),
+                "entry_price": float(self.position.entry_price),
+            }]
+
+        to_sell = sold
+        sold_legs: List[Dict[str, Any]] = []
+        new_legs: List[Dict[str, Any]] = []
+        for leg in old_legs:
+            leg_mode = str(leg.get("mode", "") or "unknown").strip() or "unknown"
+            leg_contracts = int(float(leg.get("contracts", 0) or 0))
+            leg_entry = float(leg.get("entry_price", 0.0) or 0.0)
+            if leg_contracts <= 0 or leg_entry <= 0:
+                continue
+
+            if to_sell > 0:
+                used = min(leg_contracts, to_sell)
+                if used > 0:
+                    sold_legs.append({"mode": leg_mode, "contracts": used, "entry_price": leg_entry})
+                    to_sell -= used
+                left = leg_contracts - used
+                if left > 0:
+                    new_legs.append({"mode": leg_mode, "contracts": left, "entry_price": leg_entry})
+            else:
+                new_legs.append({"mode": leg_mode, "contracts": leg_contracts, "entry_price": leg_entry})
+
+        sold_cost = sum(int(l["contracts"]) * float(l["entry_price"]) for l in sold_legs)
+        sold_entry_avg = (sold_cost / sold) if sold > 0 else float(self.position.entry_price)
+        pnl = float(sold) * px - sold_cost
+        won = pnl >= 0.0
+
+        dd_abs = max(0, self.position.entry_price - self.position.min_price_seen)
+        dd_pct = (dd_abs / self.position.entry_price * 100) if self.position.entry_price > 0 else 0
+
+        btc_e = self.position.btc_price_at_entry
+        btc_a = self.position.btc_anchor_at_entry
+        btc_c = btc_price_at_close if btc_price_at_close > 0 else 0.0
+        btc_diff = (btc_c - btc_a) if (btc_c > 0 and btc_a > 0) else 0.0
+
+        mode_breakdown: Dict[str, Dict[str, float]] = {}
+        for leg in sold_legs:
+            mode = str(leg.get("mode", "") or "unknown").strip() or "unknown"
+            leg_contracts = int(leg.get("contracts", 0) or 0)
+            leg_entry_price = float(leg.get("entry_price", 0.0) or 0.0)
+            if leg_contracts <= 0 or leg_entry_price <= 0:
+                continue
+            leg_pnl = leg_contracts * (px - leg_entry_price)
+            bucket = mode_breakdown.setdefault(
+                mode,
+                {
+                    "trigger_count": 0.0,
+                    "wins": 0.0,
+                    "losses": 0.0,
+                    "total_pnl_usd": 0.0,
+                },
+            )
+            bucket["trigger_count"] += 1.0
+            if leg_pnl >= 0:
+                bucket["wins"] += 1.0
+            else:
+                bucket["losses"] += 1.0
+            bucket["total_pnl_usd"] += float(leg_pnl)
+
+        unique_modes = list(mode_breakdown.keys())
+        if len(unique_modes) == 1:
+            entry_mode_for_record = unique_modes[0]
+        elif len(unique_modes) > 1:
+            mode_contracts: Dict[str, int] = {}
+            for leg in sold_legs:
+                mode = str(leg.get("mode", "") or "unknown").strip() or "unknown"
+                mode_contracts[mode] = mode_contracts.get(mode, 0) + int(leg.get("contracts", 0) or 0)
+            entry_mode_for_record = sorted(mode_contracts.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
+        else:
+            entry_mode_for_record = (str(self.position.entry_mode).strip() or "unknown")
+
+        record = TradeRecord(
+            market_slug=self.position.market_slug,
+            token_name=self.position.token_name,
+            entry_price=sold_entry_avg,
+            exit_price=px,
+            contracts=sold,
+            pnl=pnl,
+            won=won,
+            timestamp=time.time(),
+            max_drawdown_abs=dd_abs,
+            max_drawdown_pct=dd_pct,
+            btc_price_at_entry=btc_e,
+            btc_anchor_price_at_entry=btc_a,
+            btc_price_at_close=btc_c,
+            btc_diff_from_anchor=btc_diff,
+            entry_mode=entry_mode_for_record,
+            mode_breakdown=mode_breakdown,
+        )
+
+        self.trades.append(record)
+
+        if remaining <= 0:
+            self.position = None
+            self.position_closed_this_market = True
+        else:
+            self.position.contracts = remaining
+            self.position.mode_legs = new_legs
+            remaining_cost = sum(int(l.get("contracts", 0)) * float(l.get("entry_price", 0.0)) for l in new_legs)
+            self.position.entry_price = (remaining_cost / remaining) if remaining > 0 else self.position.entry_price
+            if self.position.hedged:
+                self.position.hedge_contracts = max(0, int(self.position.hedge_contracts) - sold)
+                if self.position.hedge_contracts == 0:
+                    self.position.hedged = False
+            if new_legs:
+                mode_contracts_rem: Dict[str, int] = {}
+                for leg in new_legs:
+                    mk = str(leg.get("mode", "") or "unknown").strip() or "unknown"
+                    mode_contracts_rem[mk] = mode_contracts_rem.get(mk, 0) + int(leg.get("contracts", 0) or 0)
+                self.position.entry_mode = sorted(mode_contracts_rem.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
+
+        self._save()
+        return record
     
     @property
     def total_pnl(self) -> float:
@@ -5786,7 +5921,7 @@ class LiveTradingBot:
                     pass
 
     async def execute_manual_sell(self):
-        """Close current position immediately at current tradable price."""
+        """Close current position using a real SELL execution path."""
         pos = self.stats.position
         if not pos:
             self.dashboard.manual_buy_live_status = "blocked: no open position"
@@ -5801,9 +5936,13 @@ class LiveTradingBot:
             self.dashboard.manual_buy_live_status = "blocked: token data unavailable"
             return
 
-        exit_price = float(tk.best_bid or tk.last_price or 0.0)
-        if exit_price <= 0.0:
+        bid_price = float(tk.best_bid or tk.last_price or 0.0)
+        if bid_price <= 0.0:
             self.dashboard.manual_buy_live_status = "blocked: no live sell price"
+            return
+
+        if not self.executor:
+            self.dashboard.manual_buy_live_status = "blocked: executor unavailable"
             return
 
         hedged_was = pos.hedged
@@ -5818,9 +5957,37 @@ class LiveTradingBot:
         signal_logger.info(f"  Token: {token_name}")
         signal_logger.info(f"  Contracts: {contracts}")
         signal_logger.info(f"  Entry Price: {entry_price:.4f}")
-        signal_logger.info(f"  Exit Price: {exit_price:.4f}")
+        signal_logger.info(f"  Best Bid Snapshot: {bid_price:.4f}")
 
-        record = self.stats.close_position_early(exit_price, btc_price_at_close=btc_close_for_log)
+        exit_cfg = ExecutionConfig(
+            bet_amount_usd=0.0,
+            price_offset=self.config.entry.price_offset,
+            max_retries=self.config.entry.max_retries,
+            retry_delay_ms=self.config.entry.retry_delay_ms,
+            fill_timeout_ms=self.config.entry.fill_timeout_ms,
+            min_contracts=1,
+            min_order_usd=0.0,
+            max_entry_price=1.0,
+        )
+
+        result = await self.executor.execute_exit(
+            token_id=pos.token_id,
+            contracts_to_sell=contracts,
+            config=exit_cfg,
+            websocket_price=bid_price,
+        )
+
+        if not result.success or result.contracts_filled <= 0:
+            msg = result.error or "sell not filled"
+            self.dashboard.manual_buy_live_status = f"processed: no sell fill ({msg})"
+            signal_logger.error(f"MANUAL SELL FAILED: {msg}")
+            return
+
+        record = self.stats.sell_position_contracts(
+            result.contracts_filled,
+            result.avg_price,
+            btc_price_at_close=btc_close_for_log,
+        )
         if not record:
             self.dashboard.manual_buy_live_status = "error: sell close failed"
             return
@@ -5830,23 +5997,31 @@ class LiveTradingBot:
 
         pnl_tag = "WIN" if record.pnl >= 0 else "LOSS"
         logger.info(
-            f"Manual sell complete: {token_name} {contracts} @ {exit_price:.4f} | "
+            f"Manual sell complete: {token_name} {result.contracts_filled}/{contracts} @ {result.avg_price:.4f} | "
             f"PnL ${record.pnl:+.2f}"
         )
-        signal_logger.info(f"  Manual sell result: {pnl_tag} | PnL ${record.pnl:+.2f}")
+        signal_logger.info(
+            f"  Manual sell result: {pnl_tag} | Filled {result.contracts_filled}/{contracts} @ {result.avg_price:.4f} | "
+            f"PnL ${record.pnl:+.2f}"
+        )
         signal_logger.info("=" * 60)
 
         await self.telegram.send_message(
             f"🧾 <b>Manual Sell Executed</b>\n"
             f"Market: {self.state.slug}\n"
             f"Token: {token_name}\n"
-            f"Contracts: {contracts}\n"
+            f"Contracts: {result.contracts_filled}/{contracts}\n"
             f"Entry: ${entry_price:.4f}\n"
-            f"Exit: ${exit_price:.4f}\n"
+            f"Exit: ${result.avg_price:.4f}\n"
             f"PnL: ${record.pnl:+.2f}"
         )
 
-        self.dashboard.manual_buy_live_status = f"sent: SOLD {token_name} ${exit_price:.3f}"
+        if result.contracts_filled < contracts:
+            self.dashboard.manual_buy_live_status = (
+                f"sent: PARTIAL SOLD {token_name} {result.contracts_filled}/{contracts} @ ${result.avg_price:.3f}"
+            )
+        else:
+            self.dashboard.manual_buy_live_status = f"sent: SOLD {token_name} ${result.avg_price:.3f}"
     
     async def _safe_execute_entry(self, signal: str):
         """Execute entry in separate task with error handling."""
