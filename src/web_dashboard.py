@@ -347,6 +347,7 @@ _HTML = """<!DOCTYPE html>
       if(pollInFlight) return;
       pollInFlight=true;
       var seq=++pollSeq;
+      var startedAt=Date.now();
       var errEl=document.getElementById('err');
       var r=new XMLHttpRequest();
       r.open('GET','/api/state',true);
@@ -436,7 +437,9 @@ _HTML = """<!DOCTYPE html>
           var tr=d.trading||{}, modePerfEl=document.getElementById('modePerf');
           if(modePerfEl){ var modePerfLines=[], modePerfData=tr.win_rate_by_mode||{}; window.latestModePerfData=modePerfData; var panelHandledModes={}; var panelModeOrder=['normal','manual','mode_60s','mode_40s','mode_30s','mode_20s','unknown']; function pushPanelModeLine(modeKey){ if(!Object.prototype.hasOwnProperty.call(modePerfData,modeKey)) return; panelHandledModes[modeKey]=true; var ms=modePerfData[modeKey]||{}; var wrVal=(ms.win_rate_pct!=null&&typeof ms.win_rate_pct==='number'&&!isNaN(ms.win_rate_pct))?(numFmt(ms.win_rate_pct,1)+'%'):'\u2014'; var pnlVal=(ms.total_pnl_usd!=null&&typeof ms.total_pnl_usd==='number'&&!isNaN(ms.total_pnl_usd))?('$'+numFmtSigned(ms.total_pnl_usd,2)):'$\u2014'; var countVal=(ms.trade_count!=null)?String(ms.trade_count):'0'; modePerfLines.push(esc(modeKey)+' | PnL '+esc(pnlVal)+' | Triggers '+esc(countVal)+' | WR '+esc(wrVal)); } for(var pmo=0;pmo<panelModeOrder.length;pmo++){ pushPanelModeLine(panelModeOrder[pmo]); } for(var pmk in modePerfData){ if(!Object.prototype.hasOwnProperty.call(modePerfData,pmk)) continue; if(panelHandledModes[pmk]) continue; pushPanelModeLine(pmk); } var modePerfHtml=modePerfLines.length?modePerfLines.join('<br/>'):'No mode stats yet'; setHtmlIfChanged('modePerf','modePerf',modePerfHtml); }
           setHtmlIfChanged('trading','trading',tHtml);
-          scheduleTick(document.hidden?POLL_MS_HIDDEN:POLL_MS_ACTIVE);
+          var targetMs=document.hidden?POLL_MS_HIDDEN:POLL_MS_ACTIVE;
+          var elapsedMs=Math.max(0, Date.now()-startedAt);
+          scheduleTick(Math.max(250, targetMs-elapsedMs));
         } catch(e){ errEl.textContent='Poll error: '+((e&&e.message)?e.message:e); scheduleTick(2000); }
       };
       r.onerror=function(){ pollInFlight=false; errEl.textContent='Network error (is the bot running?)'; scheduleTick(2000); };
@@ -452,7 +455,6 @@ _HTML = """<!DOCTYPE html>
     loadTimerAlertConfig();
     loadMinMaxModeConfig();
     tick();
-    scheduleTick(POLL_MS_ACTIVE);
   </script>
 </body>
 </html>
