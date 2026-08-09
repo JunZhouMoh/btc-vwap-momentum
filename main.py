@@ -738,6 +738,100 @@ class TradingStats:
         self.position_closed_this_market = True
         self._save()
         return record
+
+    def close_position_early(self, exit_price: float, btc_price_at_close: float = 0.0) -> Optional[TradeRecord]:
+        """Close an open position at current market price (manual exit)."""
+        if not self.position:
+            return None
+
+        px = max(0.0, float(exit_price))
+        pnl = self.position.contracts * (px - self.position.entry_price)
+        won = pnl >= 0.0
+
+        # Keep drawdown stats for consistency with normal close records.
+        dd_abs = max(0, self.position.entry_price - self.position.min_price_seen)
+        dd_pct = (dd_abs / self.position.entry_price * 100) if self.position.entry_price > 0 else 0
+
+        btc_e = self.position.btc_price_at_entry
+        btc_a = self.position.btc_anchor_at_entry
+        btc_c = btc_price_at_close if btc_price_at_close > 0 else 0.0
+        btc_diff = (btc_c - btc_a) if (btc_c > 0 and btc_a > 0) else 0.0
+
+        mode_breakdown: Dict[str, Dict[str, float]] = {}
+        legs = list(getattr(self.position, "mode_legs", []) or [])
+        if not legs:
+            legs = [{
+                "mode": (str(self.position.entry_mode).strip() or "unknown"),
+                "contracts": int(self.position.contracts),
+                "entry_price": float(self.position.entry_price),
+            }]
+
+        for leg in legs:
+            mode = str(leg.get("mode", "") or "unknown").strip() or "unknown"
+            leg_contracts = int(float(leg.get("contracts", 0) or 0))
+            leg_entry_price = float(leg.get("entry_price", 0.0) or 0.0)
+            if leg_contracts <= 0 or leg_entry_price <= 0:
+                continue
+
+            leg_pnl = leg_contracts * (px - leg_entry_price)
+            bucket = mode_breakdown.setdefault(
+                mode,
+                {
+                    "trigger_count": 0.0,
+                    "wins": 0.0,
+                    "losses": 0.0,
+                    "total_pnl_usd": 0.0,
+                },
+            )
+            bucket["trigger_count"] += 1.0
+            if leg_pnl >= 0:
+                bucket["wins"] += 1.0
+            else:
+                bucket["losses"] += 1.0
+            bucket["total_pnl_usd"] += float(leg_pnl)
+
+        unique_modes = list(mode_breakdown.keys())
+        if len(unique_modes) == 1:
+            entry_mode_for_record = unique_modes[0]
+        elif len(unique_modes) > 1:
+            mode_contracts: Dict[str, int] = {}
+            for leg in legs:
+                mode = str(leg.get("mode", "") or "unknown").strip() or "unknown"
+                try:
+                    mode_contracts[mode] = mode_contracts.get(mode, 0) + int(float(leg.get("contracts", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+            if mode_contracts:
+                entry_mode_for_record = sorted(mode_contracts.items(), key=lambda item: (item[1], item[0]), reverse=True)[0][0]
+            else:
+                entry_mode_for_record = unique_modes[0]
+        else:
+            entry_mode_for_record = (str(self.position.entry_mode).strip() or "unknown")
+
+        record = TradeRecord(
+            market_slug=self.position.market_slug,
+            token_name=self.position.token_name,
+            entry_price=self.position.entry_price,
+            exit_price=px,
+            contracts=self.position.contracts,
+            pnl=pnl,
+            won=won,
+            timestamp=self.position.entry_time,
+            max_drawdown_abs=dd_abs,
+            max_drawdown_pct=dd_pct,
+            btc_price_at_entry=btc_e,
+            btc_anchor_price_at_entry=btc_a,
+            btc_price_at_close=btc_c,
+            btc_diff_from_anchor=btc_diff,
+            entry_mode=entry_mode_for_record,
+            mode_breakdown=mode_breakdown,
+        )
+
+        self.trades.append(record)
+        self.position = None
+        self.position_closed_this_market = True
+        self._save()
+        return record
     
     @property
     def total_pnl(self) -> float:
@@ -1806,6 +1900,7 @@ class Dashboard:
         
         self.last_signal = ""
         self.manual_signal_pending = ""
+        self.manual_sell_pending = ""
         self.manual_buy_live_status = "idle"
         self.entry_flash = False
         self.hedge_flash = False
@@ -4366,6 +4461,32 @@ class LiveTradingBot:
             "amount_usd": amount_usd,
             "message": f"Queued {signal} (${amount_usd:.2f})",
         }
+
+    def _web_trigger_manual_sell(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        _ = payload
+        if not self.running:
+            self.dashboard.manual_buy_live_status = "blocked: bot not running"
+            return {"ok": False, "error": "Bot is not running"}
+
+        if not self.dashboard:
+            return {"ok": False, "error": "Dashboard not ready"}
+
+        if self.dashboard.manual_sell_pending:
+            self.dashboard.manual_buy_live_status = "queued: waiting for previous sell"
+            return {"ok": False, "error": "A sell request is already queued"}
+
+        if self.stats.position is None:
+            self.dashboard.manual_buy_live_status = "blocked: no open position"
+            return {"ok": False, "error": "No open position to sell"}
+
+        self.dashboard.manual_sell_pending = "SELL"
+        self.dashboard.manual_buy_live_status = "queued: SELL position"
+        logger.info(f"Manual web sell queued for market={self.state.slug}")
+        return {
+            "ok": True,
+            "action": "SELL",
+            "message": "Queued SELL position",
+        }
     
     async def initialize(self) -> bool:
         # Load config
@@ -4589,6 +4710,7 @@ class LiveTradingBot:
                 get_timer_alert=self._web_get_timer_alert,
                 update_timer_alert=self._web_update_timer_alert,
                 trigger_manual_buy=self._web_trigger_manual_buy,
+                trigger_manual_sell=self._web_trigger_manual_sell,
             )
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
             railway_public = os.getenv("RAILWAY_PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
@@ -5715,6 +5837,7 @@ class LiveTradingBot:
                         or self.dashboard._get_late_entry_mode(time_left_now) is not None
                     )
                     can_attempt_signal = self.stats.can_enter() or late_mode_active
+                    queued_manual_sell = self.dashboard.manual_sell_pending
                     queued_manual_signal = self.dashboard.manual_signal_pending
                     queued_auto_signal = self.dashboard.last_signal
                     queued_signal = queued_manual_signal or queued_auto_signal
@@ -5729,6 +5852,11 @@ class LiveTradingBot:
                             else:
                                 self.dashboard.last_signal = ""
                             order_task = asyncio.create_task(self._safe_execute_entry(signal))
+                    elif queued_manual_sell:
+                        if order_task is None or order_task.done():
+                            self.dashboard.manual_buy_live_status = "running: selling position"
+                            self.dashboard.manual_sell_pending = ""
+                            order_task = asyncio.create_task(self._safe_execute_manual_sell())
                     
                     # Check if order completed
                     if order_task and order_task.done():
@@ -5810,6 +5938,69 @@ class LiveTradingBot:
                     await self._user_ws_task
                 except:
                     pass
+
+    async def execute_manual_sell(self):
+        """Close current position immediately at current tradable price."""
+        pos = self.stats.position
+        if not pos:
+            self.dashboard.manual_buy_live_status = "blocked: no open position"
+            return
+
+        if pos.token_name == "UP":
+            tk = self.state.up_token
+        else:
+            tk = self.state.down_token
+
+        if not tk:
+            self.dashboard.manual_buy_live_status = "blocked: token data unavailable"
+            return
+
+        exit_price = float(tk.best_bid or tk.last_price or 0.0)
+        if exit_price <= 0.0:
+            self.dashboard.manual_buy_live_status = "blocked: no live sell price"
+            return
+
+        hedged_was = pos.hedged
+        contracts = int(pos.contracts)
+        token_name = str(pos.token_name)
+        entry_price = float(pos.entry_price)
+        btc_close_for_log = self.state.btc_current_price if self.state.btc_current_price > 0 else 0.0
+
+        signal_logger.info("=" * 60)
+        signal_logger.info("MANUAL SELL TRIGGERED")
+        signal_logger.info(f"  Market: {self.state.slug}")
+        signal_logger.info(f"  Token: {token_name}")
+        signal_logger.info(f"  Contracts: {contracts}")
+        signal_logger.info(f"  Entry Price: {entry_price:.4f}")
+        signal_logger.info(f"  Exit Price: {exit_price:.4f}")
+
+        record = self.stats.close_position_early(exit_price, btc_price_at_close=btc_close_for_log)
+        if not record:
+            self.dashboard.manual_buy_live_status = "error: sell close failed"
+            return
+
+        self._simulation_log_close(record, hedged_was)
+        self.dashboard.entry_flash = True
+
+        pnl_tag = "WIN" if record.pnl >= 0 else "LOSS"
+        logger.info(
+            f"Manual sell complete: {token_name} {contracts} @ {exit_price:.4f} | "
+            f"PnL ${record.pnl:+.2f}"
+        )
+        signal_logger.info(f"  Manual sell result: {pnl_tag} | PnL ${record.pnl:+.2f}")
+        signal_logger.info("=" * 60)
+
+        await self.telegram.send_message(
+            f"🧾 <b>Manual Sell Executed</b>\n"
+            f"Market: {self.state.slug}\n"
+            f"Token: {token_name}\n"
+            f"Contracts: {contracts}\n"
+            f"Entry: ${entry_price:.4f}\n"
+            f"Exit: ${exit_price:.4f}\n"
+            f"PnL: ${record.pnl:+.2f}"
+        )
+
+        self.dashboard.manual_buy_live_status = f"sent: SOLD {token_name} ${exit_price:.3f}"
     
     async def _safe_execute_entry(self, signal: str):
         """Execute entry in separate task with error handling."""
@@ -5845,6 +6036,15 @@ class LiveTradingBot:
                 self.dashboard.manual_buy_live_status = "error: execution failed"
             logger.error(f"Entry execution error: {e}")
             signal_logger.error(f"ENTRY ERROR: {e}")
+
+    async def _safe_execute_manual_sell(self):
+        """Execute manual sell in separate task with error handling."""
+        try:
+            await self.execute_manual_sell()
+        except Exception as e:
+            self.dashboard.manual_buy_live_status = "error: sell failed"
+            logger.error(f"Manual sell execution error: {e}")
+            signal_logger.error(f"MANUAL SELL ERROR: {e}")
     
     # GTD hedge is placed immediately after entry (no polling needed)
     # Fills are tracked via WebSocket _register_hedge_ws_handler()
