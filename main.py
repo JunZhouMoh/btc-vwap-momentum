@@ -5299,6 +5299,11 @@ class LiveTradingBot:
         if bet_amount_override_usd is not None and bet_amount_override_usd > 0:
             bet_amount_usd = float(bet_amount_override_usd)
 
+        # Manual buy should honor dashboard amount directly instead of late-mode
+        # contract floors that are intended for auto strategy entries.
+        if manual_override:
+            selected_min_contracts = 1
+
         exec_config = ExecutionConfig(
             bet_amount_usd=bet_amount_usd,
             price_offset=self.config.entry.price_offset,
