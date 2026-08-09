@@ -281,9 +281,11 @@ _HTML = """<!DOCTYPE html>
         if(!status) return;
         if(resp&&resp.ok===false){
           status.textContent=String(resp.error||'Sell request failed');
+          scheduleTick(50);
           return;
         }
         status.textContent=String((resp&&resp.message)||'Queued manual sell');
+        scheduleTick(50);
       });
     }
 
@@ -387,6 +389,11 @@ _HTML = """<!DOCTYPE html>
 
           var tr=d.trading||{};
           var tHtml='Markets '+esc(tr.markets_seen)+' \u00b7 Trades '+esc(tr.trade_count)+' \u00b7 PnL $'+(tr.total_pnl!=null?numFmt(tr.total_pnl,2):'\u2014')+'<br/>';
+          var liveLower=String(liveStatusVal||'').toLowerCase();
+          var sellPhase=(liveLower.indexOf('sell')>=0);
+          if(sellPhase){
+            tHtml+='Sell status: '+esc(liveStatusVal)+'<br/>';
+          }
           if(tr.position){ var p=tr.position; tHtml+='LONG '+esc(p.token_name)+' @ '+esc(p.entry_price)+' \u00d7'+esc(p.contracts)+(p.hedged?' hedged':'')+'<br/>'; tHtml+='Unreal $'+(p.unrealized_pnl!=null?numFmt(p.unrealized_pnl,2):'\u2014')+'<br/>'; } else { tHtml+='No open position<br/>'; }
           if(tr.recent_trades&&tr.recent_trades.length){ var lines=[]; for(var ri=0;ri<tr.recent_trades.length;ri++){ lines.push(esc(tr.recent_trades[ri].line)); } tHtml+='<br/>Recent:<br/>'+lines.join('<br/>'); }
           var tr=d.trading||{}, modePerfEl=document.getElementById('modePerf');
