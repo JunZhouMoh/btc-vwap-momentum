@@ -5714,32 +5714,42 @@ class LiveTradingBot:
         time_left = self.state.end_time - time.time()
         if time_left <= 0:  # Close only at/after market expiry for clearer outcome
             hedged_was = pos.hedged
-            # Use rolling window anchor for settlement decision in bot logic
-            # (UP wins if current BTC > anchor BTC, else DOWN). Fallback to token price
-            # only when BTC feed is unavailable.
+            # Determine settlement winner by final token prices (UP vs DOWN),
+            # which is more robust than BTC anchor when anchor is stale/wrong.
             s = self.state
-            settlement_anchor = s.btc_anchor_price
-            if settlement_anchor > 0 and s.btc_current_price > 0:
-                if s.btc_current_price > settlement_anchor:
+            up_px = 0.0
+            down_px = 0.0
+            if self.state.up_token:
+                up_px = float(
+                    self.state.up_token.last_price
+                    or self.state.up_token.best_bid
+                    or self.state.up_token.best_ask
+                    or 0.0
+                )
+            if self.state.down_token:
+                down_px = float(
+                    self.state.down_token.last_price
+                    or self.state.down_token.best_bid
+                    or self.state.down_token.best_ask
+                    or 0.0
+                )
+
+            if up_px > 0 and down_px > 0:
+                if up_px > down_px:
                     winner = "UP"
-                elif s.btc_current_price < settlement_anchor:
+                elif down_px > up_px:
                     winner = "DOWN"
                 else:
                     winner = "TIE"
+            else:
+                winner = "UNKNOWN"
 
-                if winner == "TIE":
-                    if pos.token_name == "UP" and self.state.up_token:
-                        final_price = self.state.up_token.last_price
-                    elif pos.token_name == "DOWN" and self.state.down_token:
-                        final_price = self.state.down_token.last_price
-                    else:
-                        final_price = 0.5
-                else:
-                    final_price = 1.0 if pos.token_name == winner else 0.0
+            if winner == "UP" or winner == "DOWN":
+                final_price = 1.0 if pos.token_name == winner else 0.0
             elif pos.token_name == "UP" and self.state.up_token:
-                final_price = self.state.up_token.last_price
+                final_price = float(self.state.up_token.last_price or self.state.up_token.best_bid or 0.5)
             elif pos.token_name == "DOWN" and self.state.down_token:
-                final_price = self.state.down_token.last_price
+                final_price = float(self.state.down_token.last_price or self.state.down_token.best_bid or 0.5)
             else:
                 final_price = 0.5
             
@@ -5750,6 +5760,9 @@ class LiveTradingBot:
             signal_logger.info(f"  Market: {self.state.slug}")
             signal_logger.info(f"  Position: {pos.token_name}")
             signal_logger.info(f"  Entry Price: {pos.entry_price:.4f}")
+            signal_logger.info(f"  UP Final Price: {up_px:.4f}")
+            signal_logger.info(f"  DOWN Final Price: {down_px:.4f}")
+            signal_logger.info(f"  Winner (token-price): {winner}")
             signal_logger.info(f"  Final Price: {final_price:.4f}")
             signal_logger.info(f"  Contracts: {pos.contracts}")
             signal_logger.info(f"  Hedged: {pos.hedged}")
@@ -5776,7 +5789,7 @@ class LiveTradingBot:
                     total_pnl=self.stats.total_pnl,
                     win_rate=self.stats.win_rate,
                     btc_close_price=btc_close_for_log,
-                    btc_anchor_price=settlement_anchor,
+                    btc_anchor_price=s.btc_anchor_price,
                 )
                 
                 signal_logger.info(f"  Result: {'WIN' if record.won else 'LOSS'}")
