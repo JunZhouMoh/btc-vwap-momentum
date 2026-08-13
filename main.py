@@ -4036,6 +4036,10 @@ class LiveTradingBot:
         self._web_snapshot_holder: Optional[WebSnapshotHolder] = None
         self._config_lock = threading.Lock()
         self._timer_alert_last_sent_slug: str = ""
+        self._streak_direction: str = ""
+        self._streak_count: int = 0
+        self._streak_last_counted_slug: str = ""
+        self._streak_last_notified_count: int = 0
 
     def _web_get_indicator_controls(self) -> Dict[str, Any]:
         if not self.dashboard:
@@ -4291,6 +4295,168 @@ class LiveTradingBot:
 
         return self._web_get_timer_alert()
 
+    def _web_get_streak_alert(self) -> Dict[str, Any]:
+        with self._config_lock:
+            streak_alert = getattr(self.config.telegram, "streak_alert", None)
+            if not streak_alert:
+                return {
+                    "enabled": False,
+                    "min_streak": 3,
+                    "notify_every_extension": False,
+                    "notify_on_startup": False,
+                    "use_timer_bot": True,
+                    "current_direction": self._streak_direction,
+                    "current_streak": int(self._streak_count),
+                    "timer_bot_ready": False,
+                }
+            return {
+                "enabled": bool(getattr(streak_alert, "enabled", True)),
+                "min_streak": int(max(2, int(getattr(streak_alert, "min_streak", 3) or 3))),
+                "notify_every_extension": bool(getattr(streak_alert, "notify_every_extension", False)),
+                "notify_on_startup": bool(getattr(streak_alert, "notify_on_startup", False)),
+                "use_timer_bot": bool(getattr(streak_alert, "use_timer_bot", True)),
+                "current_direction": self._streak_direction,
+                "current_streak": int(self._streak_count),
+                "timer_bot_ready": bool(
+                    getattr(self.config.telegram, "timer_bot_token", "")
+                    and getattr(self.config.telegram, "timer_chat_id", "")
+                ),
+            }
+
+    def _web_update_streak_alert(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return self._web_get_streak_alert()
+
+        with self._config_lock:
+            streak_alert = getattr(self.config.telegram, "streak_alert", None)
+            if not streak_alert:
+                return self._web_get_streak_alert()
+
+            if "enabled" in payload:
+                streak_alert.enabled = bool(payload.get("enabled"))
+            if "min_streak" in payload:
+                try:
+                    streak_alert.min_streak = max(2, int(payload.get("min_streak")))
+                except (TypeError, ValueError):
+                    pass
+            if "notify_every_extension" in payload:
+                streak_alert.notify_every_extension = bool(payload.get("notify_every_extension"))
+            if "notify_on_startup" in payload:
+                streak_alert.notify_on_startup = bool(payload.get("notify_on_startup"))
+            if "use_timer_bot" in payload:
+                streak_alert.use_timer_bot = bool(payload.get("use_timer_bot"))
+
+        return self._web_get_streak_alert()
+
+    def _rebuild_direction_streak_from_history(self) -> None:
+        """Rebuild UP/DOWN streak from completed trades for startup visibility."""
+        direction = ""
+        streak = 0
+        last_slug = ""
+
+        seen_market_dirs: List[Tuple[float, str, str]] = []
+        for t in sorted(self.stats.trades, key=lambda r: float(getattr(r, "timestamp", 0.0) or 0.0)):
+            token = str(getattr(t, "token_name", "") or "").strip().upper()
+            slug = str(getattr(t, "market_slug", "") or "").strip()
+            if token not in {"UP", "DOWN"} or not slug:
+                continue
+            if seen_market_dirs and seen_market_dirs[-1][2] == slug:
+                continue
+            seen_market_dirs.append((float(getattr(t, "timestamp", 0.0) or 0.0), token, slug))
+
+        for _, token, slug in seen_market_dirs:
+            if token == direction:
+                streak += 1
+            else:
+                direction = token
+                streak = 1
+            last_slug = slug
+
+        self._streak_direction = direction
+        self._streak_count = int(streak)
+        self._streak_last_counted_slug = last_slug
+        self._streak_last_notified_count = int(streak)
+
+    async def _maybe_send_startup_streak_alert(self) -> None:
+        streak_alert = getattr(self.config.telegram, "streak_alert", None)
+        if not streak_alert or not bool(getattr(streak_alert, "enabled", True)):
+            return
+        if not bool(getattr(streak_alert, "notify_on_startup", False)):
+            return
+        min_streak = int(max(2, int(getattr(streak_alert, "min_streak", 3) or 3)))
+        if self._streak_count < min_streak or self._streak_direction not in {"UP", "DOWN"}:
+            return
+
+        notifier = self.timer_telegram if bool(getattr(streak_alert, "use_timer_bot", True)) else self.telegram
+        if not notifier or not notifier.enabled:
+            return
+
+        sent = await notifier.send_message(
+            (
+                "🔥 <b>Direction Streak (startup)</b>\n"
+                f"Current streak: {self._streak_count}x {self._streak_direction}\n"
+                f"Threshold: {min_streak}+"
+            )
+        )
+        if sent:
+            self._streak_last_notified_count = int(self._streak_count)
+
+    async def _record_buy_direction_streak(self, token_name: str, market_slug: str) -> None:
+        direction = str(token_name or "").strip().upper()
+        slug = str(market_slug or "").strip()
+        if direction not in {"UP", "DOWN"} or not slug:
+            return
+
+        # Count at most once per market for streak progression.
+        if slug == self._streak_last_counted_slug and direction == self._streak_direction:
+            return
+
+        if direction == self._streak_direction:
+            self._streak_count += 1
+        else:
+            self._streak_direction = direction
+            self._streak_count = 1
+            self._streak_last_notified_count = 0
+        self._streak_last_counted_slug = slug
+
+        streak_alert = getattr(self.config.telegram, "streak_alert", None)
+        if not streak_alert or not bool(getattr(streak_alert, "enabled", True)):
+            return
+
+        min_streak = int(max(2, int(getattr(streak_alert, "min_streak", 3) or 3)))
+        if self._streak_count < min_streak:
+            return
+
+        notify_every_extension = bool(getattr(streak_alert, "notify_every_extension", False))
+        if notify_every_extension:
+            should_send = self._streak_count > self._streak_last_notified_count
+        else:
+            should_send = (self._streak_count == min_streak and self._streak_last_notified_count < min_streak)
+        if not should_send:
+            return
+
+        notifier = self.timer_telegram if bool(getattr(streak_alert, "use_timer_bot", True)) else self.telegram
+        if not notifier or not notifier.enabled:
+            return
+
+        sent = await notifier.send_message(
+            (
+                "🔥 <b>Direction Streak Alert</b>\n"
+                f"Streak: {self._streak_count}x {direction}\n"
+                f"Market: {slug}\n"
+                "Basis: executed BUY token direction"
+            )
+        )
+        if sent:
+            self._streak_last_notified_count = int(self._streak_count)
+            logger.info(
+                f"Streak alert sent | streak={self._streak_count}x {direction} | market={slug}"
+            )
+        else:
+            logger.warning(
+                f"Streak alert send failed | streak={self._streak_count}x {direction} | market={slug}"
+            )
+
     def _get_favorite_price_snapshot(self) -> Optional[Dict[str, Any]]:
         up = self.state.up_token
         down = self.state.down_token
@@ -4515,6 +4681,8 @@ class LiveTradingBot:
             else:
                 console.print("[yellow]✓ Simulation stats: same file as live (trading_log.json)[/yellow]")
 
+        self._rebuild_direction_streak_from_history()
+
         # Initialize trading components
         console.print("[yellow]Initializing trading components...[/yellow]")
         
@@ -4531,6 +4699,10 @@ class LiveTradingBot:
         )
         if getattr(self.config.telegram, "timer_alert", None) and self.config.telegram.timer_alert.enabled and not self.timer_telegram.enabled:
             logger.warning("Timer alert is enabled but TELEGRAM_TIMER_BOT_TOKEN / TELEGRAM_TIMER_CHAT_ID are missing")
+        streak_alert_cfg = getattr(self.config.telegram, "streak_alert", None)
+        if streak_alert_cfg and bool(getattr(streak_alert_cfg, "enabled", True)) and bool(getattr(streak_alert_cfg, "use_timer_bot", True)) and not self.timer_telegram.enabled:
+            logger.warning("Streak alert uses timer bot but TELEGRAM_TIMER_BOT_TOKEN / TELEGRAM_TIMER_CHAT_ID are missing")
+        await self._maybe_send_startup_streak_alert()
 
         sim = self.config.simulation.enabled
 
@@ -4703,6 +4875,8 @@ class LiveTradingBot:
                 update_volume_eval_mode=self._web_update_volume_eval_mode,
                 get_timer_alert=self._web_get_timer_alert,
                 update_timer_alert=self._web_update_timer_alert,
+                get_streak_alert=self._web_get_streak_alert,
+                update_streak_alert=self._web_update_streak_alert,
                 trigger_manual_buy=self._web_trigger_manual_buy,
                 trigger_manual_sell=self._web_trigger_manual_sell,
             )
@@ -5422,6 +5596,9 @@ class LiveTradingBot:
             if triggered_mode_names and not manual_override:
                 for triggered_mode_name in triggered_mode_names:
                     self.stats.record_late_mode_entry(triggered_mode_name)
+
+            if opened_new_position:
+                await self._record_buy_direction_streak(token_name, self.state.slug)
             
             # Log BTC price movement for this buy
             if self.btc_price_movement_logger:
