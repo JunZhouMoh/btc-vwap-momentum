@@ -4401,14 +4401,23 @@ class LiveTradingBot:
         if sent:
             self._streak_last_notified_count = int(self._streak_count)
 
-    async def _record_buy_direction_streak(self, token_name: str, market_slug: str) -> None:
-        direction = str(token_name or "").strip().upper()
+    async def _record_window_outcome_streak(self, winner: str, market_slug: str) -> None:
+        direction = str(winner or "").strip().upper()
         slug = str(market_slug or "").strip()
-        if direction not in {"UP", "DOWN"} or not slug:
+        if not slug:
             return
 
-        # Count at most once per market for streak progression.
-        if slug == self._streak_last_counted_slug and direction == self._streak_direction:
+        # Evaluate exactly once per finished market window.
+        if slug == self._streak_last_counted_slug:
+            return
+
+        self._streak_last_counted_slug = slug
+
+        # Non-directional outcomes break the run.
+        if direction not in {"UP", "DOWN"}:
+            self._streak_direction = ""
+            self._streak_count = 0
+            self._streak_last_notified_count = 0
             return
 
         if direction == self._streak_direction:
@@ -4417,7 +4426,6 @@ class LiveTradingBot:
             self._streak_direction = direction
             self._streak_count = 1
             self._streak_last_notified_count = 0
-        self._streak_last_counted_slug = slug
 
         streak_alert = getattr(self.config.telegram, "streak_alert", None)
         if not streak_alert or not bool(getattr(streak_alert, "enabled", True)):
@@ -4444,7 +4452,7 @@ class LiveTradingBot:
                 "🔥 <b>Direction Streak Alert</b>\n"
                 f"Streak: {self._streak_count}x {direction}\n"
                 f"Market: {slug}\n"
-                "Basis: executed BUY token direction"
+                "Basis: window outcome (UP/DOWN winner)"
             )
         )
         if sent:
@@ -5597,9 +5605,6 @@ class LiveTradingBot:
                 for triggered_mode_name in triggered_mode_names:
                     self.stats.record_late_mode_entry(triggered_mode_name)
 
-            if opened_new_position:
-                await self._record_buy_direction_streak(token_name, self.state.slug)
-            
             # Log BTC price movement for this buy
             if self.btc_price_movement_logger:
                 self.btc_price_movement_logger.record_buy(
@@ -5884,102 +5889,106 @@ class LiveTradingBot:
     
     async def check_market_end(self):
         """Close position at market end."""
+        time_left = self.state.end_time - time.time()
+        if time_left > 0:
+            return
+
+        # Determine settlement winner by final token prices (UP vs DOWN),
+        # which is more robust than BTC anchor when anchor is stale/wrong.
+        s = self.state
+        up_px = 0.0
+        down_px = 0.0
+        if self.state.up_token:
+            up_px = float(
+                self.state.up_token.last_price
+                or self.state.up_token.best_bid
+                or self.state.up_token.best_ask
+                or 0.0
+            )
+        if self.state.down_token:
+            down_px = float(
+                self.state.down_token.last_price
+                or self.state.down_token.best_bid
+                or self.state.down_token.best_ask
+                or 0.0
+            )
+
+        if up_px > 0 and down_px > 0:
+            if up_px > down_px:
+                winner = "UP"
+            elif down_px > up_px:
+                winner = "DOWN"
+            else:
+                winner = "TIE"
+        else:
+            winner = "UNKNOWN"
+
+        await self._record_window_outcome_streak(winner, self.state.slug)
+
         pos = self.stats.position
         if not pos:
             return
+
+        hedged_was = pos.hedged
+        if winner == "UP" or winner == "DOWN":
+            final_price = 1.0 if pos.token_name == winner else 0.0
+        elif pos.token_name == "UP" and self.state.up_token:
+            final_price = float(self.state.up_token.last_price or self.state.up_token.best_bid or 0.5)
+        elif pos.token_name == "DOWN" and self.state.down_token:
+            final_price = float(self.state.down_token.last_price or self.state.down_token.best_bid or 0.5)
+        else:
+            final_price = 0.5
+            
+        # Log market end details
+        signal_logger.info("=" * 60)
+        signal_logger.info("MARKET END - POSITION CLOSING")
+        signal_logger.info(f"  Time: {datetime.now().isoformat()}")
+        signal_logger.info(f"  Market: {self.state.slug}")
+        signal_logger.info(f"  Position: {pos.token_name}")
+        signal_logger.info(f"  Entry Price: {pos.entry_price:.4f}")
+        signal_logger.info(f"  UP Final Price: {up_px:.4f}")
+        signal_logger.info(f"  DOWN Final Price: {down_px:.4f}")
+        signal_logger.info(f"  Winner (token-price): {winner}")
+        signal_logger.info(f"  Final Price: {final_price:.4f}")
+        signal_logger.info(f"  Contracts: {pos.contracts}")
+        signal_logger.info(f"  Hedged: {pos.hedged}")
+        btc_e = pos.btc_price_at_entry
+        btc_a = pos.btc_anchor_at_entry
+        if btc_e > 0:
+            btc_diff = btc_e - btc_a
+            btc_diff_pct = (btc_diff / btc_a * 100) if btc_a > 0 else 0.0
+            signal_logger.info(f"  BTC at Entry: ${btc_e:,.2f} (anchor: ${btc_a:,.2f}, diff: ${btc_diff:+,.2f} / {btc_diff_pct:+.3f}%)")
+        buffer_label = self.dashboard._format_recent_btc_buffer()
+        if buffer_label:
+            signal_logger.info(f"  {buffer_label}")
         
-        time_left = self.state.end_time - time.time()
-        if time_left <= 0:  # Close only at/after market expiry for clearer outcome
-            hedged_was = pos.hedged
-            # Determine settlement winner by final token prices (UP vs DOWN),
-            # which is more robust than BTC anchor when anchor is stale/wrong.
-            s = self.state
-            up_px = 0.0
-            down_px = 0.0
-            if self.state.up_token:
-                up_px = float(
-                    self.state.up_token.last_price
-                    or self.state.up_token.best_bid
-                    or self.state.up_token.best_ask
-                    or 0.0
-                )
-            if self.state.down_token:
-                down_px = float(
-                    self.state.down_token.last_price
-                    or self.state.down_token.best_bid
-                    or self.state.down_token.best_ask
-                    or 0.0
-                )
+        btc_close_for_log = s.btc_current_price if s.btc_current_price > 0 else 0.0
+        record = self.stats.close_position(final_price, btc_price_at_close=btc_close_for_log)
+        if record:
+            self._simulation_log_close(record, hedged_was)
+            status = "✅ WIN" if record.won else "❌ LOSS"
+            winner = pos.token_name if record.won else ("DOWN" if pos.token_name == "UP" else "UP")
 
-            if up_px > 0 and down_px > 0:
-                if up_px > down_px:
-                    winner = "UP"
-                elif down_px > up_px:
-                    winner = "DOWN"
-                else:
-                    winner = "TIE"
-            else:
-                winner = "UNKNOWN"
-
-            if winner == "UP" or winner == "DOWN":
-                final_price = 1.0 if pos.token_name == winner else 0.0
-            elif pos.token_name == "UP" and self.state.up_token:
-                final_price = float(self.state.up_token.last_price or self.state.up_token.best_bid or 0.5)
-            elif pos.token_name == "DOWN" and self.state.down_token:
-                final_price = float(self.state.down_token.last_price or self.state.down_token.best_bid or 0.5)
-            else:
-                final_price = 0.5
+            await self.telegram.notify_market_end(
+                winner=winner,
+                pnl=record.pnl,
+                total_pnl=self.stats.total_pnl,
+                win_rate=self.stats.win_rate,
+                btc_close_price=btc_close_for_log,
+                btc_anchor_price=s.btc_anchor_price,
+            )
             
-            # Log market end details
+            signal_logger.info(f"  Result: {'WIN' if record.won else 'LOSS'}")
+            signal_logger.info(f"  P&L: ${record.pnl:+.2f}")
+            signal_logger.info(f"  Max Drawdown: -{record.max_drawdown_abs:.4f} (-{record.max_drawdown_pct:.2f}%)")
+            dd_usd = record.max_drawdown_abs * record.contracts
+            signal_logger.info(f"  Max DD ($): -${dd_usd:.2f} (min price: {record.entry_price - record.max_drawdown_abs:.4f})")
+            signal_logger.info(f"  Total Trades: {len(self.stats.trades)}")
+            signal_logger.info(f"  Session Stats: W={sum(1 for r in self.stats.trades if r.won)} / L={sum(1 for r in self.stats.trades if not r.won)}")
+            signal_logger.info(f"  Total P&L: ${sum(r.pnl for r in self.stats.trades):+.2f}")
             signal_logger.info("=" * 60)
-            signal_logger.info("MARKET END - POSITION CLOSING")
-            signal_logger.info(f"  Time: {datetime.now().isoformat()}")
-            signal_logger.info(f"  Market: {self.state.slug}")
-            signal_logger.info(f"  Position: {pos.token_name}")
-            signal_logger.info(f"  Entry Price: {pos.entry_price:.4f}")
-            signal_logger.info(f"  UP Final Price: {up_px:.4f}")
-            signal_logger.info(f"  DOWN Final Price: {down_px:.4f}")
-            signal_logger.info(f"  Winner (token-price): {winner}")
-            signal_logger.info(f"  Final Price: {final_price:.4f}")
-            signal_logger.info(f"  Contracts: {pos.contracts}")
-            signal_logger.info(f"  Hedged: {pos.hedged}")
-            btc_e = pos.btc_price_at_entry
-            btc_a = pos.btc_anchor_at_entry
-            if btc_e > 0:
-                btc_diff = btc_e - btc_a
-                btc_diff_pct = (btc_diff / btc_a * 100) if btc_a > 0 else 0.0
-                signal_logger.info(f"  BTC at Entry: ${btc_e:,.2f} (anchor: ${btc_a:,.2f}, diff: ${btc_diff:+,.2f} / {btc_diff_pct:+.3f}%)")
-            buffer_label = self.dashboard._format_recent_btc_buffer()
-            if buffer_label:
-                signal_logger.info(f"  {buffer_label}")
             
-            btc_close_for_log = s.btc_current_price if s.btc_current_price > 0 else 0.0
-            record = self.stats.close_position(final_price, btc_price_at_close=btc_close_for_log)
-            if record:
-                self._simulation_log_close(record, hedged_was)
-                status = "✅ WIN" if record.won else "❌ LOSS"
-                winner = pos.token_name if record.won else ("DOWN" if pos.token_name == "UP" else "UP")
-
-                await self.telegram.notify_market_end(
-                    winner=winner,
-                    pnl=record.pnl,
-                    total_pnl=self.stats.total_pnl,
-                    win_rate=self.stats.win_rate,
-                    btc_close_price=btc_close_for_log,
-                    btc_anchor_price=s.btc_anchor_price,
-                )
-                
-                signal_logger.info(f"  Result: {'WIN' if record.won else 'LOSS'}")
-                signal_logger.info(f"  P&L: ${record.pnl:+.2f}")
-                signal_logger.info(f"  Max Drawdown: -{record.max_drawdown_abs:.4f} (-{record.max_drawdown_pct:.2f}%)")
-                dd_usd = record.max_drawdown_abs * record.contracts
-                signal_logger.info(f"  Max DD ($): -${dd_usd:.2f} (min price: {record.entry_price - record.max_drawdown_abs:.4f})")
-                signal_logger.info(f"  Total Trades: {len(self.stats.trades)}")
-                signal_logger.info(f"  Session Stats: W={sum(1 for r in self.stats.trades if r.won)} / L={sum(1 for r in self.stats.trades if not r.won)}")
-                signal_logger.info(f"  Total P&L: ${sum(r.pnl for r in self.stats.trades):+.2f}")
-                signal_logger.info("=" * 60)
-                
-                logger.info(f"Position closed: {status}, PnL: ${record.pnl:+.2f}")
+            logger.info(f"Position closed: {status}, PnL: ${record.pnl:+.2f}")
     
     async def run_session(self):
         """Run single market session with dashboard."""
