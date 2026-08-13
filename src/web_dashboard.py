@@ -65,6 +65,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card controls"><h2>Telegram Timer Alert</h2><div id="timerAlertPanel" class="mono">Loading...</div></div>
     <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModePanel" class="mono">Loading...</div></div>
     <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalPanel" class="mono">Loading...</div></div>
+    <div class="card controls"><h2>Telegram Streak Alert</h2><div id="streakAlertPanel" class="mono">Loading...</div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
   <script>
@@ -78,6 +79,7 @@ _HTML = """<!DOCTYPE html>
 
     var modeCfg={late:null,volEval:null,volAccel:null};
   var timerAlertCfg=null;
+  var streakAlertCfg=null;
     window.latestModePerfData={};
     var pollTimer=null;
     var pollInFlight=false;
@@ -178,6 +180,49 @@ _HTML = """<!DOCTYPE html>
       h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveTimerAlertConfig()">Apply</button><button class="btn secondary" onclick="loadTimerAlertConfig()">Reload</button></div>');
       h.push('<div id="timerAlertStatus" class="status"></div>');
       box.innerHTML=h.join('<br/>');
+    }
+
+    function renderStreakAlertPanel(){
+      var box=document.getElementById('streakAlertPanel'); if(!box) return;
+      var s=streakAlertCfg||{};
+      var h=[];
+      var runTxt='none';
+      if(s.current_streak>0&&s.current_direction){ runTxt=s.current_streak+'x '+s.current_direction; }
+      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="sa_enabled" '+(s.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Current Run</label><span id="sa_current_run">'+esc(runTxt)+'</span></div>');
+      h.push('<div class="row"><label>Min Streak</label><input type="number" id="sa_min_streak" step="1" min="2" value="'+esc(s.min_streak!=null?s.min_streak:3)+'"/></div>');
+      h.push('<div class="row"><label>Alert Each Extension</label><input type="checkbox" id="sa_notify_every_extension" '+(s.notify_every_extension?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Alert On Startup</label><input type="checkbox" id="sa_notify_on_startup" '+(s.notify_on_startup?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Use Timer Bot</label><input type="checkbox" id="sa_use_timer_bot" '+(s.use_timer_bot?'checked':'')+'/></div>');
+      if(s.use_timer_bot&&!s.timer_bot_ready){ h.push('<div class="row"><label>Timer Bot</label><span>missing token/chat</span></div>'); }
+      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveStreakAlertConfig()">Apply</button><button class="btn secondary" onclick="loadStreakAlertConfig()">Reload</button></div>');
+      h.push('<div id="streakAlertStatus" class="status"></div>');
+      box.innerHTML=h.join('<br/>');
+    }
+
+    function loadStreakAlertConfig(onDone){
+      requestJson('GET','/api/streak-alert',null,function(cfg){
+        streakAlertCfg=cfg||{};
+        renderStreakAlertPanel();
+        if(onDone) onDone(streakAlertCfg);
+      });
+    }
+
+    function saveStreakAlertConfig(){
+      var status=document.getElementById('streakAlertStatus'); if(status) status.textContent='Applying...';
+      var s=streakAlertCfg||{};
+      var payload={
+        enabled:!!(document.getElementById('sa_enabled')&&document.getElementById('sa_enabled').checked),
+        min_streak:readInt('sa_min_streak',s.min_streak||3),
+        notify_every_extension:!!(document.getElementById('sa_notify_every_extension')&&document.getElementById('sa_notify_every_extension').checked),
+        notify_on_startup:!!(document.getElementById('sa_notify_on_startup')&&document.getElementById('sa_notify_on_startup').checked),
+        use_timer_bot:!!(document.getElementById('sa_use_timer_bot')&&document.getElementById('sa_use_timer_bot').checked)
+      };
+      requestJson('POST','/api/streak-alert',payload,function(resp){
+        streakAlertCfg=resp||payload;
+        if(status) status.textContent='Applied';
+        renderStreakAlertPanel();
+      });
     }
 
     function loadLateModeConfig(){
@@ -387,6 +432,9 @@ _HTML = """<!DOCTYPE html>
             }
           } else { btcEl.textContent='Waiting for Chainlink...'; }
 
+          var saRun=document.getElementById('sa_current_run');
+          if(saRun){ var ds=b.direction_streak||{}; saRun.textContent=(ds.length>0&&ds.direction)?(ds.length+'x '+ds.direction):'none'; }
+
           var tr=d.trading||{};
           var tHtml='Markets '+esc(tr.markets_seen)+' \u00b7 Trades '+esc(tr.trade_count)+' \u00b7 PnL $'+(tr.total_pnl!=null?numFmt(tr.total_pnl,2):'\u2014')+'<br/>';
           var liveLower=String(liveStatusVal||'').toLowerCase();
@@ -415,6 +463,7 @@ _HTML = """<!DOCTYPE html>
     loadLateModeConfig();
     loadVolumeEvalConfig();
     loadTimerAlertConfig();
+    loadStreakAlertConfig();
     tick();
   </script>
 </body>
@@ -471,6 +520,8 @@ def build_app(
   update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_streak_alert: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_streak_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> FastAPI:
@@ -548,6 +599,18 @@ def build_app(
         return JSONResponse(_sanitize_for_json(payload or {}))
       return JSONResponse(_sanitize_for_json(update_timer_alert(payload or {})))
 
+    @app.get("/api/streak-alert")
+    async def api_get_streak_alert():
+      if not get_streak_alert:
+        return JSONResponse({"enabled": False})
+      return JSONResponse(_sanitize_for_json(get_streak_alert()))
+
+    @app.post("/api/streak-alert")
+    async def api_update_streak_alert(payload: Dict[str, Any] = Body(default={})):
+      if not update_streak_alert:
+        return JSONResponse(_sanitize_for_json(payload or {}))
+      return JSONResponse(_sanitize_for_json(update_streak_alert(payload or {})))
+
     @app.post("/api/manual-buy")
     async def api_manual_buy(payload: Dict[str, Any] = Body(default={})):
       if not trigger_manual_buy:
@@ -587,6 +650,8 @@ def start_web_dashboard(
   update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_streak_alert: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_streak_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> bool:
@@ -606,6 +671,8 @@ def start_web_dashboard(
       update_volume_eval_mode=update_volume_eval_mode,
       get_timer_alert=get_timer_alert,
       update_timer_alert=update_timer_alert,
+      get_streak_alert=get_streak_alert,
+      update_streak_alert=update_streak_alert,
       trigger_manual_buy=trigger_manual_buy,
       trigger_manual_sell=trigger_manual_sell,
     )
