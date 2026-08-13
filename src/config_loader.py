@@ -175,6 +175,16 @@ class TimerAlertConfig:
 
 
 @dataclass
+class StreakAlertConfig:
+    """Consecutive BUY direction alert (UP/DOWN) sent via Telegram."""
+    enabled: bool = True
+    min_streak: int = 3
+    notify_every_extension: bool = False
+    notify_on_startup: bool = False
+    use_timer_bot: bool = True
+
+
+@dataclass
 class TelegramConfig:
     """Telegram notification parameters."""
     enabled: bool = True
@@ -184,6 +194,7 @@ class TelegramConfig:
     timer_bot_token: str = ""
     timer_chat_id: str = ""
     timer_alert: TimerAlertConfig = field(default_factory=TimerAlertConfig)
+    streak_alert: StreakAlertConfig = field(default_factory=StreakAlertConfig)
 
 
 @dataclass
@@ -459,6 +470,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
     # Telegram (merge JSON + env)
     telegram_data = data.get("telegram", {})
     timer_alert_data = telegram_data.get("timer_alert", {})
+    streak_alert_data = telegram_data.get("streak_alert", {})
     telegram = TelegramConfig(
         enabled=telegram_data.get("enabled", True),
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
@@ -478,6 +490,13 @@ def load_config(config_path: Optional[str] = None) -> Config:
                 ),
                 0.0,
             ),
+        ),
+        streak_alert=StreakAlertConfig(
+            enabled=bool(streak_alert_data.get("enabled", True)),
+            min_streak=max(2, _to_int(streak_alert_data.get("min_streak", 3), 3)),
+            notify_every_extension=bool(streak_alert_data.get("notify_every_extension", False)),
+            notify_on_startup=bool(streak_alert_data.get("notify_on_startup", False)),
+            use_timer_bot=bool(streak_alert_data.get("use_timer_bot", True)),
         ),
     )
 
@@ -661,5 +680,9 @@ def validate_config(config: Config) -> list:
         errors.append("telegram.timer_alert.min_price must be less than max_price")
     if timer_alert.btc_buffer_multiplier < 0:
         errors.append("telegram.timer_alert.btc_buffer_multiplier must be >= 0")
+
+    streak_alert = config.telegram.streak_alert
+    if streak_alert.min_streak < 2:
+        errors.append("telegram.streak_alert.min_streak must be >= 2")
     
     return errors
