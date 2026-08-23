@@ -3938,6 +3938,8 @@ class Dashboard:
             "strategy": strategy,
             "up": token_block(self.state.up_token),
             "down": token_block(self.state.down_token),
+            "next_up": None,
+            "next_down": None,
             "btc": btc_block,
             "trading": trading,
             "last_signal": self.last_signal,
