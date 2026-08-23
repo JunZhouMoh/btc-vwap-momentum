@@ -66,6 +66,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModePanel" class="mono">Loading...</div></div>
     <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalPanel" class="mono">Loading...</div></div>
     <div class="card controls"><h2>Telegram Streak Alert</h2><div id="streakAlertPanel" class="mono">Loading...</div></div>
+    <div class="card"><h2>Streak End Counts</h2><div id="streakEnds" class="mono">Loading...</div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
   <script>
@@ -87,7 +88,7 @@ _HTML = """<!DOCTYPE html>
     var isMobile=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent||'');
     var POLL_MS_ACTIVE=1000;
     var POLL_MS_HIDDEN=5000;
-    var lastHtml={meta:'',session:'',strategy:'',btc:'',trading:'',modePerf:''};
+    var lastHtml={meta:'',session:'',strategy:'',btc:'',trading:'',modePerf:'',streakEnds:''};
 
     function setHtmlIfChanged(id,htmlKey,html){
       var el=document.getElementById(id);
@@ -319,6 +320,27 @@ _HTML = """<!DOCTYPE html>
     function manualBuyUp(){ manualBuyWithDirection('UP'); }
     function manualBuyDown(){ manualBuyWithDirection('DOWN'); }
 
+    function manualBuyNextWithDirection(direction){
+      var status=document.getElementById('buyStatus');
+      var amount=readNum('buyAmount',0);
+      if(!(amount>0)){
+        if(status) status.textContent='Amount must be > 0';
+        return;
+      }
+      if(status) status.textContent='Queueing next window...';
+      requestJson('POST','/api/manual-buy-next',{amount_usd:amount,direction:direction},function(resp){
+        if(!status) return;
+        if(resp&&resp.ok===false){
+          status.textContent=String(resp.error||'Request failed');
+          return;
+        }
+        status.textContent=String((resp&&resp.message)||('Queued next '+direction));
+      });
+    }
+
+    function manualBuyNextUp(){ manualBuyNextWithDirection('UP'); }
+    function manualBuyNextDown(){ manualBuyNextWithDirection('DOWN'); }
+
     function manualSell(){
       var status=document.getElementById('buyStatus');
       if(status) status.textContent='Submitting sell...';
@@ -372,6 +394,12 @@ _HTML = """<!DOCTYPE html>
           var existingBuyStatusEl=document.getElementById('buyStatus');
           var buyStatusVal=existingBuyStatusEl?existingBuyStatusEl.textContent:'';
           var liveStatusVal=d.manual_buy_live_status?String(d.manual_buy_live_status):'idle';
+          var nextBuy=d.manual_buy_next||{};
+          var nextPendingText='none';
+          if(nextBuy&&nextBuy.pending&&nextBuy.signal){
+            var nbAmt=(nextBuy.amount_usd!=null&&typeof nextBuy.amount_usd==='number'&&!isNaN(nextBuy.amount_usd))?numFmt(nextBuy.amount_usd,2):'\u2014';
+            nextPendingText=String(nextBuy.signal)+' $'+String(nbAmt);
+          }
           var defaultBuyAmount=10;
           if(!buyAmountVal) buyAmountVal=String(defaultBuyAmount);
           var sessionHtml=[
@@ -379,7 +407,8 @@ _HTML = """<!DOCTYPE html>
             'WS: '+(hdr.ws_connected?'live':'disconnected'),
             'Mode: '+(hdr.simulation?'simulation':'real'),
             'Live: '+esc(liveStatusVal),
-            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">UP</button> <button class="btn secondary" onclick="manualBuyDown()">DOWN</button> <button class="btn secondary" onclick="manualSell()">SELL</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
+            'Next queued: '+esc(nextPendingText),
+            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">UP</button> <button class="btn secondary" onclick="manualBuyDown()">DOWN</button> <button class="btn secondary" onclick="manualBuyNextUp()">NEXT UP</button> <button class="btn secondary" onclick="manualBuyNextDown()">NEXT DOWN</button> <button class="btn secondary" onclick="manualSell()">SELL</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
           ].join('<br/>');
           setHtmlIfChanged('session','session',sessionHtml);
 
@@ -434,6 +463,18 @@ _HTML = """<!DOCTYPE html>
 
           var saRun=document.getElementById('sa_current_run');
           if(saRun){ var ds=b.direction_streak||{}; saRun.textContent=(ds.length>0&&ds.direction)?(ds.length+'x '+ds.direction):'none'; }
+
+          var streakEnds=(d.streak_end_counts&&d.streak_end_counts.length)?d.streak_end_counts:[];
+          var streakEndLines=[];
+          for(var sei=0;sei<streakEnds.length;sei++){
+            var row=streakEnds[sei]||{};
+            var lenVal=(row.length!=null)?String(row.length):'\u2014';
+            var dirVal=row.direction?String(row.direction):'?';
+            var cntVal=(row.ended_count!=null)?String(row.ended_count):'0';
+            streakEndLines.push(esc(lenVal+'x '+dirVal+' ended: '+cntVal));
+          }
+          var streakEndsHtml=streakEndLines.length?streakEndLines.join('<br/>'):'No streak endings yet';
+          setHtmlIfChanged('streakEnds','streakEnds',streakEndsHtml);
 
           var tr=d.trading||{};
           var tHtml='Markets '+esc(tr.markets_seen)+' \u00b7 Trades '+esc(tr.trade_count)+' \u00b7 PnL $'+(tr.total_pnl!=null?numFmt(tr.total_pnl,2):'\u2014')+'<br/>';
@@ -523,6 +564,7 @@ def build_app(
   get_streak_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_streak_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  trigger_manual_buy_next: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> FastAPI:
     app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
@@ -617,6 +659,12 @@ def build_app(
         return JSONResponse({"ok": False, "error": "Manual buy is not enabled"})
       return JSONResponse(_sanitize_for_json(trigger_manual_buy(payload or {})))
 
+    @app.post("/api/manual-buy-next")
+    async def api_manual_buy_next(payload: Dict[str, Any] = Body(default={})):
+      if not trigger_manual_buy_next:
+        return JSONResponse({"ok": False, "error": "Next-window manual buy is not enabled"})
+      return JSONResponse(_sanitize_for_json(trigger_manual_buy_next(payload or {})))
+
     @app.post("/api/manual-sell")
     async def api_manual_sell(payload: Dict[str, Any] = Body(default={})):
       if not trigger_manual_sell:
@@ -653,6 +701,7 @@ def start_web_dashboard(
   get_streak_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_streak_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  trigger_manual_buy_next: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> bool:
     """
@@ -674,6 +723,7 @@ def start_web_dashboard(
       get_streak_alert=get_streak_alert,
       update_streak_alert=update_streak_alert,
       trigger_manual_buy=trigger_manual_buy,
+      trigger_manual_buy_next=trigger_manual_buy_next,
       trigger_manual_sell=trigger_manual_sell,
     )
 
