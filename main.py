@@ -160,6 +160,14 @@ class MarketState:
     up_token: Optional[TokenData] = None
     down_token: Optional[TokenData] = None
     
+    # Next market tokens (pre-fetched for dashboard display)
+    next_market_id: str = ""
+    next_condition_id: str = ""
+    next_slug: str = ""
+    next_end_time: float = 0.0
+    next_up_token: Optional[TokenData] = None
+    next_down_token: Optional[TokenData] = None
+    
     connected: bool = False
     last_update: float = 0.0
     
@@ -1036,11 +1044,18 @@ class WebSocketClient:
                         token_ids.append(self.state.up_token.token_id)
                     if self.state.down_token:
                         token_ids.append(self.state.down_token.token_id)
+                    # Also subscribe to next market tokens for live price display
+                    if self.state.next_up_token:
+                        token_ids.append(self.state.next_up_token.token_id)
+                    if self.state.next_down_token:
+                        token_ids.append(self.state.next_down_token.token_id)
                     
                     # Log exact token_ids being subscribed
                     logger.info(f"WebSocket subscribing to tokens:")
                     logger.info(f"  UP: {self.state.up_token.token_id[:40]}..." if self.state.up_token else "  UP: None")
                     logger.info(f"  DOWN: {self.state.down_token.token_id[:40]}..." if self.state.down_token else "  DOWN: None")
+                    logger.info(f"  NEXT UP: {self.state.next_up_token.token_id[:40]}..." if self.state.next_up_token else "  NEXT UP: None")
+                    logger.info(f"  NEXT DOWN: {self.state.next_down_token.token_id[:40]}..." if self.state.next_down_token else "  NEXT DOWN: None")
                     
                     await ws.send(json.dumps({"assets_ids": token_ids, "type": "market"}))
                     
@@ -1151,6 +1166,10 @@ class WebSocketClient:
             return self.state.up_token
         elif self.state.down_token and asset_id == self.state.down_token.token_id:
             return self.state.down_token
+        elif self.state.next_up_token and asset_id == self.state.next_up_token.token_id:
+            return self.state.next_up_token
+        elif self.state.next_down_token and asset_id == self.state.next_down_token.token_id:
+            return self.state.next_down_token
         return None
     
     def stop(self):
@@ -3938,8 +3957,8 @@ class Dashboard:
             "strategy": strategy,
             "up": token_block(self.state.up_token),
             "down": token_block(self.state.down_token),
-            "next_up": None,
-            "next_down": None,
+            "next_up": token_block(self.state.next_up_token),
+            "next_down": token_block(self.state.next_down_token),
             "btc": btc_block,
             "trading": trading,
             "last_signal": self.last_signal,
@@ -5168,7 +5187,84 @@ class LiveTradingBot:
         # BTC anchor is now auto-managed by ChainlinkPriceClient
         # It detects interval boundaries from Chainlink timestamps independently
         
+        # Pre-fetch next market in background for dashboard display
+        asyncio.create_task(self._fetch_and_setup_next_market())
+        
         return True
+
+    async def _fetch_and_setup_next_market(self) -> None:
+        """Fetch next market's tokens for dashboard display (no trading)"""
+        try:
+            d = self.config.market.duration_sec
+            sfx = self.config.market.slug_infix
+            now = int(time.time())
+            current_window = (now // d) * d
+            next_target_ts = current_window + d  # Next window timestamp
+            next_expected_slug = f"btc-updown-{sfx}-{next_target_ts}"
+            
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(f"{GAMMA_API}/markets?slug={next_expected_slug}") as resp:
+                        if resp.status == 200:
+                            markets = await resp.json()
+                            if markets and markets[0].get("slug") == next_expected_slug:
+                                market = markets[0]
+                                outcomes = market.get("outcomes", [])
+                                tokens = market.get("clobTokenIds", [])
+                                
+                                if isinstance(outcomes, str):
+                                    outcomes = json.loads(outcomes)
+                                if isinstance(tokens, str):
+                                    tokens = json.loads(tokens)
+                                
+                                up_token_id = None
+                                down_token_id = None
+                                
+                                try:
+                                    up_index = outcomes.index("Up") if "Up" in outcomes else None
+                                    down_index = outcomes.index("Down") if "Down" in outcomes else None
+                                    
+                                    if up_index is not None and up_index < len(tokens):
+                                        up_token_id = tokens[up_index]
+                                    if down_index is not None and down_index < len(tokens):
+                                        down_token_id = tokens[down_index]
+                                except (ValueError, IndexError):
+                                    pass
+                                
+                                if not up_token_id or not down_token_id:
+                                    for i, outcome in enumerate(outcomes):
+                                        if i < len(tokens):
+                                            outcome_lower = str(outcome).lower()
+                                            if not up_token_id and "up" in outcome_lower:
+                                                up_token_id = tokens[i]
+                                            elif not down_token_id and "down" in outcome_lower:
+                                                down_token_id = tokens[i]
+                                
+                                if not up_token_id and len(tokens) >= 1:
+                                    up_token_id = tokens[0]
+                                if not down_token_id and len(tokens) >= 2:
+                                    down_token_id = tokens[1]
+                                
+                                if up_token_id and down_token_id:
+                                    end_str = market.get("end_date_iso") or market.get("endDate", "")
+                                    try:
+                                        end_time = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                                        end_timestamp = end_time.timestamp()
+                                    except:
+                                        end_timestamp = now + 2 * d
+                                    
+                                    self.state.next_market_id = market.get("id", "")
+                                    self.state.next_condition_id = market.get("conditionId", "")
+                                    self.state.next_slug = next_expected_slug
+                                    self.state.next_end_time = end_timestamp
+                                    self.state.next_up_token = TokenData(token_id=up_token_id, name="Up")
+                                    self.state.next_down_token = TokenData(token_id=down_token_id, name="Down")
+                                    logger.debug(f"Pre-fetched next market: {next_expected_slug}")
+                except Exception as e:
+                    logger.debug(f"Error fetching next market {next_expected_slug}: {e}")
+        except Exception as e:
+            logger.debug(f"Error in _fetch_and_setup_next_market: {e}")
+
 
     def _simulation_log_entry(
         self,
