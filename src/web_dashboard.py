@@ -61,10 +61,13 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
     <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
-    <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div>
+    <!-- TEMPORARILY REMOVED: Mode Performance -->
+    <!-- <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div> -->
     <div class="card controls"><h2>Telegram Timer Alert</h2><div id="timerAlertPanel" class="mono">Loading...</div></div>
-    <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModePanel" class="mono">Loading...</div></div>
-    <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalPanel" class="mono">Loading...</div></div>
+    <!-- TEMPORARILY REMOVED: Late Entry Modes -->
+    <!-- <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModePanel" class="mono">Loading...</div></div> -->
+    <!-- TEMPORARILY REMOVED: Volume Eval Mode -->
+    <!-- <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalPanel" class="mono">Loading...</div></div> -->
     <div class="card controls"><h2>Telegram Streak Alert</h2><div id="streakAlertPanel" class="mono">Loading...</div></div>
     <div class="card"><h2>Streak End Counts</h2><div id="streakEnds" class="mono">Loading...</div></div>
   </div>
@@ -512,8 +515,11 @@ _HTML = """<!DOCTYPE html>
           }
           if(tr.position){ var p=tr.position; var posPrefix=sellPhase?'SELLING LONG ':'LONG '; tHtml+=posPrefix+esc(p.token_name)+' @ '+esc(p.entry_price)+' \u00d7'+esc(p.contracts)+(p.hedged?' hedged':'')+'<br/>'; tHtml+='Unreal $'+(p.unrealized_pnl!=null?numFmt(p.unrealized_pnl,2):'\u2014')+'<br/>'; } else { tHtml+='No open position<br/>'; }
           if(tr.recent_trades&&tr.recent_trades.length){ var lines=[]; for(var ri=0;ri<tr.recent_trades.length;ri++){ lines.push(esc(tr.recent_trades[ri].line)); } tHtml+='<br/>Recent:<br/>'+lines.join('<br/>'); }
+          /* TEMPORARILY DISABLED: Mode Performance rendering
           var tr=d.trading||{}, modePerfEl=document.getElementById('modePerf');
           if(modePerfEl){ var modePerfLines=[], modePerfData=tr.win_rate_by_mode||{}; window.latestModePerfData=modePerfData; var panelHandledModes={}; var panelModeOrder=['normal','manual','mode_60s','mode_40s','mode_30s','mode_20s','unknown']; function pushPanelModeLine(modeKey){ if(!Object.prototype.hasOwnProperty.call(modePerfData,modeKey)) return; panelHandledModes[modeKey]=true; var ms=modePerfData[modeKey]||{}; var wrVal=(ms.win_rate_pct!=null&&typeof ms.win_rate_pct==='number'&&!isNaN(ms.win_rate_pct))?(numFmt(ms.win_rate_pct,1)+'%'):'\u2014'; var pnlVal=(ms.total_pnl_usd!=null&&typeof ms.total_pnl_usd==='number'&&!isNaN(ms.total_pnl_usd))?('$'+numFmtSigned(ms.total_pnl_usd,2)):'$\u2014'; var countVal=(ms.trade_count!=null)?String(ms.trade_count):'0'; modePerfLines.push(esc(modeKey)+' | PnL '+esc(pnlVal)+' | Triggers '+esc(countVal)+' | WR '+esc(wrVal)); } for(var pmo=0;pmo<panelModeOrder.length;pmo++){ pushPanelModeLine(panelModeOrder[pmo]); } for(var pmk in modePerfData){ if(!Object.prototype.hasOwnProperty.call(modePerfData,pmk)) continue; if(panelHandledModes[pmk]) continue; pushPanelModeLine(pmk); } var modePerfHtml=modePerfLines.length?modePerfLines.join('<br/>'):'No mode stats yet'; setHtmlIfChanged('modePerf','modePerf',modePerfHtml); }
+          */
+          window.latestModePerfData={};
           setHtmlIfChanged('trading','trading',tHtml);
           var targetMs=document.hidden?POLL_MS_HIDDEN:POLL_MS_ACTIVE;
           var elapsedMs=Math.max(0, Date.now()-startedAt);
@@ -528,8 +534,8 @@ _HTML = """<!DOCTYPE html>
       scheduleTick(document.hidden?POLL_MS_HIDDEN:250);
     });
 
-    loadLateModeConfig();
-    loadVolumeEvalConfig();
+    // TEMPORARILY DISABLED: loadLateModeConfig();
+    // TEMPORARILY DISABLED: loadVolumeEvalConfig();
     loadTimerAlertConfig();
     loadStreakAlertConfig();
     tick();
