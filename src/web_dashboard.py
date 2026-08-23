@@ -514,6 +514,7 @@ _HTML = """<!DOCTYPE html>
             tHtml+='Sell status: '+esc(liveStatusVal)+'<br/>';
           }
           if(tr.position){ var p=tr.position; var posPrefix=sellPhase?'SELLING LONG ':'LONG '; tHtml+=posPrefix+esc(p.token_name)+' @ '+esc(p.entry_price)+' \u00d7'+esc(p.contracts)+(p.hedged?' hedged':'')+'<br/>'; tHtml+='Unreal $'+(p.unrealized_pnl!=null?numFmt(p.unrealized_pnl,2):'\u2014')+'<br/>'; } else { tHtml+='No open position<br/>'; }
+          var nextBuyInfo=d.manual_buy_next||{}; if(nextBuyInfo.pending){ var nextDir=String(nextBuyInfo.direction||'?'); var nextAmt=(nextBuyInfo.amount_usd!=null)?numFmt(nextBuyInfo.amount_usd,2):'\u2014'; tHtml+='<br/>Next window order: BUY '+esc(nextDir)+' $'+esc(nextAmt)+'<br/>'; }
           if(tr.recent_trades&&tr.recent_trades.length){ var lines=[]; for(var ri=0;ri<tr.recent_trades.length;ri++){ lines.push(esc(tr.recent_trades[ri].line)); } tHtml+='<br/>Recent:<br/>'+lines.join('<br/>'); }
           /* TEMPORARILY DISABLED: Mode Performance rendering
           var tr=d.trading||{}, modePerfEl=document.getElementById('modePerf');
