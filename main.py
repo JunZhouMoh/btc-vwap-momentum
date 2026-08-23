@@ -2056,6 +2056,7 @@ class Dashboard:
         self.manual_signal_pending = ""
         self.manual_sell_pending = ""
         self.manual_buy_live_status = "idle"
+        self.next_window_order_result: Optional[Dict[str, Any]] = None
         self.entry_flash = False
         self.hedge_flash = False
         self.btc_volume_feed: Optional[BTCVolumeFeed] = None
@@ -6283,6 +6284,7 @@ class LiveTradingBot:
                         }
                         web_state["streak_end_counts"] = self._serialize_streak_end_counts()
                         web_state["manual_buy_next"] = self._get_manual_buy_next_state()
+                        web_state["next_window_order_result"] = self.dashboard.next_window_order_result
                         self._web_snapshot_holder.set(web_state)
                     if self.market_microstructure_logger:
                         self.market_microstructure_logger.maybe_log(
@@ -6669,6 +6671,14 @@ class LiveTradingBot:
             
             if result.success:
                 self.dashboard.manual_buy_live_status = f"sent: bought next {direction} NOW"
+                self.dashboard.next_window_order_result = {
+                    "status": "success",
+                    "direction": direction,
+                    "amount_usd": amount_usd,
+                    "contracts": result.contracts_filled,
+                    "price": result.avg_price,
+                    "timestamp": time.time(),
+                }
                 logger.info(
                     f"Next-now buy executed successfully: {direction} "
                     f"contracts={result.contracts_filled} price={result.avg_price:.4f}"
@@ -6676,6 +6686,13 @@ class LiveTradingBot:
             else:
                 error_msg = result.error or "Unknown error"
                 self.dashboard.manual_buy_live_status = f"error: next buy failed - {error_msg}"
+                self.dashboard.next_window_order_result = {
+                    "status": "failed",
+                    "direction": direction,
+                    "amount_usd": amount_usd,
+                    "error": error_msg,
+                    "timestamp": time.time(),
+                }
                 logger.error(f"Next-now buy failed: {error_msg}")
                 
         except Exception as e:
