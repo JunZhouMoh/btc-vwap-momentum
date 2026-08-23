@@ -438,7 +438,7 @@ _HTML = """<!DOCTYPE html>
             'Current: UP '+esc(upPrice)+' | DOWN '+esc(downPrice),
             'Next window: UP '+esc(nextUpPrice)+' | DOWN '+esc(nextDownPrice),
             'Next queued: '+esc(nextPendingText),
-            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">UP</button> <button class="btn secondary" onclick="manualBuyDown()">DOWN</button> <button class="btn secondary" onclick="manualBuyNextUp()">NEXT UP</button> <button class="btn secondary" onclick="manualBuyNextDown()">NEXT DOWN</button> <button class="btn secondary" style="background:#1f6feb80" onclick="manualBuyNextNowUp()">NOW UP</button> <button class="btn secondary" style="background:#1f6feb80" onclick="manualBuyNextNowDown()">NOW DOWN</button> <button class="btn secondary" onclick="manualSell()">SELL</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
+            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">UP</button> <button class="btn secondary" onclick="manualBuyDown()">DOWN</button> <button class="btn secondary" style="background:#1f6feb80" onclick="manualBuyNextNowUp()">NOW UP</button> <button class="btn secondary" style="background:#1f6feb80" onclick="manualBuyNextNowDown()">NOW DOWN</button> <button class="btn secondary" onclick="manualSell()">SELL</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
           ].join('<br/>');
           setHtmlIfChanged('session','session',sessionHtml);
 
@@ -628,39 +628,33 @@ def build_app(
 
     @app.get("/api/late-modes")
     async def api_get_late_modes():
-      if not get_late_modes:
-        return JSONResponse({"enabled": False, "modes": []})
-      return JSONResponse(_sanitize_for_json(get_late_modes()))
+      # TEMPORARILY DISABLED: Return enabled=False regardless of backend state
+      return JSONResponse({"enabled": False, "modes": []})
 
     @app.post("/api/late-modes")
     async def api_update_late_modes(payload: Dict[str, Any] = Body(default={})):
-      if not update_late_modes:
-        return JSONResponse(_sanitize_for_json(payload or {}))
-      return JSONResponse(_sanitize_for_json(update_late_modes(payload or {})))
+      # TEMPORARILY DISABLED: Always return enabled=False
+      return JSONResponse({"enabled": False, "modes": []})
 
     @app.get("/api/volume-accel-check")
     async def api_get_volume_accel_check():
-      if not get_volume_accel_check:
-        return JSONResponse({"min_current_volume_diff": 0.0, "min_accel_diff": 0.0, "volume_basis": "total"})
-      return JSONResponse(_sanitize_for_json(get_volume_accel_check()))
+      # TEMPORARILY DISABLED: Return defaults regardless of backend state
+      return JSONResponse({"min_current_volume_diff": 0.0, "min_accel_diff": 0.0, "volume_basis": "total"})
 
     @app.post("/api/volume-accel-check")
     async def api_update_volume_accel_check(payload: Dict[str, Any] = Body(default={})):
-      if not update_volume_accel_check:
-        return JSONResponse(_sanitize_for_json(payload or {}))
-      return JSONResponse(_sanitize_for_json(update_volume_accel_check(payload or {})))
+      # TEMPORARILY DISABLED: Always return defaults
+      return JSONResponse({"min_current_volume_diff": 0.0, "min_accel_diff": 0.0, "volume_basis": "total"})
 
     @app.get("/api/volume-eval-mode")
     async def api_get_volume_eval_mode():
-      if not get_volume_eval_mode:
-        return JSONResponse({"enabled": False})
-      return JSONResponse(_sanitize_for_json(get_volume_eval_mode()))
+      # TEMPORARILY DISABLED: Return enabled=False regardless of backend state
+      return JSONResponse({"enabled": False})
 
     @app.post("/api/volume-eval-mode")
     async def api_update_volume_eval_mode(payload: Dict[str, Any] = Body(default={})):
-      if not update_volume_eval_mode:
-        return JSONResponse(_sanitize_for_json(payload or {}))
-      return JSONResponse(_sanitize_for_json(update_volume_eval_mode(payload or {})))
+      # TEMPORARILY DISABLED: Always return enabled=False
+      return JSONResponse({"enabled": False})
 
     @app.get("/api/timer-alert")
     async def api_get_timer_alert():
