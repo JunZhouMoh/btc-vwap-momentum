@@ -6593,7 +6593,8 @@ class LiveTradingBot:
                     bet_amount_override_usd=bet_override,
                     manual_override=is_manual,
                 )
-            if is_manual:
+            if is_manual and not is_next_now:
+                # Only check position for current market buys (next-window doesn't affect current position)
                 after_contracts = self.stats.position.contracts if self.stats.position else 0
                 if after_contracts > before_contracts or self.stats.trade_count > before_trade_count:
                     self.dashboard.manual_buy_live_status = "sent: executed"
