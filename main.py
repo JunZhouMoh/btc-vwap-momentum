@@ -4040,6 +4040,82 @@ class LiveTradingBot:
         self._streak_count: int = 0
         self._streak_last_counted_slug: str = ""
         self._streak_last_notified_count: int = 0
+        self._streak_end_counts: Dict[str, int] = {}
+        self._manual_buy_next_payload: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    def _streak_end_key(direction: str, streak_len: int) -> Optional[str]:
+        d = str(direction or "").strip().upper()
+        if d not in {"UP", "DOWN"}:
+            return None
+        try:
+            ln = int(streak_len)
+        except (TypeError, ValueError):
+            return None
+        if ln <= 0:
+            return None
+        return f"{d}_{ln}"
+
+    def _record_streak_end(self, direction: str, streak_len: int) -> None:
+        key = self._streak_end_key(direction, streak_len)
+        if not key:
+            return
+        self._streak_end_counts[key] = int(self._streak_end_counts.get(key, 0)) + 1
+
+    def _serialize_streak_end_counts(self) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for key, ended_count in self._streak_end_counts.items():
+            try:
+                direction, raw_len = key.split("_", 1)
+                streak_len = int(raw_len)
+            except (TypeError, ValueError):
+                continue
+            rows.append(
+                {
+                    "direction": direction,
+                    "length": streak_len,
+                    "ended_count": int(ended_count),
+                }
+            )
+        rows.sort(key=lambda r: (int(r.get("length", 0)), str(r.get("direction", ""))))
+        return rows
+
+    def _get_manual_buy_next_state(self) -> Dict[str, Any]:
+        payload = self._manual_buy_next_payload or {}
+        direction = str(payload.get("direction", "")).upper()
+        amount_usd = float(payload.get("amount_usd", 0.0) or 0.0)
+        queued_market = str(payload.get("queued_market", "") or "")
+        signal = f"BUY_{direction}" if direction in {"UP", "DOWN"} else ""
+        return {
+            "pending": bool(payload),
+            "direction": direction if direction in {"UP", "DOWN"} else "",
+            "amount_usd": amount_usd if amount_usd > 0 else None,
+            "queued_market": queued_market,
+            "signal": signal,
+        }
+
+    def _activate_next_window_manual_buy_if_any(self) -> None:
+        payload = self._manual_buy_next_payload
+        if not payload or not self.dashboard:
+            return
+        if self.dashboard.last_signal or self.dashboard.manual_signal_pending:
+            return
+
+        direction = str(payload.get("direction", "")).upper()
+        amount_usd = float(payload.get("amount_usd", 0.0) or 0.0)
+        if direction not in {"UP", "DOWN"} or amount_usd <= 0:
+            self._manual_buy_next_payload = None
+            return
+
+        signal = f"BUY_{direction}"
+        self.dashboard.manual_signal_pending = f"{signal}|amount={amount_usd:.8f}"
+        self.dashboard.manual_buy_live_status = (
+            f"queued: {signal} ${amount_usd:.2f} (next window request)"
+        )
+        self._manual_buy_next_payload = None
+        logger.info(
+            f"Activated next-window manual buy: {signal} amount=${amount_usd:.2f} market={self.state.slug}"
+        )
 
     def _web_get_indicator_controls(self) -> Dict[str, Any]:
         if not self.dashboard:
@@ -4353,6 +4429,7 @@ class LiveTradingBot:
         direction = ""
         streak = 0
         last_slug = ""
+        self._streak_end_counts = {}
 
         seen_market_dirs: List[Tuple[float, str, str]] = []
         for t in sorted(self.stats.trades, key=lambda r: float(getattr(r, "timestamp", 0.0) or 0.0)):
@@ -4368,6 +4445,8 @@ class LiveTradingBot:
             if token == direction:
                 streak += 1
             else:
+                if direction in {"UP", "DOWN"} and streak > 0:
+                    self._record_streak_end(direction, streak)
                 direction = token
                 streak = 1
             last_slug = slug
@@ -4415,6 +4494,8 @@ class LiveTradingBot:
 
         # Non-directional outcomes break the run.
         if direction not in {"UP", "DOWN"}:
+            if self._streak_direction in {"UP", "DOWN"} and self._streak_count > 0:
+                self._record_streak_end(self._streak_direction, self._streak_count)
             self._streak_direction = ""
             self._streak_count = 0
             self._streak_last_notified_count = 0
@@ -4423,6 +4504,8 @@ class LiveTradingBot:
         if direction == self._streak_direction:
             self._streak_count += 1
         else:
+            if self._streak_direction in {"UP", "DOWN"} and self._streak_count > 0:
+                self._record_streak_end(self._streak_direction, self._streak_count)
             self._streak_direction = direction
             self._streak_count = 1
             self._streak_last_notified_count = 0
@@ -4630,6 +4713,56 @@ class LiveTradingBot:
             "signal": signal,
             "amount_usd": amount_usd,
             "message": f"Queued {signal} (${amount_usd:.2f})",
+        }
+
+    def _web_trigger_manual_buy_next(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.running:
+            self.dashboard.manual_buy_live_status = "blocked: bot not running"
+            return {"ok": False, "error": "Bot is not running"}
+
+        if not self.dashboard:
+            return {"ok": False, "error": "Dashboard not ready"}
+
+        if self._manual_buy_next_payload:
+            self.dashboard.manual_buy_live_status = "queued: next-window buy already pending"
+            return {"ok": False, "error": "A next-window buy is already queued"}
+
+        amount_usd = self.config.entry.bet_amount_usd
+        if isinstance(payload, dict) and ("amount_usd" in payload):
+            try:
+                amount_usd = float(payload.get("amount_usd"))
+            except (TypeError, ValueError):
+                self.dashboard.manual_buy_live_status = "blocked: invalid amount"
+                return {"ok": False, "error": "Invalid amount"}
+        if not (amount_usd > 0):
+            self.dashboard.manual_buy_live_status = "blocked: amount must be > 0"
+            return {"ok": False, "error": "Amount must be > 0"}
+
+        direction = ""
+        if isinstance(payload, dict) and ("direction" in payload):
+            direction = str(payload.get("direction", "")).upper()
+        if direction not in {"UP", "DOWN"}:
+            self.dashboard.manual_buy_live_status = "blocked: invalid direction"
+            return {"ok": False, "error": "Direction must be UP or DOWN"}
+
+        self._manual_buy_next_payload = {
+            "direction": direction,
+            "amount_usd": amount_usd,
+            "queued_market": str(self.state.slug or ""),
+            "queued_at": float(time.time()),
+        }
+        signal = f"BUY_{direction}"
+        self.dashboard.manual_buy_live_status = f"queued next window: {signal} ${amount_usd:.2f}"
+        logger.info(
+            f"Manual web buy queued for next window: {signal} amount=${amount_usd:.2f} "
+            f"(current market={self.state.slug})"
+        )
+        return {
+            "ok": True,
+            "signal": signal,
+            "amount_usd": amount_usd,
+            "message": f"Queued {signal} for next window (${amount_usd:.2f})",
+            "next_window": True,
         }
 
     def _web_trigger_manual_sell(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -4886,6 +5019,7 @@ class LiveTradingBot:
                 get_streak_alert=self._web_get_streak_alert,
                 update_streak_alert=self._web_update_streak_alert,
                 trigger_manual_buy=self._web_trigger_manual_buy,
+                trigger_manual_buy_next=self._web_trigger_manual_buy_next,
                 trigger_manual_sell=self._web_trigger_manual_sell,
             )
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
@@ -5024,6 +5158,7 @@ class LiveTradingBot:
         logger.info(f"  DOWN token: {down_token_id[:40]}...")
         
         self.stats.new_market(self.state.slug)
+        self._activate_next_window_manual_buy_if_any()
         self.hedge_mgr.clear()  # Reset hedge state for new market
         if self.user_ws:
             self.user_ws.clear_token_fills()  # Reset WS fill buffer for new market
@@ -6008,7 +6143,14 @@ class LiveTradingBot:
                     # Update dashboard (никогда не блокируется)
                     live.update(self.dashboard.render())
                     if self._web_snapshot_holder:
-                        self._web_snapshot_holder.set(self.dashboard.build_web_snapshot())
+                        web_state = self.dashboard.build_web_snapshot()
+                        web_state["direction_streak"] = {
+                            "direction": self._streak_direction,
+                            "length": int(self._streak_count),
+                        }
+                        web_state["streak_end_counts"] = self._serialize_streak_end_counts()
+                        web_state["manual_buy_next"] = self._get_manual_buy_next_state()
+                        self._web_snapshot_holder.set(web_state)
                     if self.market_microstructure_logger:
                         self.market_microstructure_logger.maybe_log(
                             self.dashboard.build_microstructure_snapshot(),
