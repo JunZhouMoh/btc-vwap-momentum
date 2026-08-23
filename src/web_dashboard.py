@@ -402,11 +402,14 @@ _HTML = """<!DOCTYPE html>
           }
           var defaultBuyAmount=10;
           if(!buyAmountVal) buyAmountVal=String(defaultBuyAmount);
+          var upPrice=((d.up&&d.up.book&&typeof d.up.book.last_price==='number')?numFmt(d.up.book.last_price,3):'\u2014');
+          var downPrice=((d.down&&d.down.book&&typeof d.down.book.last_price==='number')?numFmt(d.down.book.last_price,3):'\u2014');
           var sessionHtml=[
             'Timer: '+(hdr.time_left_sec!=null?esc(Math.floor(hdr.time_left_sec)+'s left'):'\u2014'),
             'WS: '+(hdr.ws_connected?'live':'disconnected'),
             'Mode: '+(hdr.simulation?'simulation':'real'),
             'Live: '+esc(liveStatusVal),
+            'Prices: UP '+esc(upPrice)+' | DOWN '+esc(downPrice),
             'Next queued: '+esc(nextPendingText),
             '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">UP</button> <button class="btn secondary" onclick="manualBuyDown()">DOWN</button> <button class="btn secondary" onclick="manualBuyNextUp()">NEXT UP</button> <button class="btn secondary" onclick="manualBuyNextDown()">NEXT DOWN</button> <button class="btn secondary" onclick="manualSell()">SELL</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
           ].join('<br/>');
