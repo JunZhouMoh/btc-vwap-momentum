@@ -3963,7 +3963,6 @@ class Dashboard:
             "trading": trading,
             "last_signal": self.last_signal,
             "manual_buy_live_status": self.manual_buy_live_status,
-            "manual_buy_next": self._get_manual_buy_next_state(),
         }
 
     def build_microstructure_snapshot(self) -> Dict[str, Any]:
