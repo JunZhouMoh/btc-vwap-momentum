@@ -2057,6 +2057,7 @@ class Dashboard:
         self.manual_sell_pending = ""
         self.manual_buy_live_status = "idle"
         self.next_window_order_result: Optional[Dict[str, Any]] = None
+        self._last_market_slug: Optional[str] = None
         self.entry_flash = False
         self.hedge_flash = False
         self.btc_volume_feed: Optional[BTCVolumeFeed] = None
@@ -3951,6 +3952,30 @@ class Dashboard:
                 "line": f"{icon} {trade_time} | {trade.token_name} @ {trade.entry_price:.2f} -> ${trade.pnl:+.2f}",
                 "entry_mode": display_mode,
             })
+
+        # Inherit next-window order result when market changes
+        current_slug = self.state.slug or ""
+        if current_slug != self._last_market_slug:
+            if self.next_window_order_result:
+                result = self.next_window_order_result
+                status = str(result.get("status", ""))
+                direction = str(result.get("direction", ""))
+                amount = result.get("amount_usd", 0)
+                if status == "success":
+                    contracts = result.get("contracts", 0)
+                    price = result.get("price", 0)
+                    trading["recent_trades"].insert(0, {
+                        "line": f"✅ [next] {direction} ${amount:.2f} | {contracts:.2f} contracts @ {price:.4f}",
+                        "entry_mode": "manual_next_now",
+                    })
+                else:
+                    error = result.get("error", "Unknown")
+                    trading["recent_trades"].insert(0, {
+                        "line": f"❌ [next] {direction} ${amount:.2f} failed - {error}",
+                        "entry_mode": "manual_next_now",
+                    })
+                self.next_window_order_result = None
+            self._last_market_slug = current_slug
 
         return {
             "ts": now,
