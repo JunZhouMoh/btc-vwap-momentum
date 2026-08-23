@@ -4744,9 +4744,8 @@ class LiveTradingBot:
         if not self.dashboard:
             return {"ok": False, "error": "Dashboard not ready"}
 
-        if self._manual_buy_next_payload:
-            self.dashboard.manual_buy_live_status = "queued: next-window buy already pending"
-            return {"ok": False, "error": "A next-window buy is already queued"}
+        # Check if this is immediate buy (NOW) or queue for next window
+        buy_next_now = payload.get("_buy_next_now", False)
 
         amount_usd = self.config.entry.bet_amount_usd
         if isinstance(payload, dict) and ("amount_usd" in payload):
@@ -4766,25 +4765,61 @@ class LiveTradingBot:
             self.dashboard.manual_buy_live_status = "blocked: invalid direction"
             return {"ok": False, "error": "Direction must be UP or DOWN"}
 
-        self._manual_buy_next_payload = {
-            "direction": direction,
-            "amount_usd": amount_usd,
-            "queued_market": str(self.state.slug or ""),
-            "queued_at": float(time.time()),
-        }
-        signal = f"BUY_{direction}"
-        self.dashboard.manual_buy_live_status = f"queued next window: {signal} ${amount_usd:.2f}"
-        logger.info(
-            f"Manual web buy queued for next window: {signal} amount=${amount_usd:.2f} "
-            f"(current market={self.state.slug})"
-        )
-        return {
-            "ok": True,
-            "signal": signal,
-            "amount_usd": amount_usd,
-            "message": f"Queued {signal} for next window (${amount_usd:.2f})",
-            "next_window": True,
-        }
+        if buy_next_now:
+            # Immediate buy against next window tokens NOW
+            up = self.state.next_up_token
+            down = self.state.next_down_token
+            if not up or not down:
+                self.dashboard.manual_buy_live_status = "blocked: next market tokens not ready"
+                return {"ok": False, "error": "Next market tokens not ready"}
+
+            up_last = float(up.last_price or 0.0)
+            down_last = float(down.last_price or 0.0)
+            if up_last <= 0.0 and down_last <= 0.0:
+                self.dashboard.manual_buy_live_status = "blocked: no live prices for next window"
+                return {"ok": False, "error": "No live prices for next window"}
+
+            # Queue immediate next-window buy as a special signal
+            signal = f"BUY_{direction}_NEXT_NOW"
+            self.dashboard.manual_signal_pending = f"{signal}|amount={amount_usd:.8f}"
+            self.dashboard.manual_buy_live_status = f"immediate next: {signal} ${amount_usd:.2f}"
+            logger.info(
+                f"Immediate next-window buy queued: {signal} amount=${amount_usd:.2f} "
+                f"(up={up_last:.4f}, down={down_last:.4f}, next_market={self.state.next_slug})"
+            )
+            return {
+                "ok": True,
+                "signal": signal,
+                "amount_usd": amount_usd,
+                "message": f"Queued immediate {signal} (${amount_usd:.2f})",
+                "next_window": True,
+                "immediate": True,
+            }
+        else:
+            # Queue for next window start (existing behavior)
+            if self._manual_buy_next_payload:
+                self.dashboard.manual_buy_live_status = "queued: next-window buy already pending"
+                return {"ok": False, "error": "A next-window buy is already queued"}
+
+            self._manual_buy_next_payload = {
+                "direction": direction,
+                "amount_usd": amount_usd,
+                "queued_market": str(self.state.slug or ""),
+                "queued_at": float(time.time()),
+            }
+            signal = f"BUY_{direction}"
+            self.dashboard.manual_buy_live_status = f"queued next window: {signal} ${amount_usd:.2f}"
+            logger.info(
+                f"Manual web buy queued for next window: {signal} amount=${amount_usd:.2f} "
+                f"(current market={self.state.slug})"
+            )
+            return {
+                "ok": True,
+                "signal": signal,
+                "amount_usd": amount_usd,
+                "message": f"Queued {signal} for next window (${amount_usd:.2f})",
+                "next_window": True,
+            }
 
     def _web_trigger_manual_sell(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         _ = payload
@@ -6535,8 +6570,10 @@ class LiveTradingBot:
             side = signal
             bet_override: Optional[float] = None
             is_manual = "|amount=" in signal
+            is_next_now = "_NEXT_NOW" in signal
             before_trade_count = self.stats.trade_count
             before_contracts = self.stats.position.contracts if self.stats.position else 0
+            
             if "|amount=" in signal:
                 raw_side, raw_amt = signal.split("|amount=", 1)
                 side = raw_side.strip()
@@ -6547,11 +6584,15 @@ class LiveTradingBot:
                 except (TypeError, ValueError):
                     bet_override = None
 
-            await self.execute_entry(
-                side,
-                bet_amount_override_usd=bet_override,
-                manual_override=is_manual,
-            )
+            if is_next_now:
+                # Handle immediate next-window buy
+                await self._safe_execute_entry_next_now(side, bet_override)
+            else:
+                await self.execute_entry(
+                    side,
+                    bet_amount_override_usd=bet_override,
+                    manual_override=is_manual,
+                )
             if is_manual:
                 after_contracts = self.stats.position.contracts if self.stats.position else 0
                 if after_contracts > before_contracts or self.stats.trade_count > before_trade_count:
@@ -6563,6 +6604,83 @@ class LiveTradingBot:
                 self.dashboard.manual_buy_live_status = "error: execution failed"
             logger.error(f"Entry execution error: {e}")
             signal_logger.error(f"ENTRY ERROR: {e}")
+
+    async def _safe_execute_entry_next_now(self, signal: str, bet_override: Optional[float]):
+        """Execute immediate next-window buy."""
+        try:
+            # Extract direction from signal
+            if "UP" in signal:
+                direction = "UP"
+            elif "DOWN" in signal:
+                direction = "DOWN"
+            else:
+                raise ValueError(f"Invalid signal for next-now: {signal}")
+
+            # Get next window tokens
+            up_token = self.state.next_up_token
+            down_token = self.state.next_down_token
+            if not up_token or not down_token:
+                self.dashboard.manual_buy_live_status = "blocked: next tokens not ready"
+                logger.warning("Cannot execute next-now buy: next tokens not available")
+                return
+
+            # Get current prices
+            up_price = float(up_token.last_price or 0.0)
+            down_price = float(down_token.last_price or 0.0)
+            if up_price <= 0.0 and down_price <= 0.0:
+                self.dashboard.manual_buy_live_status = "blocked: no live prices for next window"
+                logger.warning("Cannot execute next-now buy: no live prices")
+                return
+
+            # Select token to buy
+            if direction == "UP":
+                token_to_buy = up_token
+            else:
+                token_to_buy = down_token
+
+            # Determine amount
+            amount_usd = bet_override if bet_override and bet_override > 0 else self.config.entry.bet_amount_usd
+            
+            # Create execution config for next window buy
+            exec_config = ExecutionConfig(
+                bet_amount_usd=amount_usd,
+                price_offset=self.config.entry.price_offset,
+                max_retries=self.config.entry.max_retries,
+                retry_delay_ms=self.config.entry.retry_delay_ms,
+                fill_timeout_ms=self.config.entry.fill_timeout_ms,
+                min_contracts=1,  # Allow even 1 contract for manual next-window buys
+                min_order_usd=self.config.entry.min_order_usd,
+                max_entry_price=self.config.entry.max_entry_price
+            )
+            
+            # Execute the buy immediately
+            self.dashboard.manual_buy_live_status = f"buying next {direction} NOW: ${amount_usd:.2f}"
+            logger.info(
+                f"Executing immediate next-window buy: {direction} ${amount_usd:.2f} "
+                f"token_id={token_to_buy.token_id} price={token_to_buy.best_ask:.4f}"
+            )
+            
+            result = await self.executor.execute_entry(
+                token_id=token_to_buy.token_id,
+                config=exec_config,
+                websocket_price=token_to_buy.best_ask
+            )
+            
+            if result.success:
+                self.dashboard.manual_buy_live_status = f"sent: bought next {direction} NOW"
+                logger.info(
+                    f"Next-now buy executed successfully: {direction} "
+                    f"contracts={result.contracts_filled} price={result.avg_price:.4f}"
+                )
+            else:
+                error_msg = result.error or "Unknown error"
+                self.dashboard.manual_buy_live_status = f"error: next buy failed - {error_msg}"
+                logger.error(f"Next-now buy failed: {error_msg}")
+                
+        except Exception as e:
+            self.dashboard.manual_buy_live_status = f"error: next buy exception - {str(e)[:50]}"
+            logger.error(f"Next-now buy exception: {e}")
+            signal_logger.error(f"NEXT_NOW BUY ERROR: {e}")
 
     async def _safe_execute_manual_sell(self):
         """Execute manual sell in separate task with error handling."""
