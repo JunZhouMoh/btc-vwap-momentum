@@ -341,6 +341,27 @@ _HTML = """<!DOCTYPE html>
     function manualBuyNextUp(){ manualBuyNextWithDirection('UP'); }
     function manualBuyNextDown(){ manualBuyNextWithDirection('DOWN'); }
 
+    function manualBuyNextNowWithDirection(direction){
+      var status=document.getElementById('buyStatus');
+      var amount=readNum('buyAmount',0);
+      if(!(amount>0)){
+        if(status) status.textContent='Amount must be > 0';
+        return;
+      }
+      if(status) status.textContent='Buying next window NOW...';
+      requestJson('POST','/api/manual-buy-next-now',{amount_usd:amount,direction:direction},function(resp){
+        if(!status) return;
+        if(resp&&resp.ok===false){
+          status.textContent=String(resp.error||'Request failed');
+          return;
+        }
+        status.textContent=String((resp&&resp.message)||('Bought next '+direction+' NOW'));
+      });
+    }
+
+    function manualBuyNextNowUp(){ manualBuyNextNowWithDirection('UP'); }
+    function manualBuyNextNowDown(){ manualBuyNextNowWithDirection('DOWN'); }
+
     function manualSell(){
       var status=document.getElementById('buyStatus');
       if(status) status.textContent='Submitting sell...';
@@ -414,7 +435,7 @@ _HTML = """<!DOCTYPE html>
             'Current: UP '+esc(upPrice)+' | DOWN '+esc(downPrice),
             'Next window: UP '+esc(nextUpPrice)+' | DOWN '+esc(nextDownPrice),
             'Next queued: '+esc(nextPendingText),
-            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">UP</button> <button class="btn secondary" onclick="manualBuyDown()">DOWN</button> <button class="btn secondary" onclick="manualBuyNextUp()">NEXT UP</button> <button class="btn secondary" onclick="manualBuyNextDown()">NEXT DOWN</button> <button class="btn secondary" onclick="manualSell()">SELL</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
+            '<span>Amount $ <input type="number" id="buyAmount" min="0.1" step="0.1" value="'+esc(buyAmountVal)+'" style="width:86px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> <button class="btn secondary" onclick="setBuyAmount(39)">$39</button> <button class="btn secondary" onclick="setBuyAmount(49)">$49</button> <button class="btn secondary" onclick="setBuyAmount(99)">$99</button> <button class="btn" onclick="manualBuyUp()">UP</button> <button class="btn secondary" onclick="manualBuyDown()">DOWN</button> <button class="btn secondary" onclick="manualBuyNextUp()">NEXT UP</button> <button class="btn secondary" onclick="manualBuyNextDown()">NEXT DOWN</button> <button class="btn secondary" style="background:#1f6feb80" onclick="manualBuyNextNowUp()">NOW UP</button> <button class="btn secondary" style="background:#1f6feb80" onclick="manualBuyNextNowDown()">NOW DOWN</button> <button class="btn secondary" onclick="manualSell()">SELL</button> <span id="buyStatus" class="status">'+esc(buyStatusVal)+'</span></span>'
           ].join('<br/>');
           setHtmlIfChanged('session','session',sessionHtml);
 
@@ -670,6 +691,14 @@ def build_app(
       if not trigger_manual_buy_next:
         return JSONResponse({"ok": False, "error": "Next-window manual buy is not enabled"})
       return JSONResponse(_sanitize_for_json(trigger_manual_buy_next(payload or {})))
+
+    @app.post("/api/manual-buy-next-now")
+    async def api_manual_buy_next_now(payload: Dict[str, Any] = Body(default={})):
+      if not trigger_manual_buy_next:
+        return JSONResponse({"ok": False, "error": "Next-window manual buy is not enabled"})
+      payload_copy = dict(payload or {})
+      payload_copy["_buy_next_now"] = True
+      return JSONResponse(_sanitize_for_json(trigger_manual_buy_next(payload_copy)))
 
     @app.post("/api/manual-sell")
     async def api_manual_sell(payload: Dict[str, Any] = Body(default={})):
