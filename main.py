@@ -4089,6 +4089,7 @@ class LiveTradingBot:
         self._streak_last_notified_count: int = 0
         self._streak_end_counts: Dict[str, int] = {}
         self._manual_buy_next_payload: Optional[Dict[str, Any]] = None
+        self._next_window_filled_position: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def _streak_end_key(direction: str, streak_len: int) -> Optional[str]:
@@ -4162,6 +4163,81 @@ class LiveTradingBot:
         self._manual_buy_next_payload = None
         logger.info(
             f"Activated next-window manual buy: {signal} amount=${amount_usd:.2f} market={self.state.slug}"
+        )
+
+    def _activate_next_window_filled_position_if_any(self) -> None:
+        """Promote a previously bought next-window fill to current tracked position on rollover."""
+        pending = self._next_window_filled_position
+        if not pending:
+            return
+
+        target_slug = str(pending.get("target_slug", "") or "")
+        current_slug = str(self.state.slug or "")
+        if target_slug and current_slug and target_slug != current_slug:
+            return
+
+        direction = str(pending.get("direction", "") or "").upper()
+        entry_price = float(pending.get("entry_price", 0.0) or 0.0)
+        contracts = int(float(pending.get("contracts", 0) or 0))
+        if direction not in {"UP", "DOWN"} or entry_price <= 0.0 or contracts <= 0:
+            logger.warning(
+                "Dropping invalid next-window promoted fill: direction=%s contracts=%s entry_price=%s",
+                direction,
+                contracts,
+                entry_price,
+            )
+            self._next_window_filled_position = None
+            return
+
+        if not self.state.up_token or not self.state.down_token:
+            logger.warning("Cannot promote next-window fill: current market tokens unavailable")
+            return
+
+        if self.stats.position is not None:
+            logger.warning(
+                "Skipping next-window fill promotion because a position already exists: %s",
+                self.stats.position.token_name,
+            )
+            self._next_window_filled_position = None
+            return
+
+        if direction == "UP":
+            token = self.state.up_token
+            opposite = self.state.down_token
+        else:
+            token = self.state.down_token
+            opposite = self.state.up_token
+
+        btc_entry = float(pending.get("btc_price_at_entry", 0.0) or 0.0)
+        btc_anchor = float(pending.get("btc_anchor_at_entry", 0.0) or 0.0)
+
+        self.stats.record_entry(
+            token_name=direction,
+            token_id=token.token_id,
+            opposite_token_id=opposite.token_id,
+            price=entry_price,
+            contracts=contracts,
+            market_slug=self.state.slug,
+            btc_price_at_entry=btc_entry,
+            btc_anchor_at_entry=btc_anchor,
+            entry_mode="manual_next_now",
+        )
+        self._simulation_log_entry(
+            direction,
+            entry_price,
+            contracts,
+            float(contracts) * entry_price,
+        )
+        self.dashboard.manual_buy_live_status = (
+            f"active: next-window {direction} promoted to current window"
+        )
+        self._next_window_filled_position = None
+        logger.info(
+            "Promoted next-window fill to active position: direction=%s contracts=%s entry=%.4f market=%s",
+            direction,
+            contracts,
+            entry_price,
+            self.state.slug,
         )
 
     def _web_get_indicator_controls(self) -> Dict[str, Any]:
@@ -5241,6 +5317,7 @@ class LiveTradingBot:
         
         self.stats.new_market(self.state.slug)
         self._activate_next_window_manual_buy_if_any()
+        self._activate_next_window_filled_position_if_any()
         self.hedge_mgr.clear()  # Reset hedge state for new market
         if self.user_ws:
             self.user_ws.clear_token_fills()  # Reset WS fill buffer for new market
@@ -6696,6 +6773,15 @@ class LiveTradingBot:
             
             if result.success:
                 self.dashboard.manual_buy_live_status = f"sent: bought next {direction} NOW"
+                self._next_window_filled_position = {
+                    "direction": direction,
+                    "contracts": int(float(result.contracts_filled or 0)),
+                    "entry_price": float(result.avg_price or 0.0),
+                    "target_slug": str(self.state.next_slug or ""),
+                    "btc_price_at_entry": float(self.state.btc_current_price or 0.0),
+                    "btc_anchor_at_entry": float(self.state.btc_anchor_price or 0.0),
+                    "timestamp": time.time(),
+                }
                 self.dashboard.next_window_order_result = {
                     "status": "success",
                     "direction": direction,
