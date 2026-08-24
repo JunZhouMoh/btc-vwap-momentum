@@ -92,6 +92,7 @@ CRYPTO_PRICE_API = "https://polymarket.com/api/crypto/crypto-price"
 WSS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 CHAINLINK_RTDS_URL = "wss://ws-live-data.polymarket.com"
 BINANCE_BTC_WSS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+STREAK_END_LOOKBACK_SEC = 6 * 60 * 60
 
 console = Console()
 
@@ -4087,7 +4088,7 @@ class LiveTradingBot:
         self._streak_count: int = 0
         self._streak_last_counted_slug: str = ""
         self._streak_last_notified_count: int = 0
-        self._streak_end_counts: Dict[str, int] = {}
+        self._streak_end_events: deque = deque()
         self._manual_buy_next_payload: Optional[Dict[str, Any]] = None
         self._next_window_filled_position: Optional[Dict[str, Any]] = None
 
@@ -4104,15 +4105,28 @@ class LiveTradingBot:
             return None
         return f"{d}_{ln}"
 
-    def _record_streak_end(self, direction: str, streak_len: int) -> None:
+    def _prune_streak_end_events(self, now_ts: Optional[float] = None) -> None:
+        now_v = float(now_ts if now_ts is not None else time.time())
+        cutoff = now_v - STREAK_END_LOOKBACK_SEC
+        while self._streak_end_events and float(self._streak_end_events[0][0]) < cutoff:
+            self._streak_end_events.popleft()
+
+    def _record_streak_end(self, direction: str, streak_len: int, event_ts: Optional[float] = None) -> None:
         key = self._streak_end_key(direction, streak_len)
         if not key:
             return
-        self._streak_end_counts[key] = int(self._streak_end_counts.get(key, 0)) + 1
+        ts_v = float(event_ts if event_ts is not None else time.time())
+        self._streak_end_events.append((ts_v, key))
+        self._prune_streak_end_events(ts_v)
 
     def _serialize_streak_end_counts(self) -> List[Dict[str, Any]]:
+        self._prune_streak_end_events()
+        end_counts: Dict[str, int] = {}
+        for _, key in self._streak_end_events:
+            end_counts[key] = int(end_counts.get(key, 0)) + 1
+
         rows: List[Dict[str, Any]] = []
-        for key, ended_count in self._streak_end_counts.items():
+        for key, ended_count in end_counts.items():
             try:
                 direction, raw_len = key.split("_", 1)
                 streak_len = int(raw_len)
@@ -4552,7 +4566,7 @@ class LiveTradingBot:
         direction = ""
         streak = 0
         last_slug = ""
-        self._streak_end_counts = {}
+        self._streak_end_events = deque()
 
         seen_market_dirs: List[Tuple[float, str, str]] = []
         for t in sorted(self.stats.trades, key=lambda r: float(getattr(r, "timestamp", 0.0) or 0.0)):
@@ -4564,15 +4578,17 @@ class LiveTradingBot:
                 continue
             seen_market_dirs.append((float(getattr(t, "timestamp", 0.0) or 0.0), token, slug))
 
-        for _, token, slug in seen_market_dirs:
+        for ts, token, slug in seen_market_dirs:
             if token == direction:
                 streak += 1
             else:
                 if direction in {"UP", "DOWN"} and streak > 0:
-                    self._record_streak_end(direction, streak)
+                    self._record_streak_end(direction, streak, event_ts=float(ts))
                 direction = token
                 streak = 1
             last_slug = slug
+
+        self._prune_streak_end_events()
 
         self._streak_direction = direction
         self._streak_count = int(streak)
