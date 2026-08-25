@@ -28,7 +28,7 @@
       "max_price": 0.96
     },
     "late_entry_modes": {
-      "enabled": true,
+      "enabled": false,
       "mode_20s": {
         "buffer_avg_multiplier": 1,
         "min_buffer_threshold_usd": 20
