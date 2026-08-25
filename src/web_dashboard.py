@@ -191,7 +191,9 @@ _HTML = """<!DOCTYPE html>
       var s=streakAlertCfg||{};
       var h=[];
       var runTxt='none';
-      if(s.current_streak>0&&s.current_direction){ runTxt=s.current_streak+'x '+s.current_direction; }
+      var cs=parseInt(s.current_streak)||0;
+      var cd=String(s.current_direction||'').trim();
+      if(cs>0&&cd){ runTxt=cs+'x '+cd; }
       h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="sa_enabled" '+(s.enabled?'checked':'')+'/></div>');
       h.push('<div class="row"><label>Current Run</label><span id="sa_current_run">'+esc(runTxt)+'</span></div>');
       h.push('<div class="row"><label>Min Streak</label><input type="number" id="sa_min_streak" step="1" min="2" value="'+esc(s.min_streak!=null?s.min_streak:3)+'"/></div>');
@@ -496,12 +498,27 @@ _HTML = """<!DOCTYPE html>
 
           var streakEnds=(d.streak_end_counts&&d.streak_end_counts.length)?d.streak_end_counts:[];
           var streakEndLines=[];
+          var summaryData=null;
           for(var sei=0;sei<streakEnds.length;sei++){
             var row=streakEnds[sei]||{};
+            if(row._summary){
+              summaryData=row.by_length||[];
+              continue;
+            }
             var lenVal=(row.length!=null)?String(row.length):'\u2014';
             var dirVal=row.direction?String(row.direction):'?';
             var cntVal=(row.ended_count!=null)?String(row.ended_count):'0';
             streakEndLines.push(esc(lenVal+'x '+dirVal+' ended: '+cntVal));
+          }
+          if(summaryData&&summaryData.length){
+            streakEndLines.push('---');
+            for(var ssi=0;ssi<summaryData.length;ssi++){
+              var srow=summaryData[ssi]||{};
+              var slLen=(srow.length!=null)?String(srow.length):'\u2014';
+              var slTotal=(srow.total_ends!=null)?String(srow.total_ends):'0';
+              var slPct=(srow.pct!=null)?String(srow.pct):'0';
+              streakEndLines.push(esc(slLen+'x: '+slTotal+' ('+slPct+'%)'));
+            }
           }
           var streakEndsHtml=streakEndLines.length?streakEndLines.join('<br/>'):'No streak endings yet';
           setHtmlIfChanged('streakEnds','streakEnds',streakEndsHtml);
