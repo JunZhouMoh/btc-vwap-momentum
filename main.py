@@ -4140,7 +4140,28 @@ class LiveTradingBot:
                 }
             )
         rows.sort(key=lambda r: (int(r.get("length", 0)), str(r.get("direction", ""))))
-        return rows
+        
+        # Add percentage summary by streak length (ignoring direction)
+        length_counts: Dict[int, int] = {}
+        total_ends = 0
+        for row in rows:
+            length = int(row.get("length", 0))
+            count = int(row.get("ended_count", 0))
+            length_counts[length] = length_counts.get(length, 0) + count
+            total_ends += count
+        
+        summary: List[Dict[str, Any]] = []
+        if total_ends > 0:
+            for length in sorted(length_counts.keys()):
+                count = length_counts[length]
+                pct = (count / total_ends) * 100
+                summary.append({
+                    "length": length,
+                    "total_ends": count,
+                    "pct": round(pct, 1),
+                })
+        
+        return rows + [{"_summary": True, "by_length": summary}]
 
     def _get_manual_buy_next_state(self) -> Dict[str, Any]:
         payload = self._manual_buy_next_payload or {}
