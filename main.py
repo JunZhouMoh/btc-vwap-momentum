@@ -4122,8 +4122,15 @@ class LiveTradingBot:
     def _serialize_streak_end_counts(self) -> List[Dict[str, Any]]:
         self._prune_streak_end_events()
         end_counts: Dict[str, int] = {}
+        sequence: List[int] = []
         for _, key in self._streak_end_events:
             end_counts[key] = int(end_counts.get(key, 0)) + 1
+            try:
+                direction, raw_len = key.split("_", 1)
+                streak_len = int(raw_len)
+                sequence.append(streak_len)
+            except (TypeError, ValueError):
+                pass
 
         rows: List[Dict[str, Any]] = []
         for key, ended_count in end_counts.items():
@@ -4161,7 +4168,9 @@ class LiveTradingBot:
                     "pct": round(pct, 1),
                 })
         
-        return rows + [{"_summary": True, "by_length": summary}]
+        # Add sequence as a special entry
+        sequence_str = "".join(str(l) for l in sequence)
+        return rows + [{"_summary": True, "by_length": summary, "sequence": sequence_str}]
 
     def _get_manual_buy_next_state(self) -> Dict[str, Any]:
         payload = self._manual_buy_next_payload or {}
