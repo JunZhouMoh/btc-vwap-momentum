@@ -499,16 +499,21 @@ _HTML = """<!DOCTYPE html>
           var streakEnds=(d.streak_end_counts&&d.streak_end_counts.length)?d.streak_end_counts:[];
           var streakEndLines=[];
           var summaryData=null;
+          var sequenceData='';
           for(var sei=0;sei<streakEnds.length;sei++){
             var row=streakEnds[sei]||{};
             if(row._summary){
               summaryData=row.by_length||[];
+              sequenceData=row.sequence||'';
               continue;
             }
             var lenVal=(row.length!=null)?String(row.length):'\u2014';
             var dirVal=row.direction?String(row.direction):'?';
             var cntVal=(row.ended_count!=null)?String(row.ended_count):'0';
             streakEndLines.push(esc(lenVal+'x '+dirVal+' ended: '+cntVal));
+          }
+          if(sequenceData){
+            streakEndLines.push('Sequence: '+esc(sequenceData));
           }
           if(summaryData&&summaryData.length){
             streakEndLines.push('---');
