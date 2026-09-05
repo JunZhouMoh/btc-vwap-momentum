@@ -4926,30 +4926,34 @@ class LiveTradingBot:
         """Check for streak reversal buy signals based on active streak."""
         srb = getattr(self.config, "streak_reversal_bot", None)
         if not srb or not bool(getattr(srb, "enabled", False)):
+            logger.info(f"[SRB] Bot disabled or not configured")
             return
 
         market_slug = str(self.state.slug or "").strip()
         if not market_slug or market_slug == self._streak_reversal_bot_last_trigger_slug:
+            logger.debug(f"[SRB] Already triggered for this market: {market_slug}")
             return
 
         # Check current ACTIVE streak using bot's own tracking (NOT web snapshot state)
         current_streak_direction = str(self._streak_direction or "").strip().upper()
         current_streak_length = int(self._streak_count or 0)
         
+        logger.info(f"[SRB] Checking market {market_slug}: streak={current_streak_length}x {current_streak_direction}")
+        
         if current_streak_direction not in {"UP", "DOWN"}:
-            logger.debug(f"[SRB] No active direction streak (current: {current_streak_direction})")
+            logger.info(f"[SRB] Invalid/empty streak direction: '{current_streak_direction}'")
             return
         
         min_streak_len = int(max(1, int(getattr(srb, "min_streak_length", 3) or 3)))
         
         # Check if current active streak has reached minimum length
         if current_streak_length < min_streak_len:
-            logger.debug(f"[SRB] Active streak too short: {current_streak_length}x {current_streak_direction} < {min_streak_len}")
+            logger.info(f"[SRB] Streak too short: {current_streak_length}x < {min_streak_len}x")
             return
 
         pairs = getattr(srb, "time_left_price_pairs", []) or []
         if not pairs:
-            logger.debug(f"[SRB] No time_left_price_pairs configured")
+            logger.info(f"[SRB] No time_left_price_pairs configured")
             return
 
         # Get current time left
@@ -4968,23 +4972,23 @@ class LiveTradingBot:
                 break
 
         if matching_price is None:
-            logger.debug(f"[SRB] No matching time_left window (current: {time_left:.1f}s, configured: {[int(p.get('time_left_sec', 0)) for p in pairs]})")
+            logger.info(f"[SRB] No matching time window: time_left={time_left:.1f}s vs pairs={[p.get('time_left_sec', 0) for p in pairs]}")
             return
 
         # Get current favorite price
         fav = self._get_favorite_price_snapshot()
         if not fav:
-            logger.debug(f"[SRB] No favorite price snapshot")
+            logger.info(f"[SRB] No favorite price available")
             return
 
         fav_price = float(fav["price"])
         if not (0.0 <= fav_price <= 1.0):
-            logger.debug(f"[SRB] Favorite price out of range: {fav_price}")
+            logger.info(f"[SRB] Price out of range: {fav_price}")
             return
 
         # Check if price is below the buy threshold
         if fav_price > matching_price:
-            logger.debug(f"[SRB] Price too high: {fav_price:.4f} > {matching_price:.4f}")
+            logger.info(f"[SRB] Price too high to buy: {fav_price:.4f} > {matching_price:.4f}")
             return
 
         # All conditions met! Buy the opposite of current streak
@@ -5000,8 +5004,8 @@ class LiveTradingBot:
         signal = f"BUY_{opposite_direction}"
         self.dashboard.manual_signal_pending = f"{signal}|amount={buy_amount_usd:.8f}"
         
-        logger.info(f"[SRB] Triggered: Active streak {current_streak_length}x {current_streak_direction} reached min ({min_streak_len}) → BUY {opposite_direction} | "
-                    f"price={fav_price:.4f} <= {matching_price:.4f} | time_left={time_left:.1f}s")
+        logger.info(f"[SRB] ✓ TRIGGERED: {current_streak_length}x {current_streak_direction} → BUY {opposite_direction} (${buy_amount_usd:.2f})")
+        logger.info(f"[SRB] Conditions met: price {fav_price:.4f} ≤ {matching_price:.4f}, time_left {time_left:.1f}s")
         self.dashboard.manual_buy_live_status = f"queued (auto): {signal} ${buy_amount_usd:.2f}"
 
     def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
