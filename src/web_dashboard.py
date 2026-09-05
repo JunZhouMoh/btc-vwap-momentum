@@ -523,6 +523,10 @@ _HTML = """<!DOCTYPE html>
           var currMin=(typeof btcNow.current_window_min_usd==='number'&&!isNaN(btcNow.current_window_min_usd))?numFmtSigned(btcNow.current_window_min_usd,2):'\u2014';
           var currMax=(typeof btcNow.current_window_max_usd==='number'&&!isNaN(btcNow.current_window_max_usd))?numFmtSigned(btcNow.current_window_max_usd,2):'\u2014';
           strategyBits.push('Current BTC move min/max: $'+esc(currMin)+' / $'+esc(currMax));
+          var currentStreakText='none';
+          var ds=btcNow.direction_streak||{};
+          if(ds.length>0&&ds.direction){ currentStreakText=ds.length+'x '+ds.direction; }
+          strategyBits.push('Current Streak: '+esc(currentStreakText));
           var vs=st.volume_speed||null;
           if(vs){
             var buyDiff=(vs.curr_diff_buy!=null&&typeof vs.curr_diff_buy==='number'&&!isNaN(vs.curr_diff_buy))?numFmtSigned(vs.curr_diff_buy,0):'\u2014';
