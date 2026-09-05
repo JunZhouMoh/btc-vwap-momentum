@@ -4600,17 +4600,24 @@ class LiveTradingBot:
                 return {
                     "enabled": False,
                     "min_streak_length": 3,
+                    "buy_amount_usd": 50.0,
                     "time_left_price_pairs": [
-                        {"time_left_sec": 300, "buy_price": 0.45},
-                        {"time_left_sec": 150, "buy_price": 0.50},
-                        {"time_left_sec": 60, "buy_price": 0.55},
+                        {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
+                        {"time_left_sec": 150, "buy_price": 0.50, "enabled": True},
+                        {"time_left_sec": 60, "buy_price": 0.55, "enabled": True},
                     ],
                     "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
                 }
+            pairs = getattr(srb, "time_left_price_pairs", []) or []
+            # Ensure enabled field is present for all pairs
+            for pair in pairs:
+                if "enabled" not in pair:
+                    pair["enabled"] = True
             return {
                 "enabled": bool(getattr(srb, "enabled", False)),
                 "min_streak_length": int(max(1, int(getattr(srb, "min_streak_length", 3) or 3))),
-                "time_left_price_pairs": getattr(srb, "time_left_price_pairs", []) or [],
+                "buy_amount_usd": float(getattr(srb, "buy_amount_usd", 50.0) or 50.0),
+                "time_left_price_pairs": pairs,
                 "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
             }
         except Exception:
@@ -4618,6 +4625,7 @@ class LiveTradingBot:
             return {
                 "enabled": False,
                 "min_streak_length": 3,
+                "buy_amount_usd": 50.0,
                 "time_left_price_pairs": [],
                 "timer_bot_ready": False,
             }
@@ -4642,6 +4650,12 @@ class LiveTradingBot:
                     except (TypeError, ValueError):
                         pass
                 
+                if "buy_amount_usd" in payload:
+                    try:
+                        srb.buy_amount_usd = max(0.1, float(payload.get("buy_amount_usd")))
+                    except (TypeError, ValueError):
+                        pass
+                
                 if "time_left_price_pairs" in payload:
                     pairs_raw = payload.get("time_left_price_pairs", [])
                     if isinstance(pairs_raw, list):
@@ -4651,8 +4665,9 @@ class LiveTradingBot:
                                 if isinstance(pair, dict):
                                     t = int(pair.get("time_left_sec", 0))
                                     p = float(pair.get("buy_price", 0.5))
+                                    en = bool(pair.get("enabled", True))
                                     if t >= 0 and 0.0 <= p <= 1.0:
-                                        pairs.append({"time_left_sec": t, "buy_price": p})
+                                        pairs.append({"time_left_sec": t, "buy_price": p, "enabled": en})
                             except (TypeError, ValueError):
                                 pass
                         if pairs:
@@ -4928,6 +4943,8 @@ class LiveTradingBot:
         # Sort by time_left descending, use the first pair that matches (time_left >= pair.time_left_sec)
         matching_price = None
         for pair in sorted(pairs, key=lambda p: p.get("time_left_sec", 0), reverse=True):
+            if not bool(pair.get("enabled", True)):
+                continue
             pair_time_left = int(pair.get("time_left_sec", 0))
             pair_price = float(pair.get("buy_price", 0.5))
             if time_left >= pair_time_left:
