@@ -239,6 +239,7 @@ _HTML = """<!DOCTYPE html>
       var h=[];
       h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="srb_enabled" '+(sb.enabled?'checked':'')+'/></div>');
       h.push('<div class="row"><label>Min Streak Length</label><input type="number" id="srb_min_streak_length" step="1" min="1" value="'+esc(sb.min_streak_length!=null?sb.min_streak_length:3)+'"/></div>');
+      h.push('<div class="row"><label>Buy Amount (USD)</label><input type="number" id="srb_buy_amount_usd" step="0.1" min="0.1" value="'+esc(sb.buy_amount_usd!=null?sb.buy_amount_usd:50)+'"/></div>');
       h.push('<div class="row"><label>Time Left → Buy Price Pairs</label></div>');
       var pairs=sb.time_left_price_pairs||[];
       if(!pairs.length){ h.push('<div style="color:#8b949e;font-size:0.8rem">No pairs configured. Add one below.</div>'); }
@@ -279,6 +280,7 @@ _HTML = """<!DOCTYPE html>
       var payload={
         enabled:!!(document.getElementById('srb_enabled')&&document.getElementById('srb_enabled').checked),
         min_streak_length:readInt('srb_min_streak_length',sb.min_streak_length||3),
+        buy_amount_usd:readNum('srb_buy_amount_usd',sb.buy_amount_usd||50),
         time_left_price_pairs:pairs
       };
       requestJson('POST','/api/streak-reversal-bot',payload,function(resp){
