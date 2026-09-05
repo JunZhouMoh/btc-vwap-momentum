@@ -238,6 +238,7 @@ _HTML = """<!DOCTYPE html>
       var sb=streakReversalBotCfg||{};
       var h=[];
       h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="srb_enabled" '+(sb.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Current Streak</label><span id="srb_current_streak">—</span></div>');
       h.push('<div class="row"><label>Min Streak Length</label><input type="number" id="srb_min_streak_length" step="1" min="1" value="'+esc(sb.min_streak_length!=null?sb.min_streak_length:3)+'"/></div>');
       h.push('<div class="row"><label>Buy Amount (USD)</label><input type="number" id="srb_buy_amount_usd" step="0.1" min="0.1" value="'+esc(sb.buy_amount_usd!=null?sb.buy_amount_usd:50)+'"/></div>');
       h.push('<div class="row"><label>Time Left → Buy Price Pairs</label></div>');
@@ -557,6 +558,9 @@ _HTML = """<!DOCTYPE html>
 
           var saRun=document.getElementById('sa_current_run');
           if(saRun){ var ds=b.direction_streak||{}; saRun.textContent=(ds.length>0&&ds.direction)?(ds.length+'x '+ds.direction):'none'; }
+
+          var srbRun=document.getElementById('srb_current_streak');
+          if(srbRun){ var ds=b.direction_streak||{}; srbRun.textContent=(ds.length>0&&ds.direction)?(ds.length+'x '+ds.direction):'none'; }
 
           var streakEnds=(d.streak_end_counts&&d.streak_end_counts.length)?d.streak_end_counts:[];
           var streakEndLines=[];
