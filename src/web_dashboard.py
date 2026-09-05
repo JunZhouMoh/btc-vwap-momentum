@@ -69,6 +69,7 @@ _HTML = """<!DOCTYPE html>
     <!-- TEMPORARILY REMOVED: Volume Eval Mode -->
     <!-- <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalPanel" class="mono">Loading...</div></div> -->
     <div class="card controls"><h2>Telegram Streak Alert</h2><div id="streakAlertPanel" class="mono">Loading...</div></div>
+    <div class="card controls"><h2>Streak Reversal Buy Bot</h2><div id="streakReversalBotPanel" class="mono">Loading...</div></div>
     <div class="card"><h2>Streak End Counts</h2><div id="streakEnds" class="mono">Loading...</div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
@@ -84,6 +85,7 @@ _HTML = """<!DOCTYPE html>
     var modeCfg={late:null,volEval:null,volAccel:null};
   var timerAlertCfg=null;
   var streakAlertCfg=null;
+  var streakReversalBotCfg=null;
     window.latestModePerfData={};
     var pollTimer=null;
     var pollInFlight=false;
@@ -228,6 +230,61 @@ _HTML = """<!DOCTYPE html>
         streakAlertCfg=resp||payload;
         if(status) status.textContent='Applied';
         renderStreakAlertPanel();
+      });
+    }
+
+    function renderStreakReversalBotPanel(){
+      var box=document.getElementById('streakReversalBotPanel'); if(!box) return;
+      var sb=streakReversalBotCfg||{};
+      var h=[];
+      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="srb_enabled" '+(sb.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Min Streak Length</label><input type="number" id="srb_min_streak_length" step="1" min="1" value="'+esc(sb.min_streak_length!=null?sb.min_streak_length:3)+'"/></div>');
+      h.push('<div class="row"><label>Time Left → Buy Price Pairs</label></div>');
+      var pairs=sb.time_left_price_pairs||[];
+      if(!pairs.length){ h.push('<div style="color:#8b949e;font-size:0.8rem">No pairs configured. Add one below.</div>'); }
+      for(var pi=0;pi<Math.max(pairs.length,3);pi++){
+        var pair=pairs[pi]||{};
+        var t=pair.time_left_sec!=null?pair.time_left_sec:0;
+        var p=pair.buy_price!=null?pair.buy_price:0.5;
+        h.push('<div class="row"><input type="number" id="srb_time_left_'+pi+'" step="1" min="0" value="'+esc(t)+'" placeholder="time left (sec)" style="width:120px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> → <input type="number" id="srb_buy_price_'+pi+'" step="0.01" min="0" max="1" value="'+esc(p)+'" placeholder="buy price" style="width:100px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/></div>');
+      }
+      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveStreakReversalBotConfig()">Apply</button><button class="btn secondary" onclick="loadStreakReversalBotConfig()">Reload</button></div>');
+      h.push('<div id="streakReversalBotStatus" class="status"></div>');
+      box.innerHTML=h.join('<br/>');
+    }
+
+    function loadStreakReversalBotConfig(onDone){
+      requestJson('GET','/api/streak-reversal-bot',null,function(cfg){
+        streakReversalBotCfg=cfg||{};
+        renderStreakReversalBotPanel();
+        if(onDone) onDone(streakReversalBotCfg);
+      });
+    }
+
+    function saveStreakReversalBotConfig(){
+      var status=document.getElementById('streakReversalBotStatus'); if(status) status.textContent='Applying...';
+      var sb=streakReversalBotCfg||{};
+      var pairs=[];
+      for(var pi=0;pi<6;pi++){
+        var tEl=document.getElementById('srb_time_left_'+pi);
+        var pEl=document.getElementById('srb_buy_price_'+pi);
+        if(tEl&&pEl){
+          var t=parseInt(tEl.value,10);
+          var p=parseFloat(pEl.value);
+          if(!isNaN(t)&&!isNaN(p)&&t>=0&&p>=0&&p<=1){
+            pairs.push({time_left_sec:t,buy_price:p});
+          }
+        }
+      }
+      var payload={
+        enabled:!!(document.getElementById('srb_enabled')&&document.getElementById('srb_enabled').checked),
+        min_streak_length:readInt('srb_min_streak_length',sb.min_streak_length||3),
+        time_left_price_pairs:pairs
+      };
+      requestJson('POST','/api/streak-reversal-bot',payload,function(resp){
+        streakReversalBotCfg=resp||payload;
+        if(status) status.textContent='Applied';
+        renderStreakReversalBotPanel();
       });
     }
 
@@ -562,6 +619,7 @@ _HTML = """<!DOCTYPE html>
     // TEMPORARILY DISABLED: loadVolumeEvalConfig();
     loadTimerAlertConfig();
     loadStreakAlertConfig();
+    loadStreakReversalBotConfig();
     tick();
   </script>
 </body>
@@ -620,6 +678,8 @@ def build_app(
   update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_streak_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_streak_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_streak_reversal_bot: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_streak_reversal_bot: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy_next: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -704,6 +764,18 @@ def build_app(
         return JSONResponse(_sanitize_for_json(payload or {}))
       return JSONResponse(_sanitize_for_json(update_streak_alert(payload or {})))
 
+    @app.get("/api/streak-reversal-bot")
+    async def api_get_streak_reversal_bot():
+      if not get_streak_reversal_bot:
+        return JSONResponse({"enabled": False, "min_streak_length": 3, "time_left_price_pairs": []})
+      return JSONResponse(_sanitize_for_json(get_streak_reversal_bot()))
+
+    @app.post("/api/streak-reversal-bot")
+    async def api_update_streak_reversal_bot(payload: Dict[str, Any] = Body(default={})):
+      if not update_streak_reversal_bot:
+        return JSONResponse(_sanitize_for_json(payload or {}))
+      return JSONResponse(_sanitize_for_json(update_streak_reversal_bot(payload or {})))
+
     @app.post("/api/manual-buy")
     async def api_manual_buy(payload: Dict[str, Any] = Body(default={})):
       if not trigger_manual_buy:
@@ -759,6 +831,8 @@ def start_web_dashboard(
   update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_streak_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_streak_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+  get_streak_reversal_bot: Optional[Callable[[], Dict[str, Any]]] = None,
+  update_streak_reversal_bot: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy_next: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -781,6 +855,8 @@ def start_web_dashboard(
       update_timer_alert=update_timer_alert,
       get_streak_alert=get_streak_alert,
       update_streak_alert=update_streak_alert,
+      get_streak_reversal_bot=get_streak_reversal_bot,
+      update_streak_reversal_bot=update_streak_reversal_bot,
       trigger_manual_buy=trigger_manual_buy,
       trigger_manual_buy_next=trigger_manual_buy_next,
       trigger_manual_sell=trigger_manual_sell,
