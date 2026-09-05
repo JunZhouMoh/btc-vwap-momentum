@@ -4932,12 +4932,12 @@ class LiveTradingBot:
         if not market_slug or market_slug == self._streak_reversal_bot_last_trigger_slug:
             return
 
-        # Check current ACTIVE streak (not ended streaks)
-        direction_streak = getattr(self.state, "direction_streak", {})
-        current_streak_direction = str(direction_streak.get("direction", "")).strip().upper()
-        current_streak_length = int(direction_streak.get("length", 0) or 0)
+        # Check current ACTIVE streak using bot's own tracking (NOT web snapshot state)
+        current_streak_direction = str(self._streak_direction or "").strip().upper()
+        current_streak_length = int(self._streak_count or 0)
         
         if current_streak_direction not in {"UP", "DOWN"}:
+            logger.debug(f"[SRB] No active direction streak (current: {current_streak_direction})")
             return
         
         min_streak_len = int(max(1, int(getattr(srb, "min_streak_length", 3) or 3)))
@@ -5003,11 +5003,6 @@ class LiveTradingBot:
         logger.info(f"[SRB] Triggered: Active streak {current_streak_length}x {current_streak_direction} reached min ({min_streak_len}) → BUY {opposite_direction} | "
                     f"price={fav_price:.4f} <= {matching_price:.4f} | time_left={time_left:.1f}s")
         self.dashboard.manual_buy_live_status = f"queued (auto): {signal} ${buy_amount_usd:.2f}"
-        
-        logger.info(
-            "Streak reversal bot triggered | "
-            f"market={market_slug} | "
-            f"last_streak={last_ended_length}x {last_direction} | "
             f"buy_direction={opposite_direction} ${buy_amount_usd:.2f} | "
             f"price={fav_price:.3f} (threshold {matching_price:.3f}) | "
             f"time_left={time_left:.1f}s"
