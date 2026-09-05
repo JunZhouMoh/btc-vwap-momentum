@@ -5003,10 +5003,6 @@ class LiveTradingBot:
         logger.info(f"[SRB] Triggered: Active streak {current_streak_length}x {current_streak_direction} reached min ({min_streak_len}) → BUY {opposite_direction} | "
                     f"price={fav_price:.4f} <= {matching_price:.4f} | time_left={time_left:.1f}s")
         self.dashboard.manual_buy_live_status = f"queued (auto): {signal} ${buy_amount_usd:.2f}"
-            f"buy_direction={opposite_direction} ${buy_amount_usd:.2f} | "
-            f"price={fav_price:.3f} (threshold {matching_price:.3f}) | "
-            f"time_left={time_left:.1f}s"
-        )
 
     def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.running:
