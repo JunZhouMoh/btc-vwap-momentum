@@ -6636,7 +6636,10 @@ class LiveTradingBot:
                     live.update(self.dashboard.render())
                     if self._web_snapshot_holder:
                         web_state = self.dashboard.build_web_snapshot()
-                        web_state["direction_streak"] = {
+                        # Add direction_streak inside btc object so frontend can access it as d.btc.direction_streak
+                        if "btc" not in web_state:
+                            web_state["btc"] = {}
+                        web_state["btc"]["direction_streak"] = {
                             "direction": self._streak_direction,
                             "length": int(self._streak_count),
                         }
