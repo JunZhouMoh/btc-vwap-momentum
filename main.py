@@ -4912,7 +4912,7 @@ class LiveTradingBot:
             )
 
     async def _check_streak_reversal_bot(self) -> None:
-        """Check for streak reversal buy signals."""
+        """Check for streak reversal buy signals based on active streak."""
         srb = getattr(self.config, "streak_reversal_bot", None)
         if not srb or not bool(getattr(srb, "enabled", False)):
             return
@@ -4921,24 +4921,24 @@ class LiveTradingBot:
         if not market_slug or market_slug == self._streak_reversal_bot_last_trigger_slug:
             return
 
-        # Get streak end counts
-        streak_ends = self._serialize_streak_end_counts()
-        if not streak_ends:
+        # Check current ACTIVE streak (not ended streaks)
+        direction_streak = getattr(self.state, "direction_streak", {})
+        current_streak_direction = str(direction_streak.get("direction", "")).strip().upper()
+        current_streak_length = int(direction_streak.get("length", 0) or 0)
+        
+        if current_streak_direction not in {"UP", "DOWN"}:
             return
-
-        # Extract sequence from summary
-        sequence_str = ""
-        for row in streak_ends:
-            if row.get("_summary"):
-                sequence_str = str(row.get("sequence", ""))
-                break
-
-        if not sequence_str or len(sequence_str) < 1:
-            return
-
+        
         min_streak_len = int(max(1, int(getattr(srb, "min_streak_length", 3) or 3)))
+        
+        # Check if current active streak has reached minimum length
+        if current_streak_length < min_streak_len:
+            logger.debug(f"[SRB] Active streak too short: {current_streak_length}x {current_streak_direction} < {min_streak_len}")
+            return
+
         pairs = getattr(srb, "time_left_price_pairs", []) or []
         if not pairs:
+            logger.debug(f"[SRB] No time_left_price_pairs configured")
             return
 
         # Get current time left
@@ -4957,37 +4957,27 @@ class LiveTradingBot:
                 break
 
         if matching_price is None:
+            logger.debug(f"[SRB] No matching time_left window (current: {time_left:.1f}s, configured: {[int(p.get('time_left_sec', 0)) for p in pairs]})")
             return
 
         # Get current favorite price
         fav = self._get_favorite_price_snapshot()
         if not fav:
+            logger.debug(f"[SRB] No favorite price snapshot")
             return
 
         fav_price = float(fav["price"])
         if not (0.0 <= fav_price <= 1.0):
+            logger.debug(f"[SRB] Favorite price out of range: {fav_price}")
             return
 
         # Check if price is below the buy threshold
         if fav_price > matching_price:
+            logger.debug(f"[SRB] Price too high: {fav_price:.4f} > {matching_price:.4f}")
             return
 
-        # Get the last streak that ended
-        # The sequence contains the lengths of ended streaks in order
-        last_ended_length = int(sequence_str[-1]) if sequence_str else 0
-        if last_ended_length < min_streak_len:
-            return
-
-        # Determine opposite direction from the last ended streak
-        # If we have UP UP UP (3x UP), we buy DOWN
-        # Count the direction by looking at direction_streak
-        direction_streak = getattr(self.state, "direction_streak", {})
-        last_direction = str(direction_streak.get("direction", "")).strip().upper()
-        
-        if last_direction not in {"UP", "DOWN"}:
-            return
-
-        opposite_direction = "DOWN" if last_direction == "UP" else "UP"
+        # All conditions met! Buy the opposite of current streak
+        opposite_direction = "DOWN" if current_streak_direction == "UP" else "UP"
 
         # Queue manual buy with opposite direction
         self._streak_reversal_bot_last_trigger_slug = market_slug
@@ -4998,6 +4988,9 @@ class LiveTradingBot:
         # Queue the buy signal (same mechanism as manual buy)
         signal = f"BUY_{opposite_direction}"
         self.dashboard.manual_signal_pending = f"{signal}|amount={buy_amount_usd:.8f}"
+        
+        logger.info(f"[SRB] Triggered: Active streak {current_streak_length}x {current_streak_direction} reached min ({min_streak_len}) → BUY {opposite_direction} | "
+                    f"price={fav_price:.4f} <= {matching_price:.4f} | time_left={time_left:.1f}s")
         self.dashboard.manual_buy_live_status = f"queued (auto): {signal} ${buy_amount_usd:.2f}"
         
         logger.info(
