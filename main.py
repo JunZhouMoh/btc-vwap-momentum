@@ -4609,15 +4609,20 @@ class LiveTradingBot:
                     "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
                 }
             pairs = getattr(srb, "time_left_price_pairs", []) or []
-            # Ensure enabled field is present for all pairs
+            # Ensure all pairs have required fields with correct types
+            clean_pairs = []
             for pair in pairs:
-                if "enabled" not in pair:
-                    pair["enabled"] = True
+                if isinstance(pair, dict):
+                    clean_pairs.append({
+                        "time_left_sec": int(pair.get("time_left_sec", 0)),
+                        "buy_price": float(pair.get("buy_price", 0.5)),
+                        "enabled": bool(pair.get("enabled", True))
+                    })
             return {
                 "enabled": bool(getattr(srb, "enabled", False)),
                 "min_streak_length": int(max(1, int(getattr(srb, "min_streak_length", 3) or 3))),
                 "buy_amount_usd": float(getattr(srb, "buy_amount_usd", 50.0) or 50.0),
-                "time_left_price_pairs": pairs,
+                "time_left_price_pairs": clean_pairs,
                 "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
             }
         except Exception:
@@ -4670,8 +4675,8 @@ class LiveTradingBot:
                                         pairs.append({"time_left_sec": t, "buy_price": p, "enabled": en})
                             except (TypeError, ValueError):
                                 pass
-                        if pairs:
-                            srb.time_left_price_pairs = pairs
+                        # Always update, even if empty, to allow clearing pairs
+                        srb.time_left_price_pairs = pairs
         except Exception:
             logger.exception("Error updating streak_reversal_bot config")
         
