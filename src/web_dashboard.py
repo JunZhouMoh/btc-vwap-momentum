@@ -247,7 +247,8 @@ _HTML = """<!DOCTYPE html>
         var pair=pairs[pi]||{};
         var t=pair.time_left_sec!=null?pair.time_left_sec:0;
         var p=pair.buy_price!=null?pair.buy_price:0.5;
-        h.push('<div class="row"><input type="number" id="srb_time_left_'+pi+'" step="1" min="0" value="'+esc(t)+'" placeholder="time left (sec)" style="width:120px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> → <input type="number" id="srb_buy_price_'+pi+'" step="0.01" min="0" max="1" value="'+esc(p)+'" placeholder="buy price" style="width:100px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/></div>');
+        var en=pair.enabled!==false;
+        h.push('<div class="row"><input type="checkbox" id="srb_enabled_'+pi+'" '+(en?'checked':'')+' style="transform:scale(1.05)"/> <input type="number" id="srb_time_left_'+pi+'" step="1" min="0" value="'+esc(t)+'" placeholder="time left (sec)" style="width:120px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> → <input type="number" id="srb_buy_price_'+pi+'" step="0.01" min="0" max="1" value="'+esc(p)+'" placeholder="buy price" style="width:100px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/></div>');
       }
       h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveStreakReversalBotConfig()">Apply</button><button class="btn secondary" onclick="loadStreakReversalBotConfig()">Reload</button></div>');
       h.push('<div id="streakReversalBotStatus" class="status"></div>');
@@ -267,13 +268,15 @@ _HTML = """<!DOCTYPE html>
       var sb=streakReversalBotCfg||{};
       var pairs=[];
       for(var pi=0;pi<6;pi++){
+        var enEl=document.getElementById('srb_enabled_'+pi);
         var tEl=document.getElementById('srb_time_left_'+pi);
         var pEl=document.getElementById('srb_buy_price_'+pi);
         if(tEl&&pEl){
           var t=parseInt(tEl.value,10);
           var p=parseFloat(pEl.value);
+          var en=enEl?!!enEl.checked:true;
           if(!isNaN(t)&&!isNaN(p)&&t>=0&&p>=0&&p<=1){
-            pairs.push({time_left_sec:t,buy_price:p});
+            pairs.push({time_left_sec:t,buy_price:p,enabled:en});
           }
         }
       }
