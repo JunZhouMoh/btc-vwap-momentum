@@ -4967,14 +4967,22 @@ class LiveTradingBot:
 
         opposite_direction = "DOWN" if last_direction == "UP" else "UP"
 
-        # Trigger manual buy with opposite direction
+        # Queue manual buy with opposite direction
         self._streak_reversal_bot_last_trigger_slug = market_slug
+        
+        # Get configured buy amount
+        buy_amount_usd = float(getattr(srb, "buy_amount_usd", 50.0) or 50.0)
+        
+        # Queue the buy signal (same mechanism as manual buy)
+        signal = f"BUY_{opposite_direction}"
+        self.dashboard.manual_signal_pending = f"{signal}|amount={buy_amount_usd:.8f}"
+        self.dashboard.manual_buy_live_status = f"queued (auto): {signal} ${buy_amount_usd:.2f}"
         
         logger.info(
             "Streak reversal bot triggered | "
             f"market={market_slug} | "
             f"last_streak={last_ended_length}x {last_direction} | "
-            f"buy_direction={opposite_direction} | "
+            f"buy_direction={opposite_direction} ${buy_amount_usd:.2f} | "
             f"price={fav_price:.3f} (threshold {matching_price:.3f}) | "
             f"time_left={time_left:.1f}s"
         )
