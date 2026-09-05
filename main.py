@@ -6697,8 +6697,8 @@ class LiveTradingBot:
                     
                     # Check market end (быстрая операция - не выносим в task)
                     await self._check_timer_alert()
-                    await self._check_streak_reversal_bot()
                     await self.check_market_end()
+                    await self._check_streak_reversal_bot()
 
                     # Emit a lightweight heartbeat so platform logs show liveness continuously.
                     now = time.time()
