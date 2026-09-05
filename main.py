@@ -5193,6 +5193,20 @@ class LiveTradingBot:
                 console.print(f"[red]Config error: {err}[/red]")
             return False
 
+        # Initialize streak_reversal_bot config object if it doesn't exist
+        if not hasattr(self.config, "streak_reversal_bot"):
+            class StreakReversalBotConfig:
+                def __init__(self):
+                    self.enabled = False
+                    self.min_streak_length = 3
+                    self.buy_amount_usd = 50.0
+                    self.time_left_price_pairs = [
+                        {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
+                        {"time_left_sec": 150, "buy_price": 0.50, "enabled": True},
+                        {"time_left_sec": 60, "buy_price": 0.55, "enabled": True},
+                    ]
+            self.config.streak_reversal_bot = StreakReversalBotConfig()
+
         im = self.config.market.interval_minutes
         ##console.print(f"[bold cyan]🚀 BTC {im}-Min Live Trading Bot[/bold cyan]")
         if self.config.simulation.enabled:
