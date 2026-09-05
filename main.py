@@ -4091,6 +4091,7 @@ class LiveTradingBot:
         self._streak_end_events: deque = deque()
         self._manual_buy_next_payload: Optional[Dict[str, Any]] = None
         self._next_window_filled_position: Optional[Dict[str, Any]] = None
+        self._streak_reversal_bot_last_trigger_slug: str = ""  # Track last triggered market to avoid duplicates
 
     @staticmethod
     def _streak_end_key(direction: str, streak_len: int) -> Optional[str]:
@@ -4591,6 +4592,76 @@ class LiveTradingBot:
 
         return self._web_get_streak_alert()
 
+    def _web_get_streak_reversal_bot(self) -> Dict[str, Any]:
+        """Get streak reversal bot config for frontend."""
+        try:
+            srb = getattr(self.config, "streak_reversal_bot", None)
+            if not srb:
+                return {
+                    "enabled": False,
+                    "min_streak_length": 3,
+                    "time_left_price_pairs": [
+                        {"time_left_sec": 300, "buy_price": 0.45},
+                        {"time_left_sec": 150, "buy_price": 0.50},
+                        {"time_left_sec": 60, "buy_price": 0.55},
+                    ],
+                    "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
+                }
+            return {
+                "enabled": bool(getattr(srb, "enabled", False)),
+                "min_streak_length": int(max(1, int(getattr(srb, "min_streak_length", 3) or 3))),
+                "time_left_price_pairs": getattr(srb, "time_left_price_pairs", []) or [],
+                "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
+            }
+        except Exception:
+            logger.exception("Error getting streak_reversal_bot config")
+            return {
+                "enabled": False,
+                "min_streak_length": 3,
+                "time_left_price_pairs": [],
+                "timer_bot_ready": False,
+            }
+
+    def _web_update_streak_reversal_bot(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Update streak reversal bot config from frontend."""
+        try:
+            if not self.config:
+                return self._web_get_streak_reversal_bot()
+            
+            srb = getattr(self.config, "streak_reversal_bot", None)
+            if not srb:
+                return self._web_get_streak_reversal_bot()
+            
+            with self._config_lock:
+                if "enabled" in payload:
+                    srb.enabled = bool(payload.get("enabled"))
+                
+                if "min_streak_length" in payload:
+                    try:
+                        srb.min_streak_length = max(1, int(payload.get("min_streak_length")))
+                    except (TypeError, ValueError):
+                        pass
+                
+                if "time_left_price_pairs" in payload:
+                    pairs_raw = payload.get("time_left_price_pairs", [])
+                    if isinstance(pairs_raw, list):
+                        pairs = []
+                        for pair in pairs_raw:
+                            try:
+                                if isinstance(pair, dict):
+                                    t = int(pair.get("time_left_sec", 0))
+                                    p = float(pair.get("buy_price", 0.5))
+                                    if t >= 0 and 0.0 <= p <= 1.0:
+                                        pairs.append({"time_left_sec": t, "buy_price": p})
+                            except (TypeError, ValueError):
+                                pass
+                        if pairs:
+                            srb.time_left_price_pairs = pairs
+        except Exception:
+            logger.exception("Error updating streak_reversal_bot config")
+        
+        return self._web_get_streak_reversal_bot()
+
     def _rebuild_direction_streak_from_history(self) -> None:
         """Rebuild UP/DOWN streak from completed trades for startup visibility."""
         direction = ""
@@ -4819,6 +4890,94 @@ class LiveTradingBot:
                 "Timer alert send failed | "
                 f"market={market_slug} | left={time_left:.1f}s | fav={fav['favorite']} | price={fav_price:.4f}"
             )
+
+    async def _check_streak_reversal_bot(self) -> None:
+        """Check for streak reversal buy signals."""
+        srb = getattr(self.config, "streak_reversal_bot", None)
+        if not srb or not bool(getattr(srb, "enabled", False)):
+            return
+
+        market_slug = str(self.state.slug or "").strip()
+        if not market_slug or market_slug == self._streak_reversal_bot_last_trigger_slug:
+            return
+
+        # Get streak end counts
+        streak_ends = self._serialize_streak_end_counts()
+        if not streak_ends:
+            return
+
+        # Extract sequence from summary
+        sequence_str = ""
+        for row in streak_ends:
+            if row.get("_summary"):
+                sequence_str = str(row.get("sequence", ""))
+                break
+
+        if not sequence_str or len(sequence_str) < 1:
+            return
+
+        min_streak_len = int(max(1, int(getattr(srb, "min_streak_length", 3) or 3)))
+        pairs = getattr(srb, "time_left_price_pairs", []) or []
+        if not pairs:
+            return
+
+        # Get current time left
+        time_left = max(0.0, self.state.end_time - time.time())
+        
+        # Find the matching buy price for current time_left
+        # Sort by time_left descending, use the first pair that matches (time_left >= pair.time_left_sec)
+        matching_price = None
+        for pair in sorted(pairs, key=lambda p: p.get("time_left_sec", 0), reverse=True):
+            pair_time_left = int(pair.get("time_left_sec", 0))
+            pair_price = float(pair.get("buy_price", 0.5))
+            if time_left >= pair_time_left:
+                matching_price = pair_price
+                break
+
+        if matching_price is None:
+            return
+
+        # Get current favorite price
+        fav = self._get_favorite_price_snapshot()
+        if not fav:
+            return
+
+        fav_price = float(fav["price"])
+        if not (0.0 <= fav_price <= 1.0):
+            return
+
+        # Check if price is below the buy threshold
+        if fav_price > matching_price:
+            return
+
+        # Get the last streak that ended
+        # The sequence contains the lengths of ended streaks in order
+        last_ended_length = int(sequence_str[-1]) if sequence_str else 0
+        if last_ended_length < min_streak_len:
+            return
+
+        # Determine opposite direction from the last ended streak
+        # If we have UP UP UP (3x UP), we buy DOWN
+        # Count the direction by looking at direction_streak
+        direction_streak = getattr(self.state, "direction_streak", {})
+        last_direction = str(direction_streak.get("direction", "")).strip().upper()
+        
+        if last_direction not in {"UP", "DOWN"}:
+            return
+
+        opposite_direction = "DOWN" if last_direction == "UP" else "UP"
+
+        # Trigger manual buy with opposite direction
+        self._streak_reversal_bot_last_trigger_slug = market_slug
+        
+        logger.info(
+            "Streak reversal bot triggered | "
+            f"market={market_slug} | "
+            f"last_streak={last_ended_length}x {last_direction} | "
+            f"buy_direction={opposite_direction} | "
+            f"price={fav_price:.3f} (threshold {matching_price:.3f}) | "
+            f"time_left={time_left:.1f}s"
+        )
 
     def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.running:
@@ -5222,6 +5381,8 @@ class LiveTradingBot:
                 update_timer_alert=self._web_update_timer_alert,
                 get_streak_alert=self._web_get_streak_alert,
                 update_streak_alert=self._web_update_streak_alert,
+                get_streak_reversal_bot=self._web_get_streak_reversal_bot,
+                update_streak_reversal_bot=self._web_update_streak_reversal_bot,
                 trigger_manual_buy=self._web_trigger_manual_buy,
                 trigger_manual_buy_next=self._web_trigger_manual_buy_next,
                 trigger_manual_sell=self._web_trigger_manual_sell,
@@ -6493,6 +6654,7 @@ class LiveTradingBot:
                     
                     # Check market end (быстрая операция - не выносим в task)
                     await self._check_timer_alert()
+                    await self._check_streak_reversal_bot()
                     await self.check_market_end()
 
                     # Emit a lightweight heartbeat so platform logs show liveness continuously.
