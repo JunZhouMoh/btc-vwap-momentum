@@ -4715,6 +4715,11 @@ class LiveTradingBot:
         self._streak_count = int(streak)
         self._streak_last_counted_slug = last_slug
         self._streak_last_notified_count = int(streak)
+        
+        if direction and streak > 0:
+            logger.info(f"[STREAK] Initialized from history: {streak}x {direction} (last market: {last_slug})")
+        else:
+            logger.info(f"[STREAK] No historical streak found, starting fresh")
 
     async def _maybe_send_startup_streak_alert(self) -> None:
         streak_alert = getattr(self.config.telegram, "streak_alert", None)
@@ -4744,18 +4749,22 @@ class LiveTradingBot:
         direction = str(winner or "").strip().upper()
         slug = str(market_slug or "").strip()
         if not slug:
+            logger.debug(f"[STREAK] No slug provided, skipping")
             return
 
         # Evaluate exactly once per finished market window.
         if slug == self._streak_last_counted_slug:
+            logger.debug(f"[STREAK] Slug {slug} already counted, skipping")
             return
 
         self._streak_last_counted_slug = slug
+        logger.debug(f"[STREAK] Recording window outcome: {direction} for {slug}")
 
         # Non-directional outcomes break the run.
         if direction not in {"UP", "DOWN"}:
             if self._streak_direction in {"UP", "DOWN"} and self._streak_count > 0:
                 self._record_streak_end(self._streak_direction, self._streak_count)
+            logger.info(f"[STREAK] Non-directional outcome ({direction}), streak reset")
             self._streak_direction = ""
             self._streak_count = 0
             self._streak_last_notified_count = 0
@@ -4763,12 +4772,14 @@ class LiveTradingBot:
 
         if direction == self._streak_direction:
             self._streak_count += 1
+            logger.info(f"[STREAK] Extended streak: {self._streak_count}x {direction}")
         else:
             if self._streak_direction in {"UP", "DOWN"} and self._streak_count > 0:
                 self._record_streak_end(self._streak_direction, self._streak_count)
             self._streak_direction = direction
             self._streak_count = 1
             self._streak_last_notified_count = 0
+            logger.info(f"[STREAK] Direction changed to {direction}, streak reset to 1x")
 
         streak_alert = getattr(self.config.telegram, "streak_alert", None)
         if not streak_alert or not bool(getattr(streak_alert, "enabled", True)):
@@ -6538,6 +6549,7 @@ class LiveTradingBot:
         else:
             winner = "UNKNOWN"
 
+        logger.debug(f"[MARKET END] Slug: {self.state.slug} | UP price: {up_px:.4f} | DOWN price: {down_px:.4f} | Winner: {winner}")
         await self._record_window_outcome_streak(winner, self.state.slug)
 
         pos = self.stats.position
