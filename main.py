@@ -4092,6 +4092,7 @@ class LiveTradingBot:
         self._manual_buy_next_payload: Optional[Dict[str, Any]] = None
         self._next_window_filled_position: Optional[Dict[str, Any]] = None
         self._streak_reversal_bot_last_trigger_slug: str = ""  # Track last triggered market to avoid duplicates
+        self._streak_reversal_bot_mode_trigger_counts: Dict[str, Dict[int, int]] = {}  # Track triggers per market and mode: {market_slug: {mode_streak_length: count}}
 
     @staticmethod
     def _streak_end_key(direction: str, streak_len: int) -> Optional[str]:
@@ -4603,6 +4604,7 @@ class LiveTradingBot:
                         {
                             "streak_length": 2,
                             "buy_amount_usd": 5.0,
+                            "max_triggers": 1,
                             "time_left_price_pairs": [
                                 {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
                             ]
@@ -4610,6 +4612,7 @@ class LiveTradingBot:
                         {
                             "streak_length": 3,
                             "buy_amount_usd": 10.0,
+                            "max_triggers": 1,
                             "time_left_price_pairs": [
                                 {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
                             ]
@@ -4617,6 +4620,7 @@ class LiveTradingBot:
                         {
                             "streak_length": 4,
                             "buy_amount_usd": 20.0,
+                            "max_triggers": 1,
                             "time_left_price_pairs": [
                                 {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
                             ]
@@ -4644,6 +4648,7 @@ class LiveTradingBot:
                         clean_modes.append({
                             "streak_length": int(mode.get("streak_length", 2)),
                             "buy_amount_usd": float(mode.get("buy_amount_usd", 5.0)),
+                            "max_triggers": int(mode.get("max_triggers", 1)),
                             "time_left_price_pairs": clean_pairs
                         })
                 return {
@@ -4700,7 +4705,8 @@ class LiveTradingBot:
                                 if isinstance(mode, dict):
                                     sl = int(mode.get("streak_length", 2))
                                     ba = float(mode.get("buy_amount_usd", 5.0))
-                                    if sl > 0 and ba > 0:
+                                    mt = int(mode.get("max_triggers", 1))
+                                    if sl > 0 and ba > 0 and mt > 0:
                                         mode_pairs_raw = mode.get("time_left_price_pairs", [])
                                         mode_pairs = []
                                         if isinstance(mode_pairs_raw, list):
@@ -4717,6 +4723,7 @@ class LiveTradingBot:
                                         modes.append({
                                             "streak_length": sl,
                                             "buy_amount_usd": ba,
+                                            "max_triggers": mt,
                                             "time_left_price_pairs": mode_pairs
                                         })
                             except (TypeError, ValueError):
@@ -5007,8 +5014,7 @@ class LiveTradingBot:
             return
 
         market_slug = str(self.state.slug or "").strip()
-        if not market_slug or market_slug == self._streak_reversal_bot_last_trigger_slug:
-            logger.debug(f"[SRB] Already triggered for this market: {market_slug}")
+        if not market_slug:
             return
 
         # Check current ACTIVE streak using bot's own tracking
@@ -5032,7 +5038,8 @@ class LiveTradingBot:
             modes = [{
                 "streak_length": min_streak_len,
                 "buy_amount_usd": buy_amount_usd,
-                "time_left_price_pairs": pairs
+                "time_left_price_pairs": pairs,
+                "max_triggers": 1
             }]
         
         if not modes:
@@ -5049,6 +5056,20 @@ class LiveTradingBot:
         
         if not matching_mode:
             logger.info(f"[SRB] No mode matches streak length {current_streak_length}")
+            return
+        
+        # Check trigger limit for this mode in current market
+        mode_streak_length = int(matching_mode.get("streak_length", 2))
+        max_triggers = int(matching_mode.get("max_triggers", 1))
+        
+        # Initialize trigger tracking for this market if needed
+        if market_slug not in self._streak_reversal_bot_mode_trigger_counts:
+            self._streak_reversal_bot_mode_trigger_counts[market_slug] = {}
+        
+        current_triggers = self._streak_reversal_bot_mode_trigger_counts[market_slug].get(mode_streak_length, 0)
+        
+        if current_triggers >= max_triggers:
+            logger.info(f"[SRB] Mode (streak={mode_streak_length}) reached trigger limit: {current_triggers}/{max_triggers}")
             return
         
         pairs = matching_mode.get("time_left_price_pairs", []) or []
@@ -5095,8 +5116,9 @@ class LiveTradingBot:
         # All conditions met! Buy the opposite of current streak
         opposite_direction = "DOWN" if current_streak_direction == "UP" else "UP"
 
-        # Queue manual buy with opposite direction
-        self._streak_reversal_bot_last_trigger_slug = market_slug
+        # Increment trigger count for this mode in this market
+        self._streak_reversal_bot_mode_trigger_counts[market_slug][mode_streak_length] = current_triggers + 1
+        new_trigger_count = self._streak_reversal_bot_mode_trigger_counts[market_slug][mode_streak_length]
         
         # Get configured buy amount from matching mode
         buy_amount_usd = float(matching_mode.get("buy_amount_usd", 50.0) or 50.0)
@@ -5106,7 +5128,7 @@ class LiveTradingBot:
         self.dashboard.manual_signal_pending = f"{signal}|amount={buy_amount_usd:.8f}"
         
         logger.info(f"[SRB] ✓ TRIGGERED: {current_streak_length}x {current_streak_direction} → BUY {opposite_direction} (${buy_amount_usd:.2f})")
-        logger.info(f"[SRB] Conditions met: price {fav_price:.4f} ≤ {matching_price:.4f}, time_left {time_left:.1f}s")
+        logger.info(f"[SRB] Mode triggers: {new_trigger_count}/{max_triggers} | price {fav_price:.4f} ≤ {matching_price:.4f}, time_left {time_left:.1f}s")
         self.dashboard.manual_buy_live_status = f"queued (auto): {signal} ${buy_amount_usd:.2f}"
 
     def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
