@@ -4599,17 +4599,61 @@ class LiveTradingBot:
             if not srb:
                 return {
                     "enabled": False,
-                    "min_streak_length": 3,
-                    "buy_amount_usd": 50.0,
-                    "time_left_price_pairs": [
-                        {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
-                        {"time_left_sec": 150, "buy_price": 0.50, "enabled": True},
-                        {"time_left_sec": 60, "buy_price": 0.55, "enabled": True},
+                    "modes": [
+                        {
+                            "streak_length": 2,
+                            "buy_amount_usd": 5.0,
+                            "time_left_price_pairs": [
+                                {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
+                            ]
+                        },
+                        {
+                            "streak_length": 3,
+                            "buy_amount_usd": 10.0,
+                            "time_left_price_pairs": [
+                                {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
+                            ]
+                        },
+                        {
+                            "streak_length": 4,
+                            "buy_amount_usd": 20.0,
+                            "time_left_price_pairs": [
+                                {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
+                            ]
+                        }
                     ],
                     "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
                 }
+            
+            # Check if using new multi-mode format
+            modes = getattr(srb, "modes", None)
+            if modes:
+                # New format: modes array
+                clean_modes = []
+                for mode in modes:
+                    if isinstance(mode, dict):
+                        mode_pairs = mode.get("time_left_price_pairs", []) or []
+                        clean_pairs = []
+                        for pair in mode_pairs:
+                            if isinstance(pair, dict):
+                                clean_pairs.append({
+                                    "time_left_sec": int(pair.get("time_left_sec", 0)),
+                                    "buy_price": float(pair.get("buy_price", 0.5)),
+                                    "enabled": bool(pair.get("enabled", True))
+                                })
+                        clean_modes.append({
+                            "streak_length": int(mode.get("streak_length", 2)),
+                            "buy_amount_usd": float(mode.get("buy_amount_usd", 5.0)),
+                            "time_left_price_pairs": clean_pairs
+                        })
+                return {
+                    "enabled": bool(getattr(srb, "enabled", False)),
+                    "modes": clean_modes,
+                    "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
+                }
+            
+            # Fallback to legacy single-config format for backwards compatibility
             pairs = getattr(srb, "time_left_price_pairs", []) or []
-            # Ensure all pairs have required fields with correct types
             clean_pairs = []
             for pair in pairs:
                 if isinstance(pair, dict):
@@ -4629,9 +4673,7 @@ class LiveTradingBot:
             logger.exception("Error getting streak_reversal_bot config")
             return {
                 "enabled": False,
-                "min_streak_length": 3,
-                "buy_amount_usd": 50.0,
-                "time_left_price_pairs": [],
+                "modes": [],
                 "timer_bot_ready": False,
             }
 
@@ -4649,6 +4691,41 @@ class LiveTradingBot:
                 if "enabled" in payload:
                     srb.enabled = bool(payload.get("enabled"))
                 
+                if "modes" in payload:
+                    modes_raw = payload.get("modes", [])
+                    if isinstance(modes_raw, list):
+                        modes = []
+                        for mode in modes_raw:
+                            try:
+                                if isinstance(mode, dict):
+                                    sl = int(mode.get("streak_length", 2))
+                                    ba = float(mode.get("buy_amount_usd", 5.0))
+                                    if sl > 0 and ba > 0:
+                                        mode_pairs_raw = mode.get("time_left_price_pairs", [])
+                                        mode_pairs = []
+                                        if isinstance(mode_pairs_raw, list):
+                                            for pair in mode_pairs_raw:
+                                                try:
+                                                    if isinstance(pair, dict):
+                                                        t = int(pair.get("time_left_sec", 0))
+                                                        p = float(pair.get("buy_price", 0.5))
+                                                        en = bool(pair.get("enabled", True))
+                                                        if t >= 0 and 0.0 <= p <= 1.0:
+                                                            mode_pairs.append({"time_left_sec": t, "buy_price": p, "enabled": en})
+                                                except (TypeError, ValueError):
+                                                    pass
+                                        modes.append({
+                                            "streak_length": sl,
+                                            "buy_amount_usd": ba,
+                                            "time_left_price_pairs": mode_pairs
+                                        })
+                            except (TypeError, ValueError):
+                                pass
+                        # Update modes if valid
+                        if modes:
+                            srb.modes = modes
+                
+                # Support legacy format for backwards compatibility
                 if "min_streak_length" in payload:
                     try:
                         srb.min_streak_length = max(1, int(payload.get("min_streak_length")))
@@ -4923,7 +5000,7 @@ class LiveTradingBot:
             )
 
     async def _check_streak_reversal_bot(self) -> None:
-        """Check for streak reversal buy signals based on active streak."""
+        """Check for streak reversal buy signals based on configured modes."""
         srb = getattr(self.config, "streak_reversal_bot", None)
         if not srb or not bool(getattr(srb, "enabled", False)):
             logger.info(f"[SRB] Bot disabled or not configured")
@@ -4934,7 +5011,7 @@ class LiveTradingBot:
             logger.debug(f"[SRB] Already triggered for this market: {market_slug}")
             return
 
-        # Check current ACTIVE streak using bot's own tracking (NOT web snapshot state)
+        # Check current ACTIVE streak using bot's own tracking
         current_streak_direction = str(self._streak_direction or "").strip().upper()
         current_streak_length = int(self._streak_count or 0)
         
@@ -4943,31 +5020,55 @@ class LiveTradingBot:
         if current_streak_direction not in {"UP", "DOWN"}:
             logger.info(f"[SRB] Invalid/empty streak direction: '{current_streak_direction}'")
             return
+
+        # Get modes - supports both new multi-mode format and legacy single-config
+        modes = getattr(srb, "modes", None)
         
-        min_streak_len = int(max(1, int(getattr(srb, "min_streak_length", 3) or 3)))
+        # Fallback to legacy format for backwards compatibility
+        if not modes:
+            min_streak_len = int(max(1, int(getattr(srb, "min_streak_length", 3) or 3)))
+            buy_amount_usd = float(getattr(srb, "buy_amount_usd", 50.0) or 50.0)
+            pairs = getattr(srb, "time_left_price_pairs", []) or []
+            modes = [{
+                "streak_length": min_streak_len,
+                "buy_amount_usd": buy_amount_usd,
+                "time_left_price_pairs": pairs
+            }]
         
-        # Check if current active streak has reached minimum length
-        if current_streak_length < min_streak_len:
-            logger.info(f"[SRB] Streak too short: {current_streak_length}x < {min_streak_len}x")
+        if not modes:
+            logger.info(f"[SRB] No modes configured")
             return
 
-        pairs = getattr(srb, "time_left_price_pairs", []) or []
+        # Find matching mode by streak length
+        matching_mode = None
+        for mode in modes:
+            mode_streak_length = int(mode.get("streak_length", 2))
+            if current_streak_length == mode_streak_length:
+                matching_mode = mode
+                break
+        
+        if not matching_mode:
+            logger.info(f"[SRB] No mode matches streak length {current_streak_length}")
+            return
+        
+        pairs = matching_mode.get("time_left_price_pairs", []) or []
         if not pairs:
-            logger.info(f"[SRB] No time_left_price_pairs configured")
+            logger.info(f"[SRB] No time_left_price_pairs configured for mode (streak={current_streak_length})")
             return
 
         # Get current time left
         time_left = max(0.0, self.state.end_time - time.time())
         
         # Find the matching buy price for current time_left
-        # Sort by time_left descending, use the first pair that matches (time_left >= pair.time_left_sec)
+        # Pairs are thresholds: use first pair where time_left < threshold
+        # If pairs=[300, 150]: when time_left<300 use 300 config, when time_left<150 use 150 config
         matching_price = None
         for pair in sorted(pairs, key=lambda p: p.get("time_left_sec", 0), reverse=True):
             if not bool(pair.get("enabled", True)):
                 continue
             pair_time_left = int(pair.get("time_left_sec", 0))
             pair_price = float(pair.get("buy_price", 0.5))
-            if time_left >= pair_time_left:
+            if time_left < pair_time_left:
                 matching_price = pair_price
                 break
 
@@ -4997,10 +5098,10 @@ class LiveTradingBot:
         # Queue manual buy with opposite direction
         self._streak_reversal_bot_last_trigger_slug = market_slug
         
-        # Get configured buy amount
-        buy_amount_usd = float(getattr(srb, "buy_amount_usd", 50.0) or 50.0)
+        # Get configured buy amount from matching mode
+        buy_amount_usd = float(matching_mode.get("buy_amount_usd", 50.0) or 50.0)
         
-        # Queue the buy signal (same mechanism as manual buy)
+        # Queue the buy signal
         signal = f"BUY_{opposite_direction}"
         self.dashboard.manual_signal_pending = f"{signal}|amount={buy_amount_usd:.8f}"
         
