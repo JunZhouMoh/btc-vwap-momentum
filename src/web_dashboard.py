@@ -239,21 +239,37 @@ _HTML = """<!DOCTYPE html>
       var h=[];
       h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="srb_enabled" '+(sb.enabled?'checked':'')+'/></div>');
       h.push('<div class="row"><label>Current Streak</label><span id="srb_current_streak">—</span></div>');
-      h.push('<div class="row"><label>Min Streak Length</label><input type="number" id="srb_min_streak_length" step="1" min="1" value="'+esc(sb.min_streak_length!=null?sb.min_streak_length:3)+'"/></div>');
-      h.push('<div class="row"><label>Buy Amount (USD)</label><input type="number" id="srb_buy_amount_usd" step="0.1" min="0.1" value="'+esc(sb.buy_amount_usd!=null?sb.buy_amount_usd:50)+'"/></div>');
-      h.push('<div class="row"><label>Time Left → Buy Price Pairs</label></div>');
-      var pairs=sb.time_left_price_pairs||[];
-      if(!pairs.length){ h.push('<div style="color:#8b949e;font-size:0.8rem">No pairs configured. Add one below.</div>'); }
-      for(var pi=0;pi<Math.max(pairs.length,3);pi++){
-        var pair=pairs[pi]||{};
-        var t=pair.time_left_sec!=null?pair.time_left_sec:0;
-        var p=pair.buy_price!=null?pair.buy_price:0.5;
-        var en=pair.enabled!==false;
-        h.push('<div class="row"><input type="checkbox" id="srb_enabled_'+pi+'" '+(en?'checked':'')+' style="transform:scale(1.05)"/> <input type="number" id="srb_time_left_'+pi+'" step="1" min="0" value="'+esc(t)+'" placeholder="time left (sec)" style="width:120px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/> → <input type="number" id="srb_buy_price_'+pi+'" step="0.01" min="0" max="1" value="'+esc(p)+'" placeholder="buy price" style="width:100px;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.2rem 0.3rem;"/></div>');
+      h.push('<div style="margin-top:0.5rem"><strong style="color:#58a6ff;font-size:0.85rem">Modes (Streak Length → Buy Amount):</strong></div>');
+      
+      var modes=sb.modes||[];
+      if(!modes.length){ 
+        h.push('<div style="color:#8b949e;font-size:0.8rem">No modes configured. Add one below.</div>');
       }
-      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveStreakReversalBotConfig()">Apply</button><button class="btn secondary" onclick="loadStreakReversalBotConfig()">Reload</button></div>');
+      
+      for(var mi=0;mi<Math.max(modes.length,3);mi++){
+        var mode=modes[mi]||{};
+        var sl=mode.streak_length!=null?mode.streak_length:(mi+2);
+        var ba=mode.buy_amount_usd!=null?mode.buy_amount_usd:(5+mi*5);
+        var pairs=mode.time_left_price_pairs||[];
+        
+        h.push('<div style="border:1px solid #30363d;border-radius:6px;padding:0.5rem;margin-top:0.35rem;background:#0d1117">');
+        h.push('<div class="row"><label style="min-width:120px">Streak Length</label><input type="number" id="srb_mode_'+mi+'_streak_length" step="1" min="1" value="'+esc(sl)+'" style="width:60px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem;"/></div>');
+        h.push('<div class="row"><label style="min-width:120px">Buy Amount ($)</label><input type="number" id="srb_mode_'+mi+'_buy_amount_usd" step="0.1" min="0.1" value="'+esc(ba)+'" style="width:60px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem;"/></div>');
+        h.push('<div style="font-size:0.75rem;color:#8b949e;margin-top:0.35rem">Time Left Thresholds (sec):</div>');
+        
+        for(var pi=0;pi<Math.max(pairs.length,2);pi++){
+          var pair=pairs[pi]||{};
+          var t=pair.time_left_sec!=null?pair.time_left_sec:(300-pi*150);
+          var p=pair.buy_price!=null?pair.buy_price:0.4;
+          var en=pair.enabled!==false;
+          h.push('<div style="margin-top:0.25rem;display:flex;gap:0.35rem;align-items:center"><input type="checkbox" id="srb_mode_'+mi+'_pair_'+pi+'_enabled" '+(en?'checked':'')+' style="transform:scale(0.9)"/> <input type="number" id="srb_mode_'+mi+'_pair_'+pi+'_time_left" step="1" min="0" value="'+esc(t)+'" placeholder="time" style="width:70px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:4px;padding:0.2rem;font-size:0.75rem"/> <span style="color:#8b949e">→</span> <input type="number" id="srb_mode_'+mi+'_pair_'+pi+'_buy_price" step="0.01" min="0" max="1" value="'+esc(p)+'" placeholder="price" style="width:60px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:4px;padding:0.2rem;font-size:0.75rem"/></div>');
+        }
+        h.push('</div>');
+      }
+      
+      h.push('<div style="margin-top:0.75rem" class="row"><button class="btn" onclick="saveStreakReversalBotConfig()">Apply</button><button class="btn secondary" onclick="loadStreakReversalBotConfig()">Reload</button></div>');
       h.push('<div id="streakReversalBotStatus" class="status"></div>');
-      box.innerHTML=h.join('<br/>');
+      box.innerHTML=h.join('');
     }
 
     function loadStreakReversalBotConfig(onDone){
@@ -267,25 +283,35 @@ _HTML = """<!DOCTYPE html>
     function saveStreakReversalBotConfig(){
       var status=document.getElementById('streakReversalBotStatus'); if(status) status.textContent='Applying...';
       var sb=streakReversalBotCfg||{};
-      var pairs=[];
-      for(var pi=0;pi<6;pi++){
-        var enEl=document.getElementById('srb_enabled_'+pi);
-        var tEl=document.getElementById('srb_time_left_'+pi);
-        var pEl=document.getElementById('srb_buy_price_'+pi);
-        if(tEl&&pEl){
-          var t=parseInt(tEl.value,10);
-          var p=parseFloat(pEl.value);
-          var en=enEl?!!enEl.checked:true;
-          if(!isNaN(t)&&!isNaN(p)&&t>=0&&p>=0&&p<=1){
-            pairs.push({time_left_sec:t,buy_price:p,enabled:en});
+      var modes=[];
+      for(var mi=0;mi<3;mi++){
+        var slEl=document.getElementById('srb_mode_'+mi+'_streak_length');
+        var baEl=document.getElementById('srb_mode_'+mi+'_buy_amount_usd');
+        if(slEl&&baEl){
+          var sl=parseInt(slEl.value,10);
+          var ba=parseFloat(baEl.value);
+          if(!isNaN(sl)&&!isNaN(ba)&&sl>0&&ba>0){
+            var pairs=[];
+            for(var pi=0;pi<2;pi++){
+              var enEl=document.getElementById('srb_mode_'+mi+'_pair_'+pi+'_enabled');
+              var tEl=document.getElementById('srb_mode_'+mi+'_pair_'+pi+'_time_left');
+              var pEl=document.getElementById('srb_mode_'+mi+'_pair_'+pi+'_buy_price');
+              if(tEl&&pEl){
+                var t=parseInt(tEl.value,10);
+                var p=parseFloat(pEl.value);
+                var en=enEl?!!enEl.checked:true;
+                if(!isNaN(t)&&!isNaN(p)&&t>=0&&p>=0&&p<=1){
+                  pairs.push({time_left_sec:t,buy_price:p,enabled:en});
+                }
+              }
+            }
+            modes.push({streak_length:sl,buy_amount_usd:ba,time_left_price_pairs:pairs});
           }
         }
       }
       var payload={
         enabled:!!(document.getElementById('srb_enabled')&&document.getElementById('srb_enabled').checked),
-        min_streak_length:readInt('srb_min_streak_length',sb.min_streak_length||3),
-        buy_amount_usd:readNum('srb_buy_amount_usd',sb.buy_amount_usd||50),
-        time_left_price_pairs:pairs
+        modes:modes
       };
       requestJson('POST','/api/streak-reversal-bot',payload,function(resp){
         streakReversalBotCfg=resp||payload;
