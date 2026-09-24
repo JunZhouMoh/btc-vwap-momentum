@@ -606,7 +606,6 @@ _HTML = """<!DOCTYPE html>
           var streakEndLines=[];
           var summaryData=null;
           var sequenceData='';
-          var lengthToDirection={};
           for(var sei=0;sei<streakEnds.length;sei++){
             var row=streakEnds[sei]||{};
             if(row._summary){
@@ -620,15 +619,26 @@ _HTML = """<!DOCTYPE html>
             var dirColor=dirVal.toLowerCase()==='up'?'#3fb950':dirVal.toLowerCase()==='down'?'#f85149':'#e6edf3';
             var dirHtml='<span style="color:'+dirColor+'">'+esc(dirVal)+'</span>';
             streakEndLines.push(esc(lenVal+'x ')+dirHtml+esc(' ended: '+cntVal));
-            lengthToDirection[lenVal]=dirVal.toLowerCase();
           }
           if(sequenceData){
             var coloredSeq='';
-            for(var sci=0;sci<sequenceData.length;sci++){
-              var digit=sequenceData[sci];
-              var digitDir=lengthToDirection[digit]||'unknown';
-              var digitColor=digitDir==='up'?'#3fb950':digitDir==='down'?'#f85149':'#e6edf3';
-              coloredSeq+='<span style="color:'+digitColor+'">'+esc(digit)+'</span>';
+            var i=0;
+            while(i<sequenceData.length){
+              var numStr='';
+              while(i<sequenceData.length && sequenceData[i]>='0' && sequenceData[i]<='9'){
+                numStr+=sequenceData[i];
+                i++;
+              }
+              var dirChar=i<sequenceData.length?sequenceData[i]:'';
+              var itemColor='#e6edf3';
+              if(dirChar==='U'){
+                itemColor='#3fb950';
+              } else if(dirChar==='D'){
+                itemColor='#f85149';
+              }
+              var item=esc(numStr+(dirChar||''));
+              coloredSeq+='<span style="color:'+itemColor+'">'+item+'</span>';
+              i++;
             }
             streakEndLines.push('Sequence: '+coloredSeq);
           }
