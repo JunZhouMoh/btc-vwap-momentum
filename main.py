@@ -90,6 +90,9 @@ from src.btc_volume_feed import BTCVolumeFeed
 GAMMA_API = "https://gamma-api.polymarket.com"
 CRYPTO_PRICE_API = "https://polymarket.com/api/crypto/crypto-price"
 WSS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+# Chainlink RTDS provides BTC/USD TWAP (Time-Weighted Average Price)
+# Resolution source: https://data.chain.link/streams/btc-usd-twap-60s-streams
+# Markets resolve to UP if TWAP >= price at range start, otherwise DOWN
 CHAINLINK_RTDS_URL = "wss://ws-live-data.polymarket.com"
 BINANCE_BTC_WSS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
 STREAK_END_LOOKBACK_SEC = 6 * 60 * 60
@@ -172,14 +175,15 @@ class MarketState:
     connected: bool = False
     last_update: float = 0.0
     
-    # Chainlink BTC/USD price tracking
-    btc_anchor_price: float = 0.0    # Price at market start
+    # Chainlink BTC/USD TWAP price tracking
+    # Resolution: Market UP if TWAP >= opening_price, otherwise DOWN
+    btc_anchor_price: float = 0.0    # Opening price (price at market start)
     btc_market_anchor_price: float = 0.0  # Fixed anchor for current market (reset only on new market)
     btc_market_anchor_source: str = "none"  # none | fallback_tick | feed_tick | official_ptb
-    btc_current_price: float = 0.0   # Latest Chainlink price
-    btc_last_update: float = 0.0     # Timestamp of last price update
-    btc_anchor_history: deque = field(default_factory=lambda: deque(maxlen=5))  # Recent BTC/anchor samples
-    btc_connected: bool = False      # RTDS connection status
+    btc_current_price: float = 0.0   # Latest Chainlink TWAP (Time-Weighted Average Price)
+    btc_last_update: float = 0.0     # Timestamp of last TWAP update
+    btc_anchor_history: deque = field(default_factory=lambda: deque(maxlen=5))  # Recent TWAP/anchor samples
+    btc_connected: bool = False      # Chainlink RTDS connection status
     btc_feed_source: str = "chainlink"  # chainlink | binance
     btc_window_moves: deque = field(default_factory=lambda: deque(maxlen=50))  # Completed window abs moves
     btc_current_window_min_usd: float = 0.0
@@ -205,8 +209,8 @@ class Position:
     hedge_contracts: int = 0
     hedge_price: float = 0.0
     min_price_seen: float = 0.0  # Lowest price after entry (for drawdown tracking)
-    btc_price_at_entry: float = 0.0    # Chainlink BTC/USD when order was submitted
-    btc_anchor_at_entry: float = 0.0   # BTC anchor (market-open price) at order submission
+    btc_price_at_entry: float = 0.0    # Chainlink BTC/USD TWAP when order was submitted
+    btc_anchor_at_entry: float = 0.0   # BTC opening price at order submission (used for market resolution)
     entry_mode: str = "normal"        # normal | volume_eval_mode | mode_60s | mode_40s | mode_30s | mode_20s | manual
     mode_legs: List[Dict[str, Any]] = field(default_factory=list)  # [{mode, contracts, entry_price}]
 
@@ -224,10 +228,10 @@ class TradeRecord:
     timestamp: float
     max_drawdown_abs: float = 0.0   # Max absolute price drop from entry
     max_drawdown_pct: float = 0.0   # Max percentage drawdown from entry
-    btc_price_at_entry: float = 0.0        # Chainlink BTC/USD when order was submitted
-    btc_anchor_price_at_entry: float = 0.0 # BTC anchor (market-open price) at submission
-    btc_price_at_close: float = 0.0        # Chainlink BTC/USD used at market close
-    btc_diff_from_anchor: float = 0.0      # btc_price_at_close - btc_anchor_price_at_entry
+    btc_price_at_entry: float = 0.0        # Chainlink BTC/USD TWAP when order was submitted
+    btc_anchor_price_at_entry: float = 0.0 # BTC opening price at submission (market resolution is based on TWAP >= opening price)
+    btc_price_at_close: float = 0.0        # Chainlink BTC/USD TWAP used at market close
+    btc_diff_from_anchor: float = 0.0      # btc_price_at_close - btc_anchor_price_at_entry (TWAP movement from opening)
     entry_mode: str = "unknown"           # Copied from Position.entry_mode
     mode_breakdown: Dict[str, Dict[str, float]] = field(default_factory=dict)  # mode -> {trigger_count,wins,losses,total_pnl_usd}
 
@@ -4161,13 +4165,20 @@ class LiveTradingBot:
         
         summary: List[Dict[str, Any]] = []
         if total_ends > 0:
-            for length in sorted(length_counts.keys()):
+            sorted_lengths = sorted(length_counts.keys())
+            for i, length in enumerate(sorted_lengths):
                 count = length_counts[length]
-                pct = (count / total_ends) * 100
+                # Calculate sum of all counts from this length onwards
+                sum_from_this_length = sum(length_counts[l] for l in sorted_lengths[i:])
+                # Probability of ending at this length = count / (count + remaining)
+                if sum_from_this_length > 0:
+                    pct_end_here = (count / sum_from_this_length) * 100
+                else:
+                    pct_end_here = 0.0
                 summary.append({
                     "length": length,
                     "total_ends": count,
-                    "pct": round(pct, 1),
+                    "pct_end_here": round(pct_end_here, 1),
                 })
         
         # Add sequence as a special entry
