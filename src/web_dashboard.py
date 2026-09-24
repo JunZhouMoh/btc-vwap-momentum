@@ -1,6 +1,12 @@
 """
 Local web dashboard: FastAPI + single-page UI, JSON at /api/state.
 Runs in a daemon thread; state is updated from the bot's main loop.
+
+Market Resolution:
+  Markets resolve UP if Chainlink BTC/USD TWAP (Time-Weighted Average Price)
+  >= opening price for the time window, otherwise DOWN.
+  
+  Resolution source: https://data.chain.link/streams/btc-usd-twap-60s-streams
 """
 
 from __future__ import annotations
@@ -59,7 +65,7 @@ _HTML = """<!DOCTYPE html>
   <div class="grid">
     <div class="card"><h2>Session</h2><div id="session" class="mono"></div></div>
     <div class="card"><h2>Strategy</h2><div id="strategy"></div></div>
-    <div class="card btc"><h2>BTC / USD (Chainlink)</h2><div id="btc" class="mono"></div></div>
+    <div class="card btc"><h2>BTC / USD TWAP (Chainlink)</h2><div id="btc" class="mono"></div></div>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <!-- TEMPORARILY REMOVED: Mode Performance -->
     <!-- <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div> -->
@@ -600,6 +606,7 @@ _HTML = """<!DOCTYPE html>
           var streakEndLines=[];
           var summaryData=null;
           var sequenceData='';
+          var lengthToDirection={};
           for(var sei=0;sei<streakEnds.length;sei++){
             var row=streakEnds[sei]||{};
             if(row._summary){
@@ -610,10 +617,20 @@ _HTML = """<!DOCTYPE html>
             var lenVal=(row.length!=null)?String(row.length):'\u2014';
             var dirVal=row.direction?String(row.direction):'?';
             var cntVal=(row.ended_count!=null)?String(row.ended_count):'0';
-            streakEndLines.push(esc(lenVal+'x '+dirVal+' ended: '+cntVal));
+            var dirColor=dirVal.toLowerCase()==='up'?'#3fb950':dirVal.toLowerCase()==='down'?'#f85149':'#e6edf3';
+            var dirHtml='<span style="color:'+dirColor+'">'+esc(dirVal)+'</span>';
+            streakEndLines.push(esc(lenVal+'x ')+dirHtml+esc(' ended: '+cntVal));
+            lengthToDirection[lenVal]=dirVal.toLowerCase();
           }
           if(sequenceData){
-            streakEndLines.push('Sequence: '+esc(sequenceData));
+            var coloredSeq='';
+            for(var sci=0;sci<sequenceData.length;sci++){
+              var digit=sequenceData[sci];
+              var digitDir=lengthToDirection[digit]||'unknown';
+              var digitColor=digitDir==='up'?'#3fb950':digitDir==='down'?'#f85149':'#e6edf3';
+              coloredSeq+='<span style="color:'+digitColor+'">'+esc(digit)+'</span>';
+            }
+            streakEndLines.push('Sequence: '+coloredSeq);
           }
           if(summaryData&&summaryData.length){
             streakEndLines.push('---');
