@@ -4128,13 +4128,15 @@ class LiveTradingBot:
     def _serialize_streak_end_counts(self) -> List[Dict[str, Any]]:
         self._prune_streak_end_events()
         end_counts: Dict[str, int] = {}
-        sequence: List[int] = []
+        sequence: List[str] = []
         for _, key in self._streak_end_events:
             end_counts[key] = int(end_counts.get(key, 0)) + 1
             try:
                 direction, raw_len = key.split("_", 1)
                 streak_len = int(raw_len)
-                sequence.append(streak_len)
+                # Append length with direction indicator: "5U" or "5D"
+                dir_char = "U" if direction.upper() == "UP" else "D"
+                sequence.append(f"{streak_len}{dir_char}")
             except (TypeError, ValueError):
                 pass
 
