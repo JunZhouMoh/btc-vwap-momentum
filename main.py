@@ -4187,6 +4187,105 @@ class LiveTradingBot:
         sequence_str = "".join(str(l) for l in sequence)
         return rows + [{"_summary": True, "by_length": summary, "sequence": sequence_str}]
 
+    def get_streak_stats_range(self, start_ts: float, end_ts: float) -> Dict[str, Any]:
+        """Get streak statistics for a specific time range and save to JSON."""
+        end_counts: Dict[str, int] = {}
+        sequence: List[str] = []
+        
+        # Filter events within the time range
+        for ts, key in self._streak_end_events:
+            if start_ts <= ts < end_ts:
+                end_counts[key] = int(end_counts.get(key, 0)) + 1
+                try:
+                    direction, raw_len = key.split("_", 1)
+                    streak_len = int(raw_len)
+                    # Append length with direction indicator: "5U" or "5D"
+                    dir_char = "U" if direction.upper() == "UP" else "D"
+                    sequence.append(f"{streak_len}{dir_char}")
+                except (TypeError, ValueError):
+                    pass
+
+        rows: List[Dict[str, Any]] = []
+        for key, ended_count in end_counts.items():
+            try:
+                direction, raw_len = key.split("_", 1)
+                streak_len = int(raw_len)
+            except (TypeError, ValueError):
+                continue
+            rows.append(
+                {
+                    "direction": direction,
+                    "length": streak_len,
+                    "ended_count": int(ended_count),
+                }
+            )
+        rows.sort(key=lambda r: (int(r.get("length", 0)), str(r.get("direction", ""))))
+        
+        # Add percentage summary by streak length (ignoring direction)
+        length_counts: Dict[int, int] = {}
+        total_ends = 0
+        for row in rows:
+            length = int(row.get("length", 0))
+            count = int(row.get("ended_count", 0))
+            length_counts[length] = length_counts.get(length, 0) + count
+            total_ends += count
+        
+        summary: List[Dict[str, Any]] = []
+        if total_ends > 0:
+            sorted_lengths = sorted(length_counts.keys())
+            for i, length in enumerate(sorted_lengths):
+                count = length_counts[length]
+                # Calculate sum of all counts from this length onwards
+                sum_from_this_length = sum(length_counts[l] for l in sorted_lengths[i:])
+                # Probability of ending at this length = count / (count + remaining)
+                if sum_from_this_length > 0:
+                    pct_end_here = (count / sum_from_this_length) * 100
+                else:
+                    pct_end_here = 0.0
+                summary.append({
+                    "length": length,
+                    "total_ends": count,
+                    "pct_end_here": round(pct_end_here, 1),
+                })
+        
+        # Add sequence as a special entry
+        sequence_str = "".join(str(l) for l in sequence)
+        
+        result = {
+            "stats": rows,
+            "total_ended": total_ends,
+            "sequence": sequence_str,
+            "by_length": summary,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "start_readable": datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
+            "end_readable": datetime.fromtimestamp(end_ts, tz=timezone.utc).isoformat(),
+        }
+        
+        # Save to JSON file
+        try:
+            log_dir = Path("logs/streak_stats")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create filename with date range
+            start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+            end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+            start_str = start_dt.strftime("%Y%m%d_%H%M%S")
+            end_str = end_dt.strftime("%Y%m%d_%H%M%S")
+            timestamp = int(time.time())
+            filename = f"streak_stats_{start_str}_{end_str}_{timestamp}.json"
+            filepath = log_dir / filename
+            
+            with open(filepath, "w") as f:
+                json.dump(result, f, indent=2)
+            
+            result["saved_to"] = str(filepath)
+        except Exception as e:
+            logger.warning(f"Failed to save streak stats to JSON: {e}")
+            result["saved_to"] = f"Error: {str(e)}"
+        
+        return result
+
     def _get_manual_buy_next_state(self) -> Dict[str, Any]:
         payload = self._manual_buy_next_payload or {}
         direction = str(payload.get("direction", "")).upper()
@@ -5565,6 +5664,7 @@ class LiveTradingBot:
                 trigger_manual_buy=self._web_trigger_manual_buy,
                 trigger_manual_buy_next=self._web_trigger_manual_buy_next,
                 trigger_manual_sell=self._web_trigger_manual_sell,
+                get_streak_stats_range=self.get_streak_stats_range,
             )
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
             railway_public = os.getenv("RAILWAY_PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
