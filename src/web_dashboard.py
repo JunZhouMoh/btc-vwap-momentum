@@ -285,8 +285,9 @@ _HTML = """<!DOCTYPE html>
       h.push('<div style="color:#58a6ff;font-size:0.85rem;font-weight:600;margin-bottom:0.35rem">Dynamic Selection (conditional end probability)</div>');
       h.push('<div class="row"><label style="min-width:120px">Enable Dynamic</label><input type="checkbox" id="srb_dynamic_enabled" '+(dm.enabled?'checked':'')+'/></div>');
       h.push('<div class="row"><label style="min-width:120px">Choose Top X</label><input type="number" id="srb_dynamic_top_x" step="1" min="1" value="'+esc(dm.top_x!=null?dm.top_x:3)+'" style="width:70px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem"/></div>');
+      h.push('<div class="row"><label style="min-width:120px">Min End Chance (%)</label><input type="number" id="srb_dynamic_min_probability_pct" step="0.1" min="0" max="100" value="'+esc(dm.min_probability_pct!=null?dm.min_probability_pct:0)+'" style="width:70px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem" title="A selected streak length is eligible only when its conditional end probability is strictly greater than this percentage"/></div>');
       h.push('<div class="row"><label style="min-width:120px">Buy Amounts ($)</label><input type="text" id="srb_dynamic_amounts" value="'+esc(dynamicAmounts.join(', '))+'" placeholder="30, 50, 70" style="width:150px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem"/></div>');
-      h.push('<div style="font-size:0.72rem;color:#8b949e;margin:0.25rem 0 0.35rem">Enter at least Top X amounts (comma- or space-separated). Chosen streak lengths are sorted low-to-high; amounts map in that order and the bot can enter once at each selected length.</div>');
+      h.push('<div style="font-size:0.72rem;color:#8b949e;margin:0.25rem 0 0.35rem">Only probabilities strictly above Min End Chance qualify. Enter at least Top X amounts (comma- or space-separated). Chosen streak lengths are sorted low-to-high; amounts map in that order.</div>');
       h.push('<div style="font-size:0.75rem;color:#8b949e">Current selection (ranked by conditional probability, then ordered by length): <span id="srb_dynamic_selection_preview">'+esc(selectedText)+'</span></div>');
       h.push('<div style="font-size:0.75rem;color:#8b949e;margin-top:0.4rem">Dynamic time-left thresholds (seconds → max buy price):</div>');
       var dynamicPairs=Array.isArray(dm.time_left_price_pairs)?dm.time_left_price_pairs:[];
@@ -358,6 +359,11 @@ _HTML = """<!DOCTYPE html>
         }
       }
       var dynamicTopX=readInt('srb_dynamic_top_x',3);
+      var dynamicMinProbability=readNum('srb_dynamic_min_probability_pct',0);
+      if(dynamicMinProbability<0||dynamicMinProbability>100){
+        if(status) status.textContent='Minimum conditional end chance must be between 0 and 100.';
+        return;
+      }
       if(dynamicAmounts.length<dynamicTopX){
         if(status) status.textContent='Enter at least one buy amount for each Top X selection.';
         return;
@@ -368,6 +374,7 @@ _HTML = """<!DOCTYPE html>
         dynamic_mode:{
           enabled:!!(document.getElementById('srb_dynamic_enabled')&&document.getElementById('srb_dynamic_enabled').checked),
           top_x:Math.max(1,dynamicTopX),
+          min_probability_pct:dynamicMinProbability,
           buy_amounts_usd:dynamicAmounts,
           time_left_price_pairs:dynamicPairs
         }
@@ -672,10 +679,11 @@ _HTML = """<!DOCTYPE html>
           if(streakReversalBotCfg&&streakReversalBotCfg.dynamic_mode){
             var dynamicCfg=streakReversalBotCfg.dynamic_mode;
             var dynamicTop=Math.max(1,parseInt(dynamicCfg.top_x,10)||3);
+            var dynamicMinProbability=Math.max(0,Math.min(100,Number(dynamicCfg.min_probability_pct)||0));
             var rankedDynamic=(summaryData||[]).slice().sort(function(a,b){
               var probabilityDiff=(Number(b.pct_end_here_raw!=null?b.pct_end_here_raw:b.pct_end_here)||0)-(Number(a.pct_end_here_raw!=null?a.pct_end_here_raw:a.pct_end_here)||0);
               return probabilityDiff||((Number(a.length)||0)-(Number(b.length)||0));
-            }).slice(0,dynamicTop).sort(function(a,b){return (Number(a.length)||0)-(Number(b.length)||0);});
+            }).slice(0,dynamicTop).filter(function(row){return (Number(row.pct_end_here_raw!=null?row.pct_end_here_raw:row.pct_end_here)||0)>dynamicMinProbability;}).sort(function(a,b){return (Number(a.length)||0)-(Number(b.length)||0);});
             var selectionPreview=document.getElementById('srb_dynamic_selection_preview');
             if(selectionPreview){
               selectionPreview.textContent=rankedDynamic.length?rankedDynamic.map(function(row){return row.length+'x ('+(Number(row.pct_end_here)||0).toFixed(1)+'%)';}).join(' → '):'Waiting for streak-end samples';
