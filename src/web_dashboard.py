@@ -276,6 +276,27 @@ _HTML = """<!DOCTYPE html>
         }
         h.push('</div>');
       }
+
+      var dm=sb.dynamic_mode||{};
+      var dynamicAmounts=Array.isArray(dm.buy_amounts_usd)?dm.buy_amounts_usd:[30,50,70];
+      var selectedRows=Array.isArray(dm.selected_streak_lengths)?dm.selected_streak_lengths:[];
+      var selectedText=selectedRows.length?selectedRows.map(function(row){return row.length+'x ('+Number(row.pct_end_here||0).toFixed(1)+'%)';}).join(' → '):'Waiting for streak-end samples';
+      h.push('<div style="border:1px solid #58a6ff;border-radius:6px;padding:0.6rem;margin-top:0.7rem;background:#0d1117">');
+      h.push('<div style="color:#58a6ff;font-size:0.85rem;font-weight:600;margin-bottom:0.35rem">Dynamic Selection (conditional end probability)</div>');
+      h.push('<div class="row"><label style="min-width:120px">Enable Dynamic</label><input type="checkbox" id="srb_dynamic_enabled" '+(dm.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label style="min-width:120px">Choose Top X</label><input type="number" id="srb_dynamic_top_x" step="1" min="1" value="'+esc(dm.top_x!=null?dm.top_x:3)+'" style="width:70px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem"/></div>');
+      h.push('<div class="row"><label style="min-width:120px">Buy Amounts ($)</label><input type="text" id="srb_dynamic_amounts" value="'+esc(dynamicAmounts.join(', '))+'" placeholder="30, 50, 70" style="width:150px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem"/></div>');
+      h.push('<div style="font-size:0.72rem;color:#8b949e;margin:0.25rem 0 0.35rem">Enter at least Top X amounts (comma- or space-separated). Chosen streak lengths are sorted low-to-high; amounts map in that order and the bot can enter once at each selected length.</div>');
+      h.push('<div style="font-size:0.75rem;color:#8b949e">Current selection (ranked by conditional probability, then ordered by length): <span id="srb_dynamic_selection_preview">'+esc(selectedText)+'</span></div>');
+      h.push('<div style="font-size:0.75rem;color:#8b949e;margin-top:0.4rem">Dynamic time-left thresholds (seconds → max buy price):</div>');
+      var dynamicPairs=Array.isArray(dm.time_left_price_pairs)?dm.time_left_price_pairs:[];
+      for(var dpi=0;dpi<2;dpi++){
+        var dp=dynamicPairs[dpi]||{};
+        var dt=dp.time_left_sec!=null?dp.time_left_sec:(300-dpi*150);
+        var dprice=dp.buy_price!=null?dp.buy_price:(dpi===0?0.45:0.50);
+        h.push('<div style="margin-top:0.25rem;display:flex;gap:0.35rem;align-items:center"><input type="checkbox" id="srb_dynamic_pair_'+dpi+'_enabled" '+(dp.enabled!==false?'checked':'')+' style="transform:scale(0.9)"/> <input type="number" id="srb_dynamic_pair_'+dpi+'_time_left" step="1" min="0" value="'+esc(dt)+'" placeholder="time" style="width:70px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:4px;padding:0.2rem;font-size:0.75rem"/> <span style="color:#8b949e">→</span> <input type="number" id="srb_dynamic_pair_'+dpi+'_buy_price" step="0.01" min="0" max="1" value="'+esc(dprice)+'" placeholder="price" style="width:60px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:4px;padding:0.2rem;font-size:0.75rem"/></div>');
+      }
+      h.push('</div>');
       
       h.push('<div style="margin-top:0.75rem" class="row"><button class="btn" onclick="saveStreakReversalBotConfig()">Apply</button><button class="btn secondary" onclick="loadStreakReversalBotConfig()">Reload</button></div>');
       h.push('<div id="streakReversalBotStatus" class="status"></div>');
@@ -321,9 +342,35 @@ _HTML = """<!DOCTYPE html>
           }
         }
       }
+      var dynamicAmountsRaw=(document.getElementById('srb_dynamic_amounts')||{}).value||'';
+      var dynamicAmounts=dynamicAmountsRaw.split(/[\s,]+/).map(function(value){return parseFloat(value.trim());}).filter(function(value){return !isNaN(value)&&value>0;});
+      var dynamicPairs=[];
+      for(var dpi=0;dpi<2;dpi++){
+        var dynamicTimeEl=document.getElementById('srb_dynamic_pair_'+dpi+'_time_left');
+        var dynamicPriceEl=document.getElementById('srb_dynamic_pair_'+dpi+'_buy_price');
+        if(dynamicTimeEl&&dynamicPriceEl){
+          var dynamicTime=parseInt(dynamicTimeEl.value,10);
+          var dynamicPrice=parseFloat(dynamicPriceEl.value);
+          var dynamicPairEnabled=document.getElementById('srb_dynamic_pair_'+dpi+'_enabled');
+          if(!isNaN(dynamicTime)&&!isNaN(dynamicPrice)&&dynamicTime>=0&&dynamicPrice>=0&&dynamicPrice<=1){
+            dynamicPairs.push({time_left_sec:dynamicTime,buy_price:dynamicPrice,enabled:dynamicPairEnabled?!!dynamicPairEnabled.checked:true});
+          }
+        }
+      }
+      var dynamicTopX=readInt('srb_dynamic_top_x',3);
+      if(dynamicAmounts.length<dynamicTopX){
+        if(status) status.textContent='Enter at least one buy amount for each Top X selection.';
+        return;
+      }
       var payload={
         enabled:!!(document.getElementById('srb_enabled')&&document.getElementById('srb_enabled').checked),
-        modes:modes
+        modes:modes,
+        dynamic_mode:{
+          enabled:!!(document.getElementById('srb_dynamic_enabled')&&document.getElementById('srb_dynamic_enabled').checked),
+          top_x:Math.max(1,dynamicTopX),
+          buy_amounts_usd:dynamicAmounts,
+          time_left_price_pairs:dynamicPairs
+        }
       };
       requestJson('POST','/api/streak-reversal-bot',payload,function(resp){
         streakReversalBotCfg=resp||payload;
@@ -622,6 +669,18 @@ _HTML = """<!DOCTYPE html>
             var dirHtml='<span style="color:'+dirColor+'">'+esc(dirVal)+'</span>';
             streakEndLines.push(esc(lenVal+'x ')+dirHtml+esc(' ended: '+cntVal));
           }
+          if(streakReversalBotCfg&&streakReversalBotCfg.dynamic_mode){
+            var dynamicCfg=streakReversalBotCfg.dynamic_mode;
+            var dynamicTop=Math.max(1,parseInt(dynamicCfg.top_x,10)||3);
+            var rankedDynamic=(summaryData||[]).slice().sort(function(a,b){
+              var probabilityDiff=(Number(b.pct_end_here_raw!=null?b.pct_end_here_raw:b.pct_end_here)||0)-(Number(a.pct_end_here_raw!=null?a.pct_end_here_raw:a.pct_end_here)||0);
+              return probabilityDiff||((Number(a.length)||0)-(Number(b.length)||0));
+            }).slice(0,dynamicTop).sort(function(a,b){return (Number(a.length)||0)-(Number(b.length)||0);});
+            var selectionPreview=document.getElementById('srb_dynamic_selection_preview');
+            if(selectionPreview){
+              selectionPreview.textContent=rankedDynamic.length?rankedDynamic.map(function(row){return row.length+'x ('+(Number(row.pct_end_here)||0).toFixed(1)+'%)';}).join(' → '):'Waiting for streak-end samples';
+            }
+          }
           if(sequenceData){
             var coloredSeq='';
             var i=0;
@@ -638,8 +697,8 @@ _HTML = """<!DOCTYPE html>
               } else if(dirChar==='D'){
                 itemColor='#f85149';
               }
-              var item=esc(numStr+(dirChar||''));
-              coloredSeq+='<span style="color:'+itemColor+'">'+item+'</span>';
+              var item=esc(numStr);
+              coloredSeq+='<span style="color:'+itemColor+'">'+item+'</span> ';
               i++;
             }
             streakEndLines.push('Sequence: '+coloredSeq);
@@ -650,7 +709,7 @@ _HTML = """<!DOCTYPE html>
               var srow=summaryData[ssi]||{};
               var slLen=(srow.length!=null)?String(srow.length):'\u2014';
               var slTotal=(srow.total_ends!=null)?String(srow.total_ends):'0';
-              var slPct=(srow.pct!=null)?String(srow.pct):'0';
+              var slPct=(srow.pct_end_here!=null)?String(srow.pct_end_here):'0';
               streakEndLines.push(esc(slLen+'x: '+slTotal+' ('+slPct+'%)'));
             }
           }
@@ -805,8 +864,8 @@ _HTML = """<!DOCTYPE html>
             var itemColor='#e6edf3';
             if(dirChar==='U') itemColor='#3fb950';
             else if(dirChar==='D') itemColor='#f85149';
-            var item=esc(numStr+(dirChar||''));
-            coloredSeq+='<span style="color:'+itemColor+'">'+item+'</span>';
+            var item=esc(numStr);
+            coloredSeq+='<span style="color:'+itemColor+'">'+item+'</span> ';
             j++;
           }
           lines.push('Sequence: '+coloredSeq);
