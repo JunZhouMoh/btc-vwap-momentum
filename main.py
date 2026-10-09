@@ -4125,6 +4125,38 @@ class LiveTradingBot:
         self._streak_end_events.append((ts_v, key))
         self._prune_streak_end_events(ts_v)
 
+    def _get_streak_end_probabilities(self) -> List[Dict[str, Any]]:
+        """Return conditional end probabilities by streak length for the rolling lookback."""
+        self._prune_streak_end_events()
+        length_counts: Dict[int, int] = {}
+        for _, key in self._streak_end_events:
+            try:
+                _, raw_len = key.split("_", 1)
+                length = int(raw_len)
+            except (TypeError, ValueError):
+                continue
+            length_counts[length] = length_counts.get(length, 0) + 1
+
+        probabilities = []
+        for length, count in length_counts.items():
+            at_or_above = sum(n for candidate_length, n in length_counts.items() if candidate_length >= length)
+            if at_or_above > 0:
+                probabilities.append({
+                    "length": length,
+                    "ended_count": count,
+                    "pct_end_here": (count / at_or_above) * 100,
+                })
+        return probabilities
+
+    def _get_dynamic_streak_selection(self, top_x: int) -> List[Dict[str, Any]]:
+        """Select top conditional probabilities, then order selected lengths for sequential entry."""
+        ranked = sorted(
+            self._get_streak_end_probabilities(),
+            key=lambda row: (-float(row["pct_end_here"]), int(row["length"])),
+        )
+        selected = ranked[:max(1, int(top_x))]
+        return sorted(selected, key=lambda row: int(row["length"]))
+
     def _serialize_streak_end_counts(self) -> List[Dict[str, Any]]:
         self._prune_streak_end_events()
         end_counts: Dict[str, int] = {}
@@ -4170,9 +4202,9 @@ class LiveTradingBot:
             sorted_lengths = sorted(length_counts.keys())
             for i, length in enumerate(sorted_lengths):
                 count = length_counts[length]
-                # Calculate sum of all counts from this length onwards
+                # Probability of ending at this length given it reached this length
+                # = count / (sum of all counts from this length onwards)
                 sum_from_this_length = sum(length_counts[l] for l in sorted_lengths[i:])
-                # Probability of ending at this length = count / (count + remaining)
                 if sum_from_this_length > 0:
                     pct_end_here = (count / sum_from_this_length) * 100
                 else:
@@ -4181,6 +4213,7 @@ class LiveTradingBot:
                     "length": length,
                     "total_ends": count,
                     "pct_end_here": round(pct_end_here, 1),
+                    "pct_end_here_raw": pct_end_here,
                 })
         
         # Add sequence as a special entry
@@ -4244,9 +4277,9 @@ class LiveTradingBot:
             sorted_lengths = sorted(length_counts.keys())
             for i, length in enumerate(sorted_lengths):
                 count = length_counts[length]
-                # Calculate sum of all counts from this length onwards
+                # Probability of ending at this length given it reached this length
+                # = count / (sum of all counts from this length onwards)
                 sum_from_this_length = sum(length_counts[l] for l in sorted_lengths[i:])
-                # Probability of ending at this length = count / (count + remaining)
                 if sum_from_this_length > 0:
                     pct_end_here = (count / sum_from_this_length) * 100
                 else:
@@ -4346,6 +4379,8 @@ class LiveTradingBot:
                 sorted_lengths = sorted(length_counts.keys())
                 for i, length in enumerate(sorted_lengths):
                     count = length_counts[length]
+                    # Probability of ending at this length given it reached this length
+                    # = count / (sum of all counts from this length onwards)
                     sum_from_this_length = sum(length_counts[l] for l in sorted_lengths[i:])
                     if sum_from_this_length > 0:
                         pct_end_here = (count / sum_from_this_length) * 100
@@ -4854,6 +4889,35 @@ class LiveTradingBot:
 
         return self._web_get_streak_alert()
 
+    def _web_get_dynamic_streak_mode(self, srb: Any) -> Dict[str, Any]:
+        raw = getattr(srb, "dynamic_mode", {}) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        try:
+            top_x = max(1, int(raw.get("top_x", 3)))
+        except (TypeError, ValueError):
+            top_x = 3
+        amounts = raw.get("buy_amounts_usd", [30.0, 50.0, 70.0])
+        if not isinstance(amounts, list):
+            amounts = [30.0, 50.0, 70.0]
+        pairs = raw.get("time_left_price_pairs", [])
+        clean_pairs = []
+        if isinstance(pairs, list):
+            for pair in pairs:
+                if isinstance(pair, dict):
+                    clean_pairs.append({
+                        "time_left_sec": int(pair.get("time_left_sec", 0)),
+                        "buy_price": float(pair.get("buy_price", 0.5)),
+                        "enabled": bool(pair.get("enabled", True)),
+                    })
+        return {
+            "enabled": bool(raw.get("enabled", False)),
+            "top_x": top_x,
+            "buy_amounts_usd": [float(value) for value in amounts],
+            "time_left_price_pairs": clean_pairs,
+            "selected_streak_lengths": self._get_dynamic_streak_selection(top_x),
+        }
+
     def _web_get_streak_reversal_bot(self) -> Dict[str, Any]:
         """Get streak reversal bot config for frontend."""
         try:
@@ -4861,6 +4925,7 @@ class LiveTradingBot:
             if not srb:
                 return {
                     "enabled": False,
+                    "dynamic_mode": self._web_get_dynamic_streak_mode(None),
                     "modes": [
                         {
                             "streak_length": 2,
@@ -4915,6 +4980,7 @@ class LiveTradingBot:
                 return {
                     "enabled": bool(getattr(srb, "enabled", False)),
                     "modes": clean_modes,
+                    "dynamic_mode": self._web_get_dynamic_streak_mode(srb),
                     "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
                 }
             
@@ -4933,6 +4999,7 @@ class LiveTradingBot:
                 "min_streak_length": int(max(1, int(getattr(srb, "min_streak_length", 3) or 3))),
                 "buy_amount_usd": float(getattr(srb, "buy_amount_usd", 50.0) or 50.0),
                 "time_left_price_pairs": clean_pairs,
+                "dynamic_mode": self._web_get_dynamic_streak_mode(srb),
                 "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
             }
         except Exception:
@@ -4992,6 +5059,50 @@ class LiveTradingBot:
                         # Update modes if valid
                         if modes:
                             srb.modes = modes
+
+                if "dynamic_mode" in payload and isinstance(payload.get("dynamic_mode"), dict):
+                    dynamic_raw = payload["dynamic_mode"]
+                    current_dynamic = getattr(srb, "dynamic_mode", {}) or {}
+                    if not isinstance(current_dynamic, dict):
+                        current_dynamic = {}
+                    try:
+                        top_x = max(1, int(dynamic_raw.get("top_x", current_dynamic.get("top_x", 3))))
+                    except (TypeError, ValueError):
+                        top_x = 3
+                    amounts_raw = dynamic_raw.get("buy_amounts_usd", current_dynamic.get("buy_amounts_usd", [30.0, 50.0, 70.0]))
+                    amounts = []
+                    if isinstance(amounts_raw, list):
+                        for value in amounts_raw:
+                            try:
+                                amount = float(value)
+                                if amount > 0:
+                                    amounts.append(amount)
+                            except (TypeError, ValueError):
+                                continue
+                    pairs_raw = dynamic_raw.get("time_left_price_pairs", current_dynamic.get("time_left_price_pairs", []))
+                    dynamic_pairs = []
+                    if isinstance(pairs_raw, list):
+                        for pair in pairs_raw:
+                            try:
+                                if isinstance(pair, dict):
+                                    time_left = int(pair.get("time_left_sec", 0))
+                                    price = float(pair.get("buy_price", 0.5))
+                                    if time_left >= 0 and 0.0 <= price <= 1.0:
+                                        dynamic_pairs.append({
+                                            "time_left_sec": time_left,
+                                            "buy_price": price,
+                                            "enabled": bool(pair.get("enabled", True)),
+                                        })
+                            except (TypeError, ValueError):
+                                continue
+                    if amounts:
+                        top_x = min(top_x, len(amounts))
+                    srb.dynamic_mode = {
+                        "enabled": bool(dynamic_raw.get("enabled", False)),
+                        "top_x": top_x,
+                        "buy_amounts_usd": amounts or [30.0, 50.0, 70.0],
+                        "time_left_price_pairs": dynamic_pairs,
+                    }
                 
                 # Support legacy format for backwards compatibility
                 if "min_streak_length" in payload:
@@ -5307,13 +5418,37 @@ class LiveTradingBot:
             logger.info(f"[SRB] No modes configured")
             return
 
-        # Find matching mode by streak length
+        # Prefer dynamic mode at selected lengths. The selected set is ranked by
+        # conditional probability, then sorted ascending to assign amounts and entry order.
         matching_mode = None
-        for mode in modes:
-            mode_streak_length = int(mode.get("streak_length", 2))
-            if current_streak_length == mode_streak_length:
-                matching_mode = mode
-                break
+        dynamic_mode = getattr(srb, "dynamic_mode", {}) or {}
+        if isinstance(dynamic_mode, dict) and bool(dynamic_mode.get("enabled", False)):
+            try:
+                dynamic_top_x = max(1, int(dynamic_mode.get("top_x", 3)))
+            except (TypeError, ValueError):
+                dynamic_top_x = 3
+            dynamic_selected = self._get_dynamic_streak_selection(dynamic_top_x)
+            selected_index = next(
+                (i for i, row in enumerate(dynamic_selected) if int(row["length"]) == current_streak_length),
+                None,
+            )
+            dynamic_amounts = dynamic_mode.get("buy_amounts_usd", []) or []
+            if selected_index is not None and selected_index < len(dynamic_amounts):
+                matching_mode = {
+                    "streak_length": current_streak_length,
+                    "buy_amount_usd": float(dynamic_amounts[selected_index]),
+                    "max_triggers": 1,
+                    "time_left_price_pairs": dynamic_mode.get("time_left_price_pairs", []) or [],
+                    "dynamic_probability_pct": float(dynamic_selected[selected_index]["pct_end_here"]),
+                }
+
+        # Fall back to the existing fixed-length modes when dynamic selection does not apply.
+        if matching_mode is None:
+            for mode in modes:
+                mode_streak_length = int(mode.get("streak_length", 2))
+                if current_streak_length == mode_streak_length:
+                    matching_mode = mode
+                    break
         
         if not matching_mode:
             logger.info(f"[SRB] No mode matches streak length {current_streak_length}")
@@ -5388,7 +5523,9 @@ class LiveTradingBot:
         signal = f"BUY_{opposite_direction}"
         self.dashboard.manual_signal_pending = f"{signal}|amount={buy_amount_usd:.8f}"
         
-        logger.info(f"[SRB] ✓ TRIGGERED: {current_streak_length}x {current_streak_direction} → BUY {opposite_direction} (${buy_amount_usd:.2f})")
+        dynamic_probability = matching_mode.get("dynamic_probability_pct")
+        probability_text = f" | conditional end probability {dynamic_probability:.1f}%" if dynamic_probability is not None else ""
+        logger.info(f"[SRB] ✓ TRIGGERED: {current_streak_length}x {current_streak_direction} → BUY {opposite_direction} (${buy_amount_usd:.2f}){probability_text}")
         logger.info(f"[SRB] Mode triggers: {new_trigger_count}/{max_triggers} | price {fav_price:.4f} ≤ {matching_price:.4f}, time_left {time_left:.1f}s")
         self.dashboard.manual_buy_live_status = f"queued (auto): {signal} ${buy_amount_usd:.2f}"
 
@@ -5589,6 +5726,18 @@ class LiveTradingBot:
                         {"time_left_sec": 60, "buy_price": 0.55, "enabled": True},
                     ]
             self.config.streak_reversal_bot = StreakReversalBotConfig()
+
+        srb = self.config.streak_reversal_bot
+        if not hasattr(srb, "dynamic_mode"):
+            srb.dynamic_mode = {
+                "enabled": False,
+                "top_x": 3,
+                "buy_amounts_usd": [30.0, 50.0, 70.0],
+                "time_left_price_pairs": [
+                    {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
+                    {"time_left_sec": 150, "buy_price": 0.50, "enabled": True},
+                ],
+            }
 
         im = self.config.market.interval_minutes
         ##console.print(f"[bold cyan]🚀 BTC {im}-Min Live Trading Bot[/bold cyan]")
