@@ -4187,8 +4187,17 @@ class LiveTradingBot:
         sequence_str = "".join(str(l) for l in sequence)
         return rows + [{"_summary": True, "by_length": summary, "sequence": sequence_str}]
 
-    def get_streak_stats_range(self, start_ts: float, end_ts: float) -> Dict[str, Any]:
-        """Get streak statistics for a specific time range and save to JSON."""
+    def get_streak_stats_range(self, start_ts: float, end_ts: float, by_hour: bool = False) -> Dict[str, Any]:
+        """Get streak statistics for a specific time range and save to JSON.
+        
+        Args:
+            start_ts: Start timestamp
+            end_ts: End timestamp
+            by_hour: If True, break down stats by hour; if False, aggregate for entire range
+        """
+        if by_hour:
+            return self._get_streak_stats_by_hour(start_ts, end_ts)
+        
         end_counts: Dict[str, int] = {}
         sequence: List[str] = []
         
@@ -4264,7 +4273,7 @@ class LiveTradingBot:
         
         # Save to JSON file
         try:
-            log_dir = Path("logs/streak_stats")
+            log_dir = Path("data")
             log_dir.mkdir(parents=True, exist_ok=True)
             
             # Create filename with date range
@@ -4285,6 +4294,146 @@ class LiveTradingBot:
             result["saved_to"] = f"Error: {str(e)}"
         
         return result
+    
+    def _get_streak_stats_by_hour(self, start_ts: float, end_ts: float) -> Dict[str, Any]:
+        """Get streak statistics broken down by hour."""
+        hourly_stats = []
+        current_ts = start_ts
+        
+        while current_ts < end_ts:
+            hour_end_ts = min(current_ts + 3600, end_ts)  # Next hour or end_ts, whichever is sooner
+            
+            # Get stats for this hour
+            end_counts: Dict[str, int] = {}
+            sequence: List[str] = []
+            
+            for ts, key in self._streak_end_events:
+                if current_ts <= ts < hour_end_ts:
+                    end_counts[key] = int(end_counts.get(key, 0)) + 1
+                    try:
+                        direction, raw_len = key.split("_", 1)
+                        streak_len = int(raw_len)
+                        dir_char = "U" if direction.upper() == "UP" else "D"
+                        sequence.append(f"{streak_len}{dir_char}")
+                    except (TypeError, ValueError):
+                        pass
+            
+            rows: List[Dict[str, Any]] = []
+            for key, ended_count in end_counts.items():
+                try:
+                    direction, raw_len = key.split("_", 1)
+                    streak_len = int(raw_len)
+                except (TypeError, ValueError):
+                    continue
+                rows.append({
+                    "direction": direction,
+                    "length": streak_len,
+                    "ended_count": int(ended_count),
+                })
+            rows.sort(key=lambda r: (int(r.get("length", 0)), str(r.get("direction", ""))))
+            
+            # Calculate percentage summary
+            length_counts: Dict[int, int] = {}
+            total_ends = 0
+            for row in rows:
+                length = int(row.get("length", 0))
+                count = int(row.get("ended_count", 0))
+                length_counts[length] = length_counts.get(length, 0) + count
+                total_ends += count
+            
+            summary: List[Dict[str, Any]] = []
+            if total_ends > 0:
+                sorted_lengths = sorted(length_counts.keys())
+                for i, length in enumerate(sorted_lengths):
+                    count = length_counts[length]
+                    sum_from_this_length = sum(length_counts[l] for l in sorted_lengths[i:])
+                    if sum_from_this_length > 0:
+                        pct_end_here = (count / sum_from_this_length) * 100
+                    else:
+                        pct_end_here = 0.0
+                    summary.append({
+                        "length": length,
+                        "total_ends": count,
+                        "pct_end_here": round(pct_end_here, 1),
+                    })
+            
+            sequence_str = "".join(str(l) for l in sequence)
+            
+            hour_result = {
+                "hour_start_ts": current_ts,
+                "hour_end_ts": hour_end_ts,
+                "hour_start_readable": datetime.fromtimestamp(current_ts, tz=timezone.utc).isoformat(),
+                "hour_end_readable": datetime.fromtimestamp(hour_end_ts, tz=timezone.utc).isoformat(),
+                "stats": rows,
+                "total_ended": total_ends,
+                "sequence": sequence_str,
+                "by_length": summary,
+            }
+            hourly_stats.append(hour_result)
+            current_ts = hour_end_ts
+        
+        # Aggregate totals across all hours
+        total_all_hours = sum(h["total_ended"] for h in hourly_stats)
+        all_stats = []
+        for h in hourly_stats:
+            all_stats.extend(h["stats"])
+        
+        result = {
+            "hourly_stats": hourly_stats,
+            "total_ended_all_hours": total_all_hours,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "start_readable": datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
+            "end_readable": datetime.fromtimestamp(end_ts, tz=timezone.utc).isoformat(),
+        }
+        
+        # Save to JSON file
+        try:
+            log_dir = Path("data")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create filename with date range
+            start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+            end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+            start_str = start_dt.strftime("%Y%m%d_%H%M%S")
+            end_str = end_dt.strftime("%Y%m%d_%H%M%S")
+            timestamp = int(time.time())
+            filename = f"streak_stats_{start_str}_{end_str}_{timestamp}.json"
+            filepath = log_dir / filename
+            
+            with open(filepath, "w") as f:
+                json.dump(result, f, indent=2)
+            
+            result["saved_to"] = str(filepath)
+        except Exception as e:
+            logger.warning(f"Failed to save streak stats to JSON: {e}")
+            result["saved_to"] = f"Error: {str(e)}"
+        
+        return result
+
+    async def _log_streak_stats_daily(self):
+        """Continuously log streak stats every 24 hours, broken down by hour."""
+        while self.running:
+            try:
+                await asyncio.sleep(24 * 3600)  # Sleep for 24 hours
+                
+                # Get the last 24 hours of data
+                now_ts = get_ts_now()
+                start_ts = now_ts - (24 * 3600)  # 24 hours ago
+                
+                logger.info(f"Logging 24-hour streak stats broken by hour (last 24h: {start_ts} to {now_ts})")
+                self.get_streak_stats_range(start_ts, now_ts, by_hour=True)
+                
+            except asyncio.CancelledError:
+                logger.info("Streak stats logging task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in streak_stats daily logging: {e}", exc_info=True)
+                # Continue on error, try again in 24 hours
+                try:
+                    await asyncio.sleep(60)  # Wait 1 minute before retrying
+                except asyncio.CancelledError:
+                    break
 
     def _get_manual_buy_next_state(self) -> Dict[str, Any]:
         payload = self._manual_buy_next_payload or {}
@@ -7324,6 +7473,9 @@ class LiveTradingBot:
         redeemer_task = None
         if self.redeemer is not None:
             redeemer_task = asyncio.create_task(self.redeemer.run_loop())
+        
+        # Start daily streak stats logging
+        streak_stats_task = asyncio.create_task(self._log_streak_stats_daily())
 
         sim_note = ""
         if self.config.simulation.enabled:
@@ -7359,6 +7511,14 @@ class LiveTradingBot:
                 try:
                     redeemer_task.cancel()
                     await redeemer_task
+                except Exception:
+                    pass
+            
+            # Stop streak stats logging task
+            if streak_stats_task is not None:
+                try:
+                    streak_stats_task.cancel()
+                    await streak_stats_task
                 except Exception:
                     pass
             
