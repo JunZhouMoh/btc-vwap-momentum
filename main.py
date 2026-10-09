@@ -4148,13 +4148,20 @@ class LiveTradingBot:
                 })
         return probabilities
 
-    def _get_dynamic_streak_selection(self, top_x: int) -> List[Dict[str, Any]]:
-        """Select top conditional probabilities, then order selected lengths for sequential entry."""
+    def _get_dynamic_streak_selection(
+        self,
+        top_x: int,
+        min_probability_pct: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """Select qualifying top probabilities, then order lengths for sequential entry."""
         ranked = sorted(
             self._get_streak_end_probabilities(),
             key=lambda row: (-float(row["pct_end_here"]), int(row["length"])),
         )
-        selected = ranked[:max(1, int(top_x))]
+        selected = [
+            row for row in ranked[:max(1, int(top_x))]
+            if float(row["pct_end_here"]) > float(min_probability_pct)
+        ]
         return sorted(selected, key=lambda row: int(row["length"]))
 
     def _serialize_streak_end_counts(self) -> List[Dict[str, Any]]:
@@ -4897,6 +4904,10 @@ class LiveTradingBot:
             top_x = max(1, int(raw.get("top_x", 3)))
         except (TypeError, ValueError):
             top_x = 3
+        try:
+            min_probability_pct = min(100.0, max(0.0, float(raw.get("min_probability_pct", 0.0))))
+        except (TypeError, ValueError):
+            min_probability_pct = 0.0
         amounts = raw.get("buy_amounts_usd", [30.0, 50.0, 70.0])
         if not isinstance(amounts, list):
             amounts = [30.0, 50.0, 70.0]
@@ -4913,9 +4924,10 @@ class LiveTradingBot:
         return {
             "enabled": bool(raw.get("enabled", False)),
             "top_x": top_x,
+            "min_probability_pct": min_probability_pct,
             "buy_amounts_usd": [float(value) for value in amounts],
             "time_left_price_pairs": clean_pairs,
-            "selected_streak_lengths": self._get_dynamic_streak_selection(top_x),
+            "selected_streak_lengths": self._get_dynamic_streak_selection(top_x, min_probability_pct),
         }
 
     def _web_get_streak_reversal_bot(self) -> Dict[str, Any]:
@@ -5069,6 +5081,16 @@ class LiveTradingBot:
                         top_x = max(1, int(dynamic_raw.get("top_x", current_dynamic.get("top_x", 3))))
                     except (TypeError, ValueError):
                         top_x = 3
+                    try:
+                        min_probability_pct = min(
+                            100.0,
+                            max(0.0, float(dynamic_raw.get(
+                                "min_probability_pct",
+                                current_dynamic.get("min_probability_pct", 0.0),
+                            ))),
+                        )
+                    except (TypeError, ValueError):
+                        min_probability_pct = 0.0
                     amounts_raw = dynamic_raw.get("buy_amounts_usd", current_dynamic.get("buy_amounts_usd", [30.0, 50.0, 70.0]))
                     amounts = []
                     if isinstance(amounts_raw, list):
@@ -5100,6 +5122,7 @@ class LiveTradingBot:
                     srb.dynamic_mode = {
                         "enabled": bool(dynamic_raw.get("enabled", False)),
                         "top_x": top_x,
+                        "min_probability_pct": min_probability_pct,
                         "buy_amounts_usd": amounts or [30.0, 50.0, 70.0],
                         "time_left_price_pairs": dynamic_pairs,
                     }
@@ -5427,7 +5450,17 @@ class LiveTradingBot:
                 dynamic_top_x = max(1, int(dynamic_mode.get("top_x", 3)))
             except (TypeError, ValueError):
                 dynamic_top_x = 3
-            dynamic_selected = self._get_dynamic_streak_selection(dynamic_top_x)
+            try:
+                dynamic_min_probability_pct = min(
+                    100.0,
+                    max(0.0, float(dynamic_mode.get("min_probability_pct", 0.0))),
+                )
+            except (TypeError, ValueError):
+                dynamic_min_probability_pct = 0.0
+            dynamic_selected = self._get_dynamic_streak_selection(
+                dynamic_top_x,
+                dynamic_min_probability_pct,
+            )
             selected_index = next(
                 (i for i, row in enumerate(dynamic_selected) if int(row["length"]) == current_streak_length),
                 None,
@@ -5732,6 +5765,7 @@ class LiveTradingBot:
             srb.dynamic_mode = {
                 "enabled": False,
                 "top_x": 3,
+                "min_probability_pct": 0.0,
                 "buy_amounts_usd": [30.0, 50.0, 70.0],
                 "time_left_price_pairs": [
                     {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
