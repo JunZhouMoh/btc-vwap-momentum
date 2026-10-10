@@ -78,7 +78,7 @@ _HTML = """<!DOCTYPE html>
     <div class="card controls"><h2>Telegram Streak Alert</h2><div id="streakAlertPanel" class="mono">Loading...</div></div>
     <div class="card controls"><h2>Streak Reversal Buy Bot</h2><div id="streakReversalBotPanel" class="mono">Loading...</div></div>
     <div class="card"><h2>Streak End Counts</h2><div id="streakEnds" class="mono">Loading...</div></div>
-    <div class="card controls"><h2>Streak Statistics (Date & Time Range)</h2><div id="streakStatsPanel" class="mono">Loading...</div></div>
+    <div class="card controls"><h2>Hourly Dynamic Streak Lengths (1–6 Hours)</h2><div id="hourlyDynamicStreaks" class="mono">Loading...</div></div>
   </div>
   <footer>Refreshes every second · <span id="err"></span></footer>
   <script>
@@ -94,6 +94,7 @@ _HTML = """<!DOCTYPE html>
   var timerAlertCfg=null;
   var streakAlertCfg=null;
   var streakReversalBotCfg=null;
+  var hourlyLookbackDraft=null;
     window.latestModePerfData={};
     var pollTimer=null;
     var pollInFlight=false;
@@ -375,6 +376,7 @@ _HTML = """<!DOCTYPE html>
           enabled:!!(document.getElementById('srb_dynamic_enabled')&&document.getElementById('srb_dynamic_enabled').checked),
           top_x:Math.max(1,dynamicTopX),
           min_probability_pct:dynamicMinProbability,
+          lookback_hours:hourlyLookbackDraft!=null?hourlyLookbackDraft:Math.max(1,Math.min(6,parseInt((sb.dynamic_mode||{}).lookback_hours,10)||6)),
           buy_amounts_usd:dynamicAmounts,
           time_left_price_pairs:dynamicPairs
         }
@@ -383,6 +385,48 @@ _HTML = """<!DOCTYPE html>
         streakReversalBotCfg=resp||payload;
         if(status) status.textContent='Applied';
         renderStreakReversalBotPanel();
+      });
+    }
+
+    function renderHourlyDynamicStreaks(hourlyStats){
+      var box=document.getElementById('hourlyDynamicStreaks'); if(!box) return;
+      var dm=(streakReversalBotCfg&&streakReversalBotCfg.dynamic_mode)||{};
+      var selectedHours=hourlyLookbackDraft!=null?hourlyLookbackDraft:(parseInt(dm.lookback_hours,10)||6);
+      var statsByHour={};
+      (hourlyStats||[]).forEach(function(row){statsByHour[Number(row.hours)]=row;});
+      var lines=['<div style="color:#8b949e;margin-bottom:0.4rem">Each row uses a trailing window; selected lengths reflect Top X and Min End Chance from Dynamic Selection.</div>'];
+      for(var hours=1;hours<=6;hours++){
+        var row=statsByHour[hours]||{};
+        var lengths=Array.isArray(row.selected_streak_lengths)?row.selected_streak_lengths:[];
+        var summary=lengths.length?lengths.map(function(item){return esc(item.length)+'x ('+numFmt(Number(item.pct_end_here),1)+'%)';}).join(', '):'No qualifying samples';
+        lines.push('<label style="display:flex;justify-content:space-between;gap:0.5rem;align-items:flex-start;margin:0.3rem 0;cursor:pointer"><span><input type="radio" name="hourly_dynamic_hours" value="'+hours+'" '+(selectedHours===hours?'checked':'')+' onchange="hourlyLookbackDraft='+hours+';renderHourlyDynamicStreaks(window.latestHourlyDynamicStats||[])"/> '+hours+' hour'+(hours===1?'':'s')+' <span style="color:#8b949e">('+esc(row.sample_count||0)+' ends)</span></span><span style="text-align:right">'+summary+'</span></label>');
+      }
+      lines.push('<div style="margin-top:0.55rem"><button class="btn" onclick="applyHourlyDynamicLookback()">Use Selected Duration</button> <span id="hourlyDynamicStatus" class="status"></span></div>');
+      box.innerHTML=lines.join('');
+    }
+
+    function applyHourlyDynamicLookback(){
+      var status=document.getElementById('hourlyDynamicStatus');
+      var dm=(streakReversalBotCfg&&streakReversalBotCfg.dynamic_mode)||{};
+      var selected=document.querySelector('input[name="hourly_dynamic_hours"]:checked');
+      var hours=selected?parseInt(selected.value,10):(hourlyLookbackDraft||parseInt(dm.lookback_hours,10)||6);
+      if(status) status.textContent='Applying...';
+      var payload={
+        enabled:!!(streakReversalBotCfg&&streakReversalBotCfg.enabled),
+        dynamic_mode:{
+          enabled:!!dm.enabled,
+          top_x:parseInt(dm.top_x,10)||3,
+          min_probability_pct:Number(dm.min_probability_pct)||0,
+          lookback_hours:Math.max(1,Math.min(6,hours)),
+          buy_amounts_usd:dm.buy_amounts_usd||[30,50,70],
+          time_left_price_pairs:dm.time_left_price_pairs||[]
+        }
+      };
+      requestJson('POST','/api/streak-reversal-bot',payload,function(resp){
+        streakReversalBotCfg=resp||streakReversalBotCfg;
+        hourlyLookbackDraft=null;
+        if(status) status.textContent='Applied: trailing '+hours+' hour'+(hours===1?'':'s');
+        renderHourlyDynamicStreaks(window.latestHourlyDynamicStats||[]);
       });
     }
 
@@ -661,11 +705,14 @@ _HTML = """<!DOCTYPE html>
           var streakEnds=(d.streak_end_counts&&d.streak_end_counts.length)?d.streak_end_counts:[];
           var streakEndLines=[];
           var summaryData=null;
+          var hourlyDynamicStats=[];
           var sequenceData='';
           for(var sei=0;sei<streakEnds.length;sei++){
             var row=streakEnds[sei]||{};
             if(row._summary){
               summaryData=row.by_length||[];
+              hourlyDynamicStats=row.hourly_dynamic_stats||[];
+              window.latestHourlyDynamicStats=hourlyDynamicStats;
               sequenceData=row.sequence||'';
               continue;
             }
@@ -680,7 +727,9 @@ _HTML = """<!DOCTYPE html>
             var dynamicCfg=streakReversalBotCfg.dynamic_mode;
             var dynamicTop=Math.max(1,parseInt(dynamicCfg.top_x,10)||3);
             var dynamicMinProbability=Math.max(0,Math.min(100,Number(dynamicCfg.min_probability_pct)||0));
-            var rankedDynamic=(summaryData||[]).slice().sort(function(a,b){
+            var dynamicHourlyRow=(hourlyDynamicStats||[]).find(function(row){return Number(row.hours)===(Number(dynamicCfg.lookback_hours)||6);});
+            var dynamicPreviewRows=dynamicHourlyRow&&Array.isArray(dynamicHourlyRow.selected_streak_lengths)?dynamicHourlyRow.selected_streak_lengths:(summaryData||[]);
+            var rankedDynamic=dynamicHourlyRow?dynamicPreviewRows:(summaryData||[]).slice().sort(function(a,b){
               var probabilityDiff=(Number(b.pct_end_here_raw!=null?b.pct_end_here_raw:b.pct_end_here)||0)-(Number(a.pct_end_here_raw!=null?a.pct_end_here_raw:a.pct_end_here)||0);
               return probabilityDiff||((Number(a.length)||0)-(Number(b.length)||0));
             }).slice(0,dynamicTop).filter(function(row){return (Number(row.pct_end_here_raw!=null?row.pct_end_here_raw:row.pct_end_here)||0)>dynamicMinProbability;}).sort(function(a,b){return (Number(a.length)||0)-(Number(b.length)||0);});
@@ -689,6 +738,7 @@ _HTML = """<!DOCTYPE html>
               selectionPreview.textContent=rankedDynamic.length?rankedDynamic.map(function(row){return row.length+'x ('+(Number(row.pct_end_here)||0).toFixed(1)+'%)';}).join(' → '):'Waiting for streak-end samples';
             }
           }
+          renderHourlyDynamicStreaks(hourlyDynamicStats);
           if(sequenceData){
             var coloredSeq='';
             var i=0;
@@ -754,141 +804,11 @@ _HTML = """<!DOCTYPE html>
       scheduleTick(document.hidden?POLL_MS_HIDDEN:250);
     });
 
-    function renderStreakStatsPanel(){
-      var box=document.getElementById('streakStatsPanel'); if(!box) return;
-      var h=[];
-      var now=new Date();
-      var today=now.toISOString().split('T')[0];
-      var nowTime=now.toTimeString().substr(0,5);
-      h.push('<div class="row"><label>From Date</label><input type="date" id="streak_stats_from_date" value="'+esc(today)+'"/></div>');
-      h.push('<div class="row"><label>From Time</label><input type="time" id="streak_stats_from_time" value="00:00"/></div>');
-      h.push('<div class="row"><label>To Date</label><input type="date" id="streak_stats_to_date" value="'+esc(today)+'"/></div>');
-      h.push('<div class="row"><label>To Time</label><input type="time" id="streak_stats_to_time" value="'+esc(nowTime)+'"/></div>');
-      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="queryStreakStats()">Query Stats</button><button class="btn secondary" onclick="loadStreakStatsPanel()">Reset</button></div>');
-      h.push('<div id="streakStatsResults" class="mono" style="margin-top:0.5rem;color:#8b949e;font-size:0.8rem">Enter date/time range and click Query Stats</div>');
-      h.push('<div id="streakStatsStatus" class="status"></div>');
-      box.innerHTML=h.join('<br/>');
-    }
-
-    function loadStreakStatsPanel(){
-      renderStreakStatsPanel();
-    }
-
-    function queryStreakStats(){
-      var fromDateEl=document.getElementById('streak_stats_from_date');
-      var fromTimeEl=document.getElementById('streak_stats_from_time');
-      var toDateEl=document.getElementById('streak_stats_to_date');
-      var toTimeEl=document.getElementById('streak_stats_to_time');
-      
-      if(!fromDateEl||!fromTimeEl||!toDateEl||!toTimeEl){
-        return;
-      }
-      
-      var fromDate=String(fromDateEl.value);
-      var fromTime=String(fromTimeEl.value);
-      var toDate=String(toDateEl.value);
-      var toTime=String(toTimeEl.value);
-      
-      if(!fromDate||!fromTime||!toDate||!toTime){
-        var resEl=document.getElementById('streakStatsResults');
-        if(resEl) resEl.textContent='Please fill in all date/time fields';
-        return;
-      }
-      
-      var fromIso=fromDate+'T'+fromTime+':00Z';
-      var toIso=toDate+'T'+toTime+':00Z';
-      
-      var fromTs=new Date(fromIso).getTime()/1000;
-      var toTs=new Date(toIso).getTime()/1000;
-      
-      if(fromTs>=toTs){
-        var resEl=document.getElementById('streakStatsResults');
-        if(resEl) resEl.textContent='From time must be before To time';
-        return;
-      }
-      
-      var statusEl=document.getElementById('streakStatsStatus');
-      if(statusEl) statusEl.textContent='Querying...';
-      
-      var resEl=document.getElementById('streakStatsResults');
-      if(resEl) resEl.textContent='Loading...';
-      
-      var payload={
-        start_ts:fromTs,
-        end_ts:toTs
-      };
-      
-      requestJson('POST','/api/streak-stats',payload,function(resp){
-        if(statusEl) statusEl.textContent='';
-        if(!resEl) return;
-        
-        if(resp&&resp.error){
-          resEl.textContent='Error: '+esc(resp.error);
-          return;
-        }
-        
-        if(!resp){
-          resEl.textContent='No response from server';
-          return;
-        }
-        
-        var lines=[];
-        var stats=resp.stats||[];
-        var totalEnds=resp.total_ended||0;
-        var sequence=resp.sequence||'';
-        var savedTo=resp.saved_to||'';
-        
-        if(stats.length===0){
-          resEl.textContent='No streak endings in this period';
-          return;
-        }
-        
-        lines.push('Total ended: '+esc(totalEnds));
-        if(savedTo){
-          lines.push('<span style="color:#3fb950">✓ Saved to: '+esc(savedTo)+'</span>');
-        }
-        lines.push('---');
-        
-        for(var i=0;i<stats.length;i++){
-          var row=stats[i]||{};
-          var len=(row.length!=null)?String(row.length):'\u2014';
-          var dir=row.direction?String(row.direction):'?';
-          var cnt=(row.ended_count!=null)?String(row.ended_count):'0';
-          var color=dir.toLowerCase()==='up'?'#3fb950':dir.toLowerCase()==='down'?'#f85149':'#e6edf3';
-          lines.push(esc(len+'x ')+dir+esc(' ended: '+cnt));
-        }
-        
-        if(sequence){
-          lines.push('---');
-          var coloredSeq='';
-          var j=0;
-          while(j<sequence.length){
-            var numStr='';
-            while(j<sequence.length&&sequence[j]>='0'&&sequence[j]<='9'){
-              numStr+=sequence[j];
-              j++;
-            }
-            var dirChar=j<sequence.length?sequence[j]:'';
-            var itemColor='#e6edf3';
-            if(dirChar==='U') itemColor='#3fb950';
-            else if(dirChar==='D') itemColor='#f85149';
-            var item=esc(numStr);
-            coloredSeq+='<span style="color:'+itemColor+'">'+item+'</span> ';
-            j++;
-          }
-          lines.push('Sequence: '+coloredSeq);
-        }
-        
-        resEl.innerHTML=lines.join('<br/>');
-      });
-    }
-
     // TEMPORARILY DISABLED: loadLateModeConfig();
     // TEMPORARILY DISABLED: loadVolumeEvalConfig();
     loadTimerAlertConfig();
     loadStreakAlertConfig();
     loadStreakReversalBotConfig();
-    loadStreakStatsPanel();
     tick();
   </script>
 </body>
@@ -952,7 +872,6 @@ def build_app(
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy_next: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_streak_stats_range: Optional[Callable[[float, float], Dict[str, Any]]] = None,
 ) -> FastAPI:
     app = FastAPI(title="BTC Live Bot", docs_url=None, redoc_url=None)
 
@@ -1072,18 +991,6 @@ def build_app(
         return JSONResponse({"ok": False, "error": "Manual sell is not enabled"})
       return JSONResponse(_sanitize_for_json(trigger_manual_sell(payload or {})))
 
-    @app.post("/api/streak-stats")
-    async def api_streak_stats(payload: Dict[str, Any] = Body(default={})):
-      if not get_streak_stats_range:
-        return JSONResponse({"error": "Streak stats not available"})
-      start_ts = payload.get("start_ts", 0)
-      end_ts = payload.get("end_ts", 0)
-      if not isinstance(start_ts, (int, float)) or not isinstance(end_ts, (int, float)):
-        return JSONResponse({"error": "Invalid timestamps"})
-      if start_ts >= end_ts:
-        return JSONResponse({"error": "start_ts must be less than end_ts"})
-      return JSONResponse(_sanitize_for_json(get_streak_stats_range(start_ts, end_ts)))
-
     return app
 
 
@@ -1118,7 +1025,6 @@ def start_web_dashboard(
   trigger_manual_buy: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_buy_next: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   trigger_manual_sell: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_streak_stats_range: Optional[Callable[[float, float], Dict[str, Any]]] = None,
 ) -> bool:
     """
     Start uvicorn in a daemon thread. Returns True if the port accepts connections
@@ -1143,7 +1049,6 @@ def start_web_dashboard(
       trigger_manual_buy=trigger_manual_buy,
       trigger_manual_buy_next=trigger_manual_buy_next,
       trigger_manual_sell=trigger_manual_sell,
-      get_streak_stats_range=get_streak_stats_range,
     )
 
     def run() -> None:
