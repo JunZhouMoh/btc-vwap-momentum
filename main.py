@@ -4143,10 +4143,12 @@ class LiveTradingBot:
         probabilities = []
         for length, count in length_counts.items():
             at_or_above = sum(n for candidate_length, n in length_counts.items() if candidate_length >= length)
-            if at_or_above > 0:
+            # A singleton tail is always 100% by construction, not useful evidence.
+            if at_or_above > 1:
                 probabilities.append({
                     "length": length,
                     "ended_count": count,
+                    "sample_count": at_or_above,
                     "pct_end_here": (count / at_or_above) * 100,
                 })
         return probabilities
@@ -4241,9 +4243,14 @@ class LiveTradingBot:
         hourly_dynamic_stats = []
         for hours in range(1, 7):
             probabilities = self._get_streak_end_probabilities(hours)
+            lookback_cutoff = time.time() - hours * 3600
             hourly_dynamic_stats.append({
                 "hours": hours,
-                "sample_count": sum(int(row.get("ended_count", 0)) for row in probabilities),
+                "sample_count": sum(
+                    1 for event_ts, _ in self._streak_end_events
+                    if float(event_ts) >= lookback_cutoff
+                ),
+                "probabilities": probabilities,
                 "selected_streak_lengths": self._get_dynamic_streak_selection(
                     top_x, min_probability_pct, hours
                 ),
