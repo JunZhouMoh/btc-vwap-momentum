@@ -1863,6 +1863,33 @@ class MarketMicrostructureLogger:
             logger.warning(f"Failed to write market microstructure snapshot: {e}")
 
 
+class StreakEndStatsLogger:
+    """Writes periodic streak-end statistics snapshots into data/ as JSONL."""
+
+    def __init__(self, log_file: str = "data/streak_end_stats.jsonl", interval_sec: float = 5.0):
+        self.log_file = resolve_runtime_path(log_file, json_only=True)
+        self.interval_sec = max(1.0, float(interval_sec))
+        self._next_emit_ts = 0.0
+        self._lock = threading.Lock()
+
+    def maybe_log(self, snapshot: Dict[str, Any], now: Optional[float] = None) -> None:
+        now_ts = float(now if now is not None else time.time())
+        if not isinstance(snapshot, dict):
+            return
+
+        with self._lock:
+            if now_ts < self._next_emit_ts:
+                return
+            self._next_emit_ts = now_ts + self.interval_sec
+
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning(f"Failed to write streak-end statistics snapshot: {e}")
+
+
 # =============================================================================
 # BINANCE BTC PRICE CLIENT (parallel feed for price comparison)
 # =============================================================================
@@ -4080,6 +4107,7 @@ class LiveTradingBot:
         # BTC price movement logger (tracks price after each buy)
         self.btc_price_movement_logger: Optional[BTCPriceMovementLogger] = None
         self.market_microstructure_logger: Optional[MarketMicrostructureLogger] = None
+        self.streak_end_stats_logger: Optional[StreakEndStatsLogger] = None
         
         # Control
         self.running = False
@@ -6008,6 +6036,11 @@ class LiveTradingBot:
             interval_sec=5.0,
         )
         console.print("[green]✓ Market microstructure logger: data/market_microstructure.jsonl[/green]")
+        self.streak_end_stats_logger = StreakEndStatsLogger(
+            log_file="data/streak_end_stats.jsonl",
+            interval_sec=5.0,
+        )
+        console.print("[green]✓ Streak-end stats logger: data/streak_end_stats.jsonl[/green]")
         
         # Dashboard
         self.dashboard = Dashboard(self.state, self.stats, self.config)
@@ -7268,6 +7301,15 @@ class LiveTradingBot:
                         self.market_microstructure_logger.maybe_log(
                             self.dashboard.build_microstructure_snapshot(),
                             now=time.time(),
+                        )
+                    if self.streak_end_stats_logger:
+                        now_ts = time.time()
+                        self.streak_end_stats_logger.maybe_log(
+                            {
+                                "ts": now_ts,
+                                "streak_end_counts": self._serialize_streak_end_counts(),
+                            },
+                            now=now_ts,
                         )
                     
                     # Check for entry signal - запускаем в отдельном task
