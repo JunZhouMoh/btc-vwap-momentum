@@ -4125,11 +4125,14 @@ class LiveTradingBot:
         self._streak_end_events.append((ts_v, key))
         self._prune_streak_end_events(ts_v)
 
-    def _get_streak_end_probabilities(self) -> List[Dict[str, Any]]:
-        """Return conditional end probabilities by streak length for the rolling lookback."""
+    def _get_streak_end_probabilities(self, lookback_hours: int = 6) -> List[Dict[str, Any]]:
+        """Return conditional end probabilities for events within a rolling hour window."""
         self._prune_streak_end_events()
+        cutoff = time.time() - max(1, min(6, int(lookback_hours))) * 3600
         length_counts: Dict[int, int] = {}
-        for _, key in self._streak_end_events:
+        for event_ts, key in self._streak_end_events:
+            if float(event_ts) < cutoff:
+                continue
             try:
                 _, raw_len = key.split("_", 1)
                 length = int(raw_len)
@@ -4152,10 +4155,11 @@ class LiveTradingBot:
         self,
         top_x: int,
         min_probability_pct: float = 0.0,
+        lookback_hours: int = 6,
     ) -> List[Dict[str, Any]]:
         """Select qualifying top probabilities, then order lengths for sequential entry."""
         ranked = sorted(
-            self._get_streak_end_probabilities(),
+            self._get_streak_end_probabilities(lookback_hours),
             key=lambda row: (-float(row["pct_end_here"]), int(row["length"])),
         )
         selected = [
@@ -4223,9 +4227,36 @@ class LiveTradingBot:
                     "pct_end_here_raw": pct_end_here,
                 })
         
-        # Add sequence as a special entry
+        srb = getattr(getattr(self.config, "streak_reversal_bot", None), "dynamic_mode", {}) or {}
+        if not isinstance(srb, dict):
+            srb = {}
+        try:
+            top_x = max(1, int(srb.get("top_x", 3)))
+        except (TypeError, ValueError):
+            top_x = 3
+        try:
+            min_probability_pct = min(100.0, max(0.0, float(srb.get("min_probability_pct", 0.0))))
+        except (TypeError, ValueError):
+            min_probability_pct = 0.0
+        hourly_dynamic_stats = []
+        for hours in range(1, 7):
+            probabilities = self._get_streak_end_probabilities(hours)
+            hourly_dynamic_stats.append({
+                "hours": hours,
+                "sample_count": sum(int(row.get("ended_count", 0)) for row in probabilities),
+                "selected_streak_lengths": self._get_dynamic_streak_selection(
+                    top_x, min_probability_pct, hours
+                ),
+            })
+
+        # Add sequence and hourly dynamic selections as a special entry
         sequence_str = "".join(str(l) for l in sequence)
-        return rows + [{"_summary": True, "by_length": summary, "sequence": sequence_str}]
+        return rows + [{
+            "_summary": True,
+            "by_length": summary,
+            "sequence": sequence_str,
+            "hourly_dynamic_stats": hourly_dynamic_stats,
+        }]
 
     def get_streak_stats_range(self, start_ts: float, end_ts: float, by_hour: bool = False) -> Dict[str, Any]:
         """Get streak statistics for a specific time range and save to JSON.
@@ -4908,6 +4939,10 @@ class LiveTradingBot:
             min_probability_pct = min(100.0, max(0.0, float(raw.get("min_probability_pct", 0.0))))
         except (TypeError, ValueError):
             min_probability_pct = 0.0
+        try:
+            lookback_hours = max(1, min(6, int(raw.get("lookback_hours", 6))))
+        except (TypeError, ValueError):
+            lookback_hours = 6
         amounts = raw.get("buy_amounts_usd", [30.0, 50.0, 70.0])
         if not isinstance(amounts, list):
             amounts = [30.0, 50.0, 70.0]
@@ -4925,9 +4960,12 @@ class LiveTradingBot:
             "enabled": bool(raw.get("enabled", False)),
             "top_x": top_x,
             "min_probability_pct": min_probability_pct,
+            "lookback_hours": lookback_hours,
             "buy_amounts_usd": [float(value) for value in amounts],
             "time_left_price_pairs": clean_pairs,
-            "selected_streak_lengths": self._get_dynamic_streak_selection(top_x, min_probability_pct),
+            "selected_streak_lengths": self._get_dynamic_streak_selection(
+                top_x, min_probability_pct, lookback_hours
+            ),
         }
 
     def _web_get_streak_reversal_bot(self) -> Dict[str, Any]:
@@ -5091,6 +5129,13 @@ class LiveTradingBot:
                         )
                     except (TypeError, ValueError):
                         min_probability_pct = 0.0
+                    try:
+                        lookback_hours = max(1, min(6, int(dynamic_raw.get(
+                            "lookback_hours",
+                            current_dynamic.get("lookback_hours", 6),
+                        ))))
+                    except (TypeError, ValueError):
+                        lookback_hours = 6
                     amounts_raw = dynamic_raw.get("buy_amounts_usd", current_dynamic.get("buy_amounts_usd", [30.0, 50.0, 70.0]))
                     amounts = []
                     if isinstance(amounts_raw, list):
@@ -5123,6 +5168,7 @@ class LiveTradingBot:
                         "enabled": bool(dynamic_raw.get("enabled", False)),
                         "top_x": top_x,
                         "min_probability_pct": min_probability_pct,
+                        "lookback_hours": lookback_hours,
                         "buy_amounts_usd": amounts or [30.0, 50.0, 70.0],
                         "time_left_price_pairs": dynamic_pairs,
                     }
@@ -5460,6 +5506,7 @@ class LiveTradingBot:
             dynamic_selected = self._get_dynamic_streak_selection(
                 dynamic_top_x,
                 dynamic_min_probability_pct,
+                max(1, min(6, int(dynamic_mode.get("lookback_hours", 6)))),
             )
             selected_index = next(
                 (i for i, row in enumerate(dynamic_selected) if int(row["length"]) == current_streak_length),
@@ -5766,6 +5813,7 @@ class LiveTradingBot:
                 "enabled": False,
                 "top_x": 3,
                 "min_probability_pct": 0.0,
+                "lookback_hours": 6,
                 "buy_amounts_usd": [30.0, 50.0, 70.0],
                 "time_left_price_pairs": [
                     {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
@@ -5996,7 +6044,6 @@ class LiveTradingBot:
                 trigger_manual_buy=self._web_trigger_manual_buy,
                 trigger_manual_buy_next=self._web_trigger_manual_buy_next,
                 trigger_manual_sell=self._web_trigger_manual_sell,
-                get_streak_stats_range=self.get_streak_stats_range,
             )
             # 0.0.0.0 is not a valid host in a browser URL; use loopback for display.
             railway_public = os.getenv("RAILWAY_PUBLIC_DOMAIN") or os.getenv("RAILWAY_STATIC_URL")
