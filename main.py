@@ -4124,7 +4124,7 @@ class LiveTradingBot:
         self._manual_buy_next_payload: Optional[Dict[str, Any]] = None
         self._next_window_filled_position: Optional[Dict[str, Any]] = None
         self._streak_reversal_bot_last_trigger_slug: str = ""  # Track last triggered market to avoid duplicates
-        self._streak_reversal_bot_mode_trigger_counts: Dict[str, Dict[int, int]] = {}  # Track triggers per market and mode: {market_slug: {mode_streak_length: count}}
+        self._streak_reversal_bot_mode_trigger_counts: Dict[str, Dict[str, int]] = {}  # market -> mode/direction -> trigger count
 
     @staticmethod
     def _streak_end_key(direction: str, streak_len: int) -> Optional[str]:
@@ -5010,6 +5010,7 @@ class LiveTradingBot:
             if not srb:
                 return {
                     "enabled": False,
+                    "same_direction_enabled": False,
                     "dynamic_mode": self._web_get_dynamic_streak_mode(None),
                     "modes": [
                         {
@@ -5060,10 +5061,12 @@ class LiveTradingBot:
                             "streak_length": int(mode.get("streak_length", 2)),
                             "buy_amount_usd": float(mode.get("buy_amount_usd", 5.0)),
                             "max_triggers": int(mode.get("max_triggers", 1)),
+                            "direction": str(mode.get("direction", "global")).strip().lower(),
                             "time_left_price_pairs": clean_pairs
                         })
                 return {
                     "enabled": bool(getattr(srb, "enabled", False)),
+                    "same_direction_enabled": bool(getattr(srb, "same_direction_enabled", False)),
                     "modes": clean_modes,
                     "dynamic_mode": self._web_get_dynamic_streak_mode(srb),
                     "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
@@ -5081,6 +5084,7 @@ class LiveTradingBot:
                     })
             return {
                 "enabled": bool(getattr(srb, "enabled", False)),
+                "same_direction_enabled": bool(getattr(srb, "same_direction_enabled", False)),
                 "min_streak_length": int(max(1, int(getattr(srb, "min_streak_length", 3) or 3))),
                 "buy_amount_usd": float(getattr(srb, "buy_amount_usd", 50.0) or 50.0),
                 "time_left_price_pairs": clean_pairs,
@@ -5091,6 +5095,7 @@ class LiveTradingBot:
             logger.exception("Error getting streak_reversal_bot config")
             return {
                 "enabled": False,
+                "same_direction_enabled": False,
                 "modes": [],
                 "timer_bot_ready": False,
             }
@@ -5108,6 +5113,9 @@ class LiveTradingBot:
             with self._config_lock:
                 if "enabled" in payload:
                     srb.enabled = bool(payload.get("enabled"))
+
+                if "same_direction_enabled" in payload:
+                    srb.same_direction_enabled = bool(payload.get("same_direction_enabled"))
                 
                 if "modes" in payload:
                     modes_raw = payload.get("modes", [])
@@ -5119,7 +5127,10 @@ class LiveTradingBot:
                                     sl = int(mode.get("streak_length", 2))
                                     ba = float(mode.get("buy_amount_usd", 5.0))
                                     mt = int(mode.get("max_triggers", 1))
-                                    if sl > 0 and ba > 0 and mt > 0:
+                                    if 1 <= sl <= 10 and ba > 0 and mt > 0:
+                                        direction = str(mode.get("direction", "global")).strip().lower()
+                                        if direction not in {"global", "reverse", "same", "both", "off"}:
+                                            direction = "global"
                                         mode_pairs_raw = mode.get("time_left_price_pairs", [])
                                         mode_pairs = []
                                         if isinstance(mode_pairs_raw, list):
@@ -5137,6 +5148,7 @@ class LiveTradingBot:
                                             "streak_length": sl,
                                             "buy_amount_usd": ba,
                                             "max_triggers": mt,
+                                            "direction": direction,
                                             "time_left_price_pairs": mode_pairs
                                         })
                             except (TypeError, ValueError):
@@ -5483,10 +5495,15 @@ class LiveTradingBot:
             )
 
     async def _check_streak_reversal_bot(self) -> None:
-        """Check for streak reversal buy signals based on configured modes."""
+        """Check configured streak-reversal and streak-continuation buy signals."""
         srb = getattr(self.config, "streak_reversal_bot", None)
-        if not srb or not bool(getattr(srb, "enabled", False)):
-            logger.info(f"[SRB] Bot disabled or not configured")
+        if not srb:
+            logger.info("[SRB] Bot not configured")
+            return
+        reverse_enabled = bool(getattr(srb, "enabled", False))
+        same_direction_enabled = bool(getattr(srb, "same_direction_enabled", False))
+        if not reverse_enabled and not same_direction_enabled:
+            logger.info("[SRB] Both direction strategies disabled")
             return
 
         market_slug = str(self.state.slug or "").strip()
@@ -5525,6 +5542,7 @@ class LiveTradingBot:
         # Prefer dynamic mode at selected lengths. The selected set is ranked by
         # conditional probability, then sorted ascending to assign amounts and entry order.
         matching_mode = None
+        configured_mode_direction = "global"
         dynamic_mode = getattr(srb, "dynamic_mode", {}) or {}
         if isinstance(dynamic_mode, dict) and bool(dynamic_mode.get("enabled", False)):
             try:
@@ -5549,10 +5567,18 @@ class LiveTradingBot:
             )
             dynamic_amounts = dynamic_mode.get("buy_amounts_usd", []) or []
             if selected_index is not None and selected_index < len(dynamic_amounts):
+                selected_fixed_mode = next(
+                    (mode for mode in modes if int(mode.get("streak_length", 0)) == current_streak_length),
+                    None,
+                )
+                configured_mode_direction = str(
+                    selected_fixed_mode.get("direction", "global") if selected_fixed_mode else "global"
+                ).strip().lower()
                 matching_mode = {
                     "streak_length": current_streak_length,
                     "buy_amount_usd": float(dynamic_amounts[selected_index]),
                     "max_triggers": 1,
+                    "direction": configured_mode_direction,
                     "time_left_price_pairs": dynamic_mode.get("time_left_price_pairs", []) or [],
                     "dynamic_probability_pct": float(dynamic_selected[selected_index]["pct_end_here"]),
                 }
@@ -5563,6 +5589,7 @@ class LiveTradingBot:
                 mode_streak_length = int(mode.get("streak_length", 2))
                 if current_streak_length == mode_streak_length:
                     matching_mode = mode
+                    configured_mode_direction = str(mode.get("direction", "global")).strip().lower()
                     break
         
         if not matching_mode:
@@ -5576,12 +5603,6 @@ class LiveTradingBot:
         # Initialize trigger tracking for this market if needed
         if market_slug not in self._streak_reversal_bot_mode_trigger_counts:
             self._streak_reversal_bot_mode_trigger_counts[market_slug] = {}
-        
-        current_triggers = self._streak_reversal_bot_mode_trigger_counts[market_slug].get(mode_streak_length, 0)
-        
-        if current_triggers >= max_triggers:
-            logger.info(f"[SRB] Mode (streak={mode_streak_length}) reached trigger limit: {current_triggers}/{max_triggers}")
-            return
         
         pairs = matching_mode.get("time_left_price_pairs", []) or []
         if not pairs:
@@ -5624,25 +5645,55 @@ class LiveTradingBot:
             logger.info(f"[SRB] Price too high to buy: {fav_price:.4f} > {matching_price:.4f}")
             return
 
-        # All conditions met! Buy the opposite of current streak
-        opposite_direction = "DOWN" if current_streak_direction == "UP" else "UP"
-
-        # Increment trigger count for this mode in this market
-        self._streak_reversal_bot_mode_trigger_counts[market_slug][mode_streak_length] = current_triggers + 1
-        new_trigger_count = self._streak_reversal_bot_mode_trigger_counts[market_slug][mode_streak_length]
-        
         # Get configured buy amount from matching mode
         buy_amount_usd = float(matching_mode.get("buy_amount_usd", 50.0) or 50.0)
-        
-        # Queue the buy signal
-        signal = f"BUY_{opposite_direction}"
-        self.dashboard.manual_signal_pending = f"{signal}|amount={buy_amount_usd:.8f}"
-        
-        dynamic_probability = matching_mode.get("dynamic_probability_pct")
-        probability_text = f" | conditional end probability {dynamic_probability:.1f}%" if dynamic_probability is not None else ""
-        logger.info(f"[SRB] ✓ TRIGGERED: {current_streak_length}x {current_streak_direction} → BUY {opposite_direction} (${buy_amount_usd:.2f}){probability_text}")
-        logger.info(f"[SRB] Mode triggers: {new_trigger_count}/{max_triggers} | price {fav_price:.4f} ≤ {matching_price:.4f}, time_left {time_left:.1f}s")
-        self.dashboard.manual_buy_live_status = f"queued (auto): {signal} ${buy_amount_usd:.2f}"
+
+        # Evaluate reversal first to preserve the existing strategy's behavior. Each
+        # strategy has its own per-market trigger limit and can be enabled separately.
+        if configured_mode_direction not in {"global", "reverse", "same", "both", "off"}:
+            configured_mode_direction = "global"
+        allow_reverse = configured_mode_direction in {"global", "reverse", "both"} and reverse_enabled
+        allow_same = configured_mode_direction in {"global", "same", "both"} and same_direction_enabled
+        buy_directions = []
+        if allow_reverse:
+            buy_directions.append(("reverse", "DOWN" if current_streak_direction == "UP" else "UP"))
+        if allow_same:
+            buy_directions.append(("same", current_streak_direction))
+
+        for strategy_name, buy_direction in buy_directions:
+            trigger_key = f"{mode_streak_length}:{strategy_name}"
+            strategy_triggers = self._streak_reversal_bot_mode_trigger_counts[market_slug].get(trigger_key, 0)
+            if strategy_triggers >= max_triggers:
+                logger.info(
+                    f"[SRB] {strategy_name} mode (streak={mode_streak_length}) reached trigger limit: "
+                    f"{strategy_triggers}/{max_triggers}"
+                )
+                continue
+
+            # Do not overwrite a queued buy or overlap an order.
+            if (
+                self.dashboard.manual_signal_pending
+                or self.dashboard.last_signal
+                or str(self.dashboard.manual_buy_live_status).startswith("running:")
+            ):
+                return
+
+            self._streak_reversal_bot_mode_trigger_counts[market_slug][trigger_key] = strategy_triggers + 1
+            new_trigger_count = strategy_triggers + 1
+            signal = f"BUY_{buy_direction}"
+            self.dashboard.manual_signal_pending = f"{signal}|amount={buy_amount_usd:.8f}"
+            dynamic_probability = matching_mode.get("dynamic_probability_pct")
+            probability_text = f" | conditional end probability {dynamic_probability:.1f}%" if dynamic_probability is not None else ""
+            logger.info(
+                f"[SRB] ✓ TRIGGERED ({strategy_name}): {current_streak_length}x "
+                f"{current_streak_direction} → BUY {buy_direction} (${buy_amount_usd:.2f}){probability_text}"
+            )
+            logger.info(
+                f"[SRB] Mode triggers: {new_trigger_count}/{max_triggers} | "
+                f"price {fav_price:.4f} ≤ {matching_price:.4f}, time_left {time_left:.1f}s"
+            )
+            self.dashboard.manual_buy_live_status = f"queued (auto {strategy_name}): BUY_{buy_direction} ${buy_amount_usd:.2f}"
+            return
 
     def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.running:
@@ -5833,6 +5884,7 @@ class LiveTradingBot:
             class StreakReversalBotConfig:
                 def __init__(self):
                     self.enabled = False
+                    self.same_direction_enabled = False
                     self.min_streak_length = 3
                     self.buy_amount_usd = 50.0
                     self.time_left_price_pairs = [
