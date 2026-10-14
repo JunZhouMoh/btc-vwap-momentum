@@ -5771,34 +5771,44 @@ class LiveTradingBot:
         mode_direction = str(matching_mode.get("direction", "global")).strip().lower()
         reverse_enabled = bool(getattr(srb, "enabled", False))
         same_enabled = bool(getattr(srb, "same_direction_enabled", False))
+        max_triggers = max(1, int(matching_mode.get("max_triggers", 1) or 1))
         if mode_direction == "global":
-            directions = []
+            targets = []
             if reverse_enabled:
-                directions.append("DOWN" if projected_direction == "UP" else "UP")
+                targets.append(("reverse", "DOWN" if projected_direction == "UP" else "UP"))
             if same_enabled:
-                directions.append(projected_direction)
+                targets.append(("same", projected_direction))
         elif mode_direction == "reverse" and reverse_enabled:
-            directions = ["DOWN" if projected_direction == "UP" else "UP"]
+            targets = [("reverse", "DOWN" if projected_direction == "UP" else "UP")]
         elif mode_direction == "same" and same_enabled:
-            directions = [projected_direction]
+            targets = [("same", projected_direction)]
         elif mode_direction == "both":
-            directions = []
+            targets = []
             if reverse_enabled:
-                directions.append("DOWN" if projected_direction == "UP" else "UP")
+                targets.append(("reverse", "DOWN" if projected_direction == "UP" else "UP"))
             if same_enabled:
-                directions.append(projected_direction)
+                targets.append(("same", projected_direction))
         else:
-            directions = []
+            targets = []
 
         # Require an unambiguous direction rather than choosing silently when
         # both strategies are enabled.
-        if len(directions) != 1:
-            if len(directions) > 1:
+        if len(targets) != 1:
+            if len(targets) > 1:
                 logger.warning(
                     "[SRB prebuy] Both directions qualify for projected streak %sx; "
                     "choose Same or Reverse for this mode to buy one side",
                     projected_length,
                 )
+            return
+
+        strategy_name, selected_direction = targets[0]
+        trigger_key = f"{projected_length}:{strategy_name}"
+        target_market_slug = str(self.state.next_slug or "").strip() or market_slug
+        if target_market_slug not in self._streak_reversal_bot_mode_trigger_counts:
+            self._streak_reversal_bot_mode_trigger_counts[target_market_slug] = {}
+        strategy_triggers = self._streak_reversal_bot_mode_trigger_counts[target_market_slug].get(trigger_key, 0)
+        if strategy_triggers >= max_triggers:
             return
 
         # Do not overwrite a queued buy or overlap an active send.
@@ -5813,11 +5823,12 @@ class LiveTradingBot:
         if amount_usd <= 0.0:
             return
         result = self._web_trigger_manual_buy_next({
-            "direction": directions[0],
+            "direction": selected_direction,
             "amount_usd": amount_usd,
             "_buy_next_now": True,
         })
         if result.get("ok"):
+            self._streak_reversal_bot_mode_trigger_counts[target_market_slug][trigger_key] = strategy_triggers + 1
             self._streak_prebuy_last_trigger_slug = market_slug
             logger.info(
                 "[SRB prebuy] Projected streak=%sx %s at %.4f with %.1fs left; "
@@ -5826,7 +5837,7 @@ class LiveTradingBot:
                 projected_direction,
                 projected_price,
                 time_left,
-                directions[0],
+                selected_direction,
                 amount_usd,
             )
 
