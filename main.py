@@ -5719,7 +5719,7 @@ class LiveTradingBot:
             return
 
     async def _check_streak_prebuy_next_session(self) -> None:
-        """Pre-queue next market's buy when the current streak is about to qualify."""
+        """Trigger immediate next-window buy when the projected streak qualifies."""
         srb = getattr(self.config, "streak_reversal_bot", None)
         prebuy = getattr(srb, "prebuy_next_session", {}) if srb else {}
         if not isinstance(prebuy, dict) or not bool(prebuy.get("enabled", False)):
@@ -5790,17 +5790,23 @@ class LiveTradingBot:
         else:
             directions = []
 
-        # The next-window order queue supports a single position. Require an
-        # unambiguous direction rather than choosing silently when both are enabled.
+        # Require an unambiguous direction rather than choosing silently when
+        # both strategies are enabled.
         if len(directions) != 1:
             if len(directions) > 1:
                 logger.warning(
                     "[SRB prebuy] Both directions qualify for projected streak %sx; "
-                    "choose Same or Reverse for this mode to pre-buy one side",
+                    "choose Same or Reverse for this mode to buy one side",
                     projected_length,
                 )
             return
-        if self._manual_buy_next_payload:
+
+        # Do not overwrite a queued buy or overlap an active send.
+        if (
+            self.dashboard.manual_signal_pending
+            or self.dashboard.last_signal
+            or str(self.dashboard.manual_buy_live_status).startswith("running:")
+        ):
             return
 
         amount_usd = float(matching_mode.get("buy_amount_usd", 0.0) or 0.0)
@@ -5809,12 +5815,13 @@ class LiveTradingBot:
         result = self._web_trigger_manual_buy_next({
             "direction": directions[0],
             "amount_usd": amount_usd,
+            "_buy_next_now": True,
         })
         if result.get("ok"):
             self._streak_prebuy_last_trigger_slug = market_slug
             logger.info(
                 "[SRB prebuy] Projected streak=%sx %s at %.4f with %.1fs left; "
-                "queued next-session BUY_%s $%.2f",
+                "triggered immediate BUY_%s_NEXT_NOW $%.2f",
                 projected_length,
                 projected_direction,
                 projected_price,
