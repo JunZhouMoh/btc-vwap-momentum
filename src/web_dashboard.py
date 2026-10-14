@@ -70,7 +70,6 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <!-- TEMPORARILY REMOVED: Mode Performance -->
     <!-- <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div> -->
-    <div class="card controls"><h2>Telegram Timer Alert</h2><div id="timerAlertPanel" class="mono">Loading...</div></div>
     <!-- TEMPORARILY REMOVED: Late Entry Modes -->
     <!-- <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModePanel" class="mono">Loading...</div></div> -->
     <!-- TEMPORARILY REMOVED: Volume Eval Mode -->
@@ -253,7 +252,7 @@ _HTML = """<!DOCTYPE html>
       h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="srb_prebuy_enabled" '+(prebuy.enabled?'checked':'')+'/></div>');
       h.push('<div class="row"><label>Time Left (sec)</label><input type="number" id="srb_prebuy_time_left" min="1" max="300" step="1" value="'+esc(prebuy.time_left_sec!=null?prebuy.time_left_sec:20)+'"/></div>');
       h.push('<div class="row"><label>Confirm Price</label><input type="number" id="srb_prebuy_confirmation_price" min="0.5" max="1" step="0.001" value="'+esc(prebuy.confirmation_price!=null?prebuy.confirmation_price:0.99)+'"/></div>');
-      h.push('<div style="font-size:0.72rem;color:#8b949e">If the current market direction reaches this price before the time limit, the bot projects the ending streak (+1 when direction continues) and queues the next market using that streak mode. Choose one direction (Reverse or Same) for the projected streak.</div></div>');
+      h.push('<div style="font-size:0.72rem;color:#8b949e">If the current market direction reaches this price before the time limit, the bot projects the ending streak (+1 when direction continues) and sends an immediate next-window buy using that streak mode. Choose one direction (Reverse or Same) for the projected streak.</div></div>');
       h.push('<div style="color:#8b949e;font-size:0.75rem;margin:0.35rem 0">Set each streak length from 1–10. Per-mode direction selects which enabled global strategy can trade.</div>');
       h.push('<div class="row"><label>Current Streak</label><span id="srb_current_streak">—</span></div>');
       h.push('<div style="margin-top:0.5rem"><strong style="color:#58a6ff;font-size:0.85rem">Modes (Streak Length → Buy Amount → Max Triggers):</strong></div>');
