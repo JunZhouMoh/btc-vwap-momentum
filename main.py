@@ -4125,6 +4125,7 @@ class LiveTradingBot:
         self._next_window_filled_position: Optional[Dict[str, Any]] = None
         self._streak_reversal_bot_last_trigger_slug: str = ""  # Track last triggered market to avoid duplicates
         self._streak_reversal_bot_mode_trigger_counts: Dict[str, Dict[str, int]] = {}  # market -> mode/direction -> trigger count
+        self._streak_prebuy_last_trigger_slug: str = ""
 
     @staticmethod
     def _streak_end_key(direction: str, streak_len: int) -> Optional[str]:
@@ -5040,6 +5041,13 @@ class LiveTradingBot:
                     ],
                     "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
                 }
+
+            prebuy = getattr(srb, "prebuy_next_session", {}) or {}
+            prebuy_config = {
+                "enabled": bool(prebuy.get("enabled", False)),
+                "time_left_sec": max(0, int(prebuy.get("time_left_sec", 20))),
+                "confirmation_price": min(1.0, max(0.0, float(prebuy.get("confirmation_price", 0.99)))),
+            }
             
             # Check if using new multi-mode format
             modes = getattr(srb, "modes", None)
@@ -5067,6 +5075,7 @@ class LiveTradingBot:
                 return {
                     "enabled": bool(getattr(srb, "enabled", False)),
                     "same_direction_enabled": bool(getattr(srb, "same_direction_enabled", False)),
+                    "prebuy_next_session": prebuy_config,
                     "modes": clean_modes,
                     "dynamic_mode": self._web_get_dynamic_streak_mode(srb),
                     "timer_bot_ready": bool(self.timer_telegram and self.timer_telegram.enabled),
@@ -5085,6 +5094,7 @@ class LiveTradingBot:
             return {
                 "enabled": bool(getattr(srb, "enabled", False)),
                 "same_direction_enabled": bool(getattr(srb, "same_direction_enabled", False)),
+                "prebuy_next_session": prebuy_config,
                 "min_streak_length": int(max(1, int(getattr(srb, "min_streak_length", 3) or 3))),
                 "buy_amount_usd": float(getattr(srb, "buy_amount_usd", 50.0) or 50.0),
                 "time_left_price_pairs": clean_pairs,
@@ -5096,6 +5106,7 @@ class LiveTradingBot:
             return {
                 "enabled": False,
                 "same_direction_enabled": False,
+                "prebuy_next_session": {"enabled": False, "time_left_sec": 20, "confirmation_price": 0.99},
                 "modes": [],
                 "timer_bot_ready": False,
             }
@@ -5116,6 +5127,18 @@ class LiveTradingBot:
 
                 if "same_direction_enabled" in payload:
                     srb.same_direction_enabled = bool(payload.get("same_direction_enabled"))
+
+                if "prebuy_next_session" in payload and isinstance(payload.get("prebuy_next_session"), dict):
+                    raw_prebuy = payload["prebuy_next_session"]
+                    current_prebuy = getattr(srb, "prebuy_next_session", {}) or {}
+                    try:
+                        srb.prebuy_next_session = {
+                            "enabled": bool(raw_prebuy.get("enabled", current_prebuy.get("enabled", False))),
+                            "time_left_sec": max(1, min(300, int(raw_prebuy.get("time_left_sec", current_prebuy.get("time_left_sec", 20))))),
+                            "confirmation_price": min(1.0, max(0.5, float(raw_prebuy.get("confirmation_price", current_prebuy.get("confirmation_price", 0.99))))),
+                        }
+                    except (TypeError, ValueError):
+                        pass
                 
                 if "modes" in payload:
                     modes_raw = payload.get("modes", [])
@@ -5695,6 +5718,111 @@ class LiveTradingBot:
             self.dashboard.manual_buy_live_status = f"queued (auto {strategy_name}): BUY_{buy_direction} ${buy_amount_usd:.2f}"
             return
 
+    async def _check_streak_prebuy_next_session(self) -> None:
+        """Pre-queue next market's buy when the current streak is about to qualify."""
+        srb = getattr(self.config, "streak_reversal_bot", None)
+        prebuy = getattr(srb, "prebuy_next_session", {}) if srb else {}
+        if not isinstance(prebuy, dict) or not bool(prebuy.get("enabled", False)):
+            return
+
+        market_slug = str(self.state.slug or "").strip()
+        if not market_slug or market_slug == self._streak_prebuy_last_trigger_slug:
+            return
+        time_left = max(0.0, float(self.state.end_time or 0.0) - time.time())
+        try:
+            trigger_time_left = max(1, int(prebuy.get("time_left_sec", 20)))
+            confirmation_price = min(1.0, max(0.5, float(prebuy.get("confirmation_price", 0.99))))
+        except (TypeError, ValueError):
+            logger.warning("[SRB prebuy] Invalid trigger settings")
+            return
+        if not (0.0 < time_left <= trigger_time_left):
+            return
+
+        up = self.state.up_token
+        down = self.state.down_token
+        if not up or not down:
+            return
+        up_price = float(up.last_price or 0.0)
+        down_price = float(down.last_price or 0.0)
+        if up_price <= 0.0 and down_price <= 0.0:
+            return
+        projected_direction = "UP" if up_price >= down_price else "DOWN"
+        projected_price = up_price if projected_direction == "UP" else down_price
+        if projected_price < confirmation_price:
+            return
+
+        previous_direction = str(self._streak_direction or "").strip().upper()
+        previous_length = max(0, int(self._streak_count or 0))
+        projected_length = previous_length + 1 if previous_direction == projected_direction else 1
+        modes = getattr(srb, "modes", None) or []
+        matching_mode = None
+        for mode in modes:
+            if not isinstance(mode, dict):
+                continue
+            try:
+                if int(mode.get("streak_length", 0)) == projected_length:
+                    matching_mode = mode
+                    break
+            except (TypeError, ValueError):
+                continue
+        if matching_mode is None:
+            return
+
+        mode_direction = str(matching_mode.get("direction", "global")).strip().lower()
+        reverse_enabled = bool(getattr(srb, "enabled", False))
+        same_enabled = bool(getattr(srb, "same_direction_enabled", False))
+        if mode_direction == "global":
+            directions = []
+            if reverse_enabled:
+                directions.append("DOWN" if projected_direction == "UP" else "UP")
+            if same_enabled:
+                directions.append(projected_direction)
+        elif mode_direction == "reverse" and reverse_enabled:
+            directions = ["DOWN" if projected_direction == "UP" else "UP"]
+        elif mode_direction == "same" and same_enabled:
+            directions = [projected_direction]
+        elif mode_direction == "both":
+            directions = []
+            if reverse_enabled:
+                directions.append("DOWN" if projected_direction == "UP" else "UP")
+            if same_enabled:
+                directions.append(projected_direction)
+        else:
+            directions = []
+
+        # The next-window order queue supports a single position. Require an
+        # unambiguous direction rather than choosing silently when both are enabled.
+        if len(directions) != 1:
+            if len(directions) > 1:
+                logger.warning(
+                    "[SRB prebuy] Both directions qualify for projected streak %sx; "
+                    "choose Same or Reverse for this mode to pre-buy one side",
+                    projected_length,
+                )
+            return
+        if self._manual_buy_next_payload:
+            return
+
+        amount_usd = float(matching_mode.get("buy_amount_usd", 0.0) or 0.0)
+        if amount_usd <= 0.0:
+            return
+        result = self._web_trigger_manual_buy_next({
+            "direction": directions[0],
+            "amount_usd": amount_usd,
+        })
+        if result.get("ok"):
+            self._streak_prebuy_last_trigger_slug = market_slug
+            logger.info(
+                "[SRB prebuy] Projected streak=%sx %s at %.4f with %.1fs left; "
+                "queued next-session BUY_%s $%.2f",
+                projected_length,
+                projected_direction,
+                projected_price,
+                time_left,
+                directions[0],
+                amount_usd,
+            )
+
     def _web_trigger_manual_buy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.running:
             self.dashboard.manual_buy_live_status = "blocked: bot not running"
@@ -5906,6 +6034,12 @@ class LiveTradingBot:
                     {"time_left_sec": 300, "buy_price": 0.45, "enabled": True},
                     {"time_left_sec": 150, "buy_price": 0.50, "enabled": True},
                 ],
+            }
+        if not hasattr(srb, "prebuy_next_session"):
+            srb.prebuy_next_session = {
+                "enabled": False,
+                "time_left_sec": 20,
+                "confirmation_price": 0.99,
             }
 
         im = self.config.market.interval_minutes
@@ -7419,6 +7553,7 @@ class LiveTradingBot:
                     await self._check_timer_alert()
                     await self.check_market_end()
                     await self._check_streak_reversal_bot()
+                    await self._check_streak_prebuy_next_session()
 
                     # Emit a lightweight heartbeat so platform logs show liveness continuously.
                     now = time.time()
