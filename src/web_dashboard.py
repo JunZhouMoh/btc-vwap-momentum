@@ -248,21 +248,31 @@ _HTML = """<!DOCTYPE html>
       var h=[];
       h.push('<div class="row"><label>Global Reverse Enabled</label><input type="checkbox" id="srb_enabled" '+(sb.enabled?'checked':'')+'/></div>');
       h.push('<div class="row"><label>Global Continue Enabled</label><input type="checkbox" id="srb_same_direction_enabled" '+(sb.same_direction_enabled?'checked':'')+'/></div>');
+      var prebuy=sb.prebuy_next_session||{};
+      h.push('<div style="border:1px solid #30363d;border-radius:6px;padding:0.5rem;margin:0.45rem 0;background:#0d1117"><div class="mode-title">Pre-buy Next Session</div>');
+      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="srb_prebuy_enabled" '+(prebuy.enabled?'checked':'')+'/></div>');
+      h.push('<div class="row"><label>Time Left (sec)</label><input type="number" id="srb_prebuy_time_left" min="1" max="300" step="1" value="'+esc(prebuy.time_left_sec!=null?prebuy.time_left_sec:20)+'"/></div>');
+      h.push('<div class="row"><label>Confirm Price</label><input type="number" id="srb_prebuy_confirmation_price" min="0.5" max="1" step="0.001" value="'+esc(prebuy.confirmation_price!=null?prebuy.confirmation_price:0.99)+'"/></div>');
+      h.push('<div style="font-size:0.72rem;color:#8b949e">If the current market direction reaches this price before the time limit, the bot projects the ending streak (+1 when direction continues) and queues the next market using that streak mode. Choose one direction (Reverse or Same) for the projected streak.</div></div>');
       h.push('<div style="color:#8b949e;font-size:0.75rem;margin:0.35rem 0">Set each streak length from 1–10. Per-mode direction selects which enabled global strategy can trade.</div>');
       h.push('<div class="row"><label>Current Streak</label><span id="srb_current_streak">—</span></div>');
       h.push('<div style="margin-top:0.5rem"><strong style="color:#58a6ff;font-size:0.85rem">Modes (Streak Length → Buy Amount → Max Triggers):</strong></div>');
       
       var modes=sb.modes||[];
-      for(var mi=0;mi<Math.max(modes.length,10);mi++){
-        var mode=modes[mi]||{};
-        var sl=mode.streak_length!=null?mode.streak_length:(mi+1);
+      for(var mi=0;mi<10;mi++){
+        var sl=mi+1;
+        var mode=null;
+        for(var msi=0;msi<modes.length;msi++){
+          if(parseInt((modes[msi]||{}).streak_length,10)===sl){ mode=modes[msi]; break; }
+        }
+        mode=mode||{};
         var ba=mode.buy_amount_usd!=null?mode.buy_amount_usd:(5+mi*5);
         var mt=mode.max_triggers!=null?mode.max_triggers:1;
         var direction=mode.direction||'global';
         var pairs=mode.time_left_price_pairs||[];
         
         h.push('<div style="border:1px solid #30363d;border-radius:6px;padding:0.5rem;margin-top:0.35rem;background:#0d1117">');
-        h.push('<div class="row"><label style="min-width:120px">Streak Length</label><input type="number" id="srb_mode_'+mi+'_streak_length" step="1" min="1" max="10" value="'+esc(sl)+'" style="width:60px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem;"/></div>');
+        h.push('<div class="mode-title">Streak '+sl+'</div>');
         h.push('<div class="row"><label style="min-width:120px">Direction</label><select id="srb_mode_'+mi+'_direction" style="background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem"><option value="global"'+(direction==='global'?' selected':'')+'>Global</option><option value="reverse"'+(direction==='reverse'?' selected':'')+'>Reverse</option><option value="same"'+(direction==='same'?' selected':'')+'>Same direction</option><option value="both"'+(direction==='both'?' selected':'')+'>Both</option><option value="off"'+(direction==='off'?' selected':'')+'>Off</option></select></div>');
         h.push('<div class="row"><label style="min-width:120px">Buy Amount ($)</label><input type="number" id="srb_mode_'+mi+'_buy_amount_usd" step="0.1" min="0.1" value="'+esc(ba)+'" style="width:60px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem;"/></div>');
         h.push('<div class="row"><label style="min-width:120px">Max Triggers</label><input type="number" id="srb_mode_'+mi+'_max_triggers" step="1" min="1" value="'+esc(mt)+'" style="width:60px;background:#161b22;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:0.25rem 0.35rem;" title="Max times this mode can trigger per market window"/></div>');
@@ -297,12 +307,11 @@ _HTML = """<!DOCTYPE html>
       var sb=streakReversalBotCfg||{};
       var modes=[];
       for(var mi=0;mi<10;mi++){
-        var slEl=document.getElementById('srb_mode_'+mi+'_streak_length');
         var dirEl=document.getElementById('srb_mode_'+mi+'_direction');
         var baEl=document.getElementById('srb_mode_'+mi+'_buy_amount_usd');
         var mtEl=document.getElementById('srb_mode_'+mi+'_max_triggers');
-        if(slEl&&baEl&&mtEl){
-          var sl=parseInt(slEl.value,10);
+        if(dirEl&&baEl&&mtEl){
+          var sl=mi+1;
           var ba=parseFloat(baEl.value);
           var mt=parseInt(mtEl.value,10);
           if(!isNaN(sl)&&!isNaN(ba)&&!isNaN(mt)&&sl>0&&ba>0&&mt>0){
@@ -327,6 +336,11 @@ _HTML = """<!DOCTYPE html>
       var payload={
         enabled:!!(document.getElementById('srb_enabled')&&document.getElementById('srb_enabled').checked),
         same_direction_enabled:!!(document.getElementById('srb_same_direction_enabled')&&document.getElementById('srb_same_direction_enabled').checked),
+        prebuy_next_session:{
+          enabled:!!(document.getElementById('srb_prebuy_enabled')&&document.getElementById('srb_prebuy_enabled').checked),
+          time_left_sec:readInt('srb_prebuy_time_left',20),
+          confirmation_price:readNum('srb_prebuy_confirmation_price',0.99)
+        },
         modes:modes
       };
       requestJson('POST','/api/streak-reversal-bot',payload,function(resp){
