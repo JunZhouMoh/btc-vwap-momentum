@@ -70,10 +70,6 @@ _HTML = """<!DOCTYPE html>
     <div class="card"><h2>Trading</h2><div id="trading" class="mono"></div></div>
     <!-- TEMPORARILY REMOVED: Mode Performance -->
     <!-- <div class="card"><h2>Mode Performance</h2><div id="modePerf" class="mono"></div></div> -->
-    <!-- TEMPORARILY REMOVED: Late Entry Modes -->
-    <!-- <div class="card controls"><h2>Late Entry Modes</h2><div id="lateModePanel" class="mono">Loading...</div></div> -->
-    <!-- TEMPORARILY REMOVED: Volume Eval Mode -->
-    <!-- <div class="card controls"><h2>Volume Eval Mode</h2><div id="volumeEvalPanel" class="mono">Loading...</div></div> -->
     <div class="card controls"><h2>Telegram Streak Alert</h2><div id="streakAlertPanel" class="mono">Loading...</div></div>
     <div class="card controls"><h2>Streak-Based Buy Bot</h2><div id="streakReversalBotPanel" class="mono">Loading...</div></div>
     <div class="card"><h2>Streak End Counts</h2><div id="streakEnds" class="mono">Loading...</div></div>
@@ -89,8 +85,6 @@ _HTML = """<!DOCTYPE html>
     function readInt(id,f){ var el=document.getElementById(id); if(!el) return f; var v=parseInt(el.value,10); return isNaN(v)?f:v; }
     function requestJson(method,url,payload,onDone){ var r=new XMLHttpRequest(); r.open(method,url,true); if(payload!==null&&payload!==undefined){ r.setRequestHeader('Content-Type','application/json'); } r.onreadystatechange=function(){ if(r.readyState!==4) return; if(r.status<200||r.status>=300) return; try{ var d=JSON.parse(r.responseText); if(onDone) onDone(d);}catch(e){} }; r.send(payload!==null&&payload!==undefined?JSON.stringify(payload):null); }
 
-    var modeCfg={late:null,volEval:null,volAccel:null};
-  var timerAlertCfg=null;
   var streakAlertCfg=null;
   var streakReversalBotCfg=null;
   var hourlyLookbackDraft=null;
@@ -117,84 +111,6 @@ _HTML = """<!DOCTYPE html>
     }
 
     function numFmtSigned(n,d){ if(n===null||n===undefined||typeof n!=='number'||isNaN(n)) return '\u2014'; var fixed=n.toFixed(d); if(n>0) return '+'+fixed; return fixed; }
-
-    function buildLateModeEditor(mode,modePerfData){
-      var k=mode.key, h=[];
-      h.push('<div class="mode-box">');
-      h.push('<div class="mode-title">'+esc(k)+'</div>');
-      if(modePerfData&&modePerfData[k]){ var perf=modePerfData[k]||{}; var pnl=perf.total_pnl_usd!=null?numFmtSigned(perf.total_pnl_usd,2):'\u2014'; var trades=perf.trade_count||0; var wr=perf.win_rate_pct!=null?numFmt(perf.win_rate_pct,1)+'%':'\u2014'; h.push('<div style="font-size:0.75rem;color:#8b949e;margin-bottom:0.25rem">PnL $'+esc(pnl)+' | Trades '+esc(trades)+' | WR '+esc(wr)+'</div>'); }
-      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="'+esc(k)+'_enabled" '+(mode.enabled?'checked':'')+'/></div>');
-      h.push('<div class="row"><label>Time Left</label><input type="number" id="'+esc(k)+'_time_left_sec" step="1" value="'+esc(mode.time_left_sec)+'"/></div>');
-      h.push('<div class="row"><label>Min Contracts</label><input type="number" id="'+esc(k)+'_min_contracts" step="1" value="'+esc(mode.min_contracts)+'"/></div>');
-      h.push('<div class="row"><label>Max Trades</label><input type="number" id="'+esc(k)+'_max_trades" step="1" value="'+esc(mode.max_trades)+'"/></div>');
-      h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="'+esc(k)+'_buffer_avg_multiplier" step="0.01" value="'+esc(mode.buffer_avg_multiplier)+'"/></div>');
-      h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="'+esc(k)+'_min_buffer_threshold_usd" step="0.1" value="'+esc(mode.min_buffer_threshold_usd)+'"/></div>');
-      h.push('<div class="row"><label>Min Price</label><input type="number" id="'+esc(k)+'_min_price" step="0.001" value="'+esc(mode.min_price)+'"/></div>');
-      h.push('<div class="row"><label>Max Price</label><input type="number" id="'+esc(k)+'_max_price" step="0.001" value="'+esc(mode.max_price)+'"/></div>');
-      h.push('</div>');
-      return h.join('');
-    }
-
-    function renderLateModePanelConfig(modePerfData){
-      var box=document.getElementById('lateModePanel'); if(!box) return;
-      var lm=modeCfg.late||{};
-      if(!lm||!lm.modes){ box.textContent='Late mode config unavailable'; return; }
-      var h=[];
-      h.push('<div class="row"><label>Late Enabled</label><input type="checkbox" id="late_enabled" '+(lm.enabled?'checked':'')+'/></div>');
-      h.push('<div class="row"><label>Total Max</label><input type="number" id="late_total_max_trades" step="1" value="'+esc(lm.total_max_trades!=null?lm.total_max_trades:1)+'"/></div>');
-      h.push('<div class="mode-grid">');
-      for(var i=0;i<lm.modes.length;i++){ h.push(buildLateModeEditor(lm.modes[i]||{},modePerfData)); }
-      h.push('</div>');
-      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveLateModeConfig()">Apply</button><button class="btn secondary" onclick="loadLateModeConfig()">Reload</button></div>');
-      h.push('<div id="lateModeStatus" class="status"></div>');
-      box.innerHTML=h.join('<br/>');
-    }
-
-    function renderVolumeEvalPanelConfig(){
-      var box=document.getElementById('volumeEvalPanel'); if(!box) return;
-      var ve=modeCfg.volEval||{}, va=modeCfg.volAccel||{};
-      var h=[];
-      h.push('<div class="mode-box"><div class="mode-title">volume_eval_mode</div>');
-      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="ve_enabled" '+(ve.enabled?'checked':'')+'/></div>');
-      h.push('<div class="row"><label>Time Left</label><input type="number" id="ve_time_left_sec" step="1" value="'+esc(ve.time_left_sec!=null?ve.time_left_sec:0)+'"/></div>');
-      h.push('<div class="row"><label>Min Contracts</label><input type="number" id="ve_min_contracts" step="1" value="'+esc(ve.min_contracts!=null?ve.min_contracts:1)+'"/></div>');
-      h.push('<div class="row"><label>Max Trades</label><input type="number" id="ve_max_trades" step="1" value="'+esc(ve.max_trades!=null?ve.max_trades:1)+'"/></div>');
-      h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="ve_buffer_avg_multiplier" step="0.01" value="'+esc(ve.buffer_avg_multiplier!=null?ve.buffer_avg_multiplier:1.0)+'"/></div>');
-      h.push('<div class="row"><label>Min Buffer $</label><input type="number" id="ve_min_buffer_threshold_usd" step="0.1" value="'+esc(ve.min_buffer_threshold_usd!=null?ve.min_buffer_threshold_usd:0.0)+'"/></div>');
-      h.push('<div class="row"><label>Entry Vol 1</label><input type="number" id="ve_entry_vol_1" step="1" value="'+esc((ve.entry_min_current_volume_diffs&&ve.entry_min_current_volume_diffs.length>0)?ve.entry_min_current_volume_diffs[0]:1000)+'"/></div>');
-      h.push('<div class="row"><label>Entry Vol 2</label><input type="number" id="ve_entry_vol_2" step="1" value="'+esc((ve.entry_min_current_volume_diffs&&ve.entry_min_current_volume_diffs.length>1)?ve.entry_min_current_volume_diffs[1]:2000)+'"/></div>');
-      h.push('<div class="row"><label>Entry Vol 3</label><input type="number" id="ve_entry_vol_3" step="1" value="'+esc((ve.entry_min_current_volume_diffs&&ve.entry_min_current_volume_diffs.length>2)?ve.entry_min_current_volume_diffs[2]:3000)+'"/></div>');
-      h.push('<div class="row"><label>Entry Limit 1</label><input type="number" id="ve_entry_limit_1" step="1" value="'+esc((ve.entry_trade_limits&&ve.entry_trade_limits.length>0)?ve.entry_trade_limits[0]:1)+'"/></div>');
-      h.push('<div class="row"><label>Entry Limit 2</label><input type="number" id="ve_entry_limit_2" step="1" value="'+esc((ve.entry_trade_limits&&ve.entry_trade_limits.length>1)?ve.entry_trade_limits[1]:1)+'"/></div>');
-      h.push('<div class="row"><label>Entry Limit 3</label><input type="number" id="ve_entry_limit_3" step="1" value="'+esc((ve.entry_trade_limits&&ve.entry_trade_limits.length>2)?ve.entry_trade_limits[2]:1)+'"/></div>');
-      h.push('<div class="row"><label>Min Price</label><input type="number" id="ve_min_price" step="0.001" value="'+esc(ve.min_price!=null?ve.min_price:0.0)+'"/></div>');
-      h.push('<div class="row"><label>Max Price</label><input type="number" id="ve_max_price" step="0.001" value="'+esc(ve.max_price!=null?ve.max_price:1.0)+'"/></div>');
-      h.push('</div>');
-      h.push('<div class="mode-box"><div class="mode-title">volume_accel_check</div>');
-      h.push('<div class="row"><label>Min Curr Diff</label><input type="number" id="va_min_current_volume_diff" step="1" value="'+esc(va.min_current_volume_diff!=null?va.min_current_volume_diff:0.0)+'"/></div>');
-      h.push('<div class="row"><label>Min Accel Diff</label><input type="number" id="va_min_accel_diff" step="1" value="'+esc(va.min_accel_diff!=null?va.min_accel_diff:0.0)+'"/></div>');
-      h.push('<div class="row"><label>Volume Basis</label><select id="va_volume_basis"><option value="total"'+(va.volume_basis==='total'?' selected':'')+'>total</option><option value="buy"'+(va.volume_basis==='buy'?' selected':'')+'>buy</option></select></div>');
-      h.push('</div>');
-      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveVolumeEvalConfig()">Apply</button><button class="btn secondary" onclick="loadVolumeEvalConfig()">Reload</button></div>');
-      h.push('<div id="volumeEvalStatus" class="status"></div>');
-      box.innerHTML=h.join('<br/>');
-    }
-
-    function renderTimerAlertPanel(stateData){
-      var box=document.getElementById('timerAlertPanel'); if(!box) return;
-      var t=timerAlertCfg||{};
-      var h=[];
-      h.push('<div class="row"><label>Enabled</label><input type="checkbox" id="ta_enabled" '+(t.enabled?'checked':'')+'/></div>');
-      h.push('<div class="row"><label>Timer Bot</label><span>'+(t.timer_bot_ready?'ready':'missing token/chat')+'</span></div>');
-      h.push('<div class="row"><label>Alert Time Left</label><input type="number" id="ta_time_left_sec" step="1" min="0" value="'+esc(t.time_left_sec!=null?t.time_left_sec:100)+'"/></div>');
-      h.push('<div class="row"><label>Min Price</label><input type="number" id="ta_min_price" step="0.001" min="0" max="1" value="'+esc(t.min_price!=null?t.min_price:0.75)+'"/></div>');
-      h.push('<div class="row"><label>Max Price</label><input type="number" id="ta_max_price" step="0.001" min="0" max="1" value="'+esc(t.max_price!=null?t.max_price:0.95)+'"/></div>');
-      h.push('<div class="row"><label>Buffer Mult</label><input type="number" id="ta_btc_buffer_multiplier" step="0.01" min="0" value="'+esc(t.btc_buffer_multiplier!=null?t.btc_buffer_multiplier:0)+'"/></div>');
-
-      h.push('<div style="margin-top:0.5rem" class="row"><button class="btn" onclick="saveTimerAlertConfig()">Apply</button><button class="btn secondary" onclick="loadTimerAlertConfig()">Reload</button></div>');
-      h.push('<div id="timerAlertStatus" class="status"></div>');
-      box.innerHTML=h.join('<br/>');
-    }
 
     function renderStreakAlertPanel(){
       var box=document.getElementById('streakAlertPanel'); if(!box) return;
@@ -436,79 +352,6 @@ _HTML = """<!DOCTYPE html>
         hourlyLookbackDraft=null;
         if(status) status.textContent='Applied: trailing '+hours+' hour'+(hours===1?'':'s');
         updateHourlyDynamicStats(window.latestHourlyDynamicStats||[]);
-      });
-    }
-
-    function loadLateModeConfig(){
-      requestJson('GET','/api/late-modes',null,function(late){
-        modeCfg.late=late||{};
-        renderLateModePanelConfig(window.latestModePerfData||{});
-      });
-    }
-
-    function loadVolumeEvalConfig(){
-      requestJson('GET','/api/volume-eval-mode',null,function(ve){
-        modeCfg.volEval=ve||{};
-        requestJson('GET','/api/volume-accel-check',null,function(va){
-          modeCfg.volAccel=va||{};
-          renderVolumeEvalPanelConfig();
-        });
-      });
-    }
-
-    function loadTimerAlertConfig(onDone){
-      requestJson('GET','/api/timer-alert',null,function(cfg){
-        timerAlertCfg=cfg||{};
-        renderTimerAlertPanel(null);
-        if(onDone) onDone(timerAlertCfg);
-      });
-    }
-
-    function saveTimerAlertConfig(){
-      var status=document.getElementById('timerAlertStatus'); if(status) status.textContent='Applying...';
-      var t=timerAlertCfg||{};
-      var payload={
-        enabled:!!(document.getElementById('ta_enabled')&&document.getElementById('ta_enabled').checked),
-        time_left_sec:readInt('ta_time_left_sec',t.time_left_sec||100),
-        min_price:readNum('ta_min_price',t.min_price||0.75),
-        max_price:readNum('ta_max_price',t.max_price||0.95),
-        btc_buffer_multiplier:readNum('ta_btc_buffer_multiplier',t.btc_buffer_multiplier||0)
-      };
-      requestJson('POST','/api/timer-alert',payload,function(resp){
-        timerAlertCfg=resp||payload;
-        if(status) status.textContent='Applied';
-        renderTimerAlertPanel(null);
-      });
-    }
-
-    function saveLateModeConfig(){
-      var status=document.getElementById('lateModeStatus'); if(status) status.textContent='Applying...';
-      var late=modeCfg.late||{}, lateModes=[], src=late.modes||[];
-      for(var i=0;i<src.length;i++){
-        var m=src[i]||{}, k=String(m.key||('mode_'+i));
-        lateModes.push({ key:k, enabled:!!(document.getElementById(k+'_enabled')&&document.getElementById(k+'_enabled').checked), time_left_sec:readInt(k+'_time_left_sec',m.time_left_sec||0), min_contracts:readInt(k+'_min_contracts',m.min_contracts||1), max_trades:readInt(k+'_max_trades',m.max_trades||1), buffer_avg_multiplier:readNum(k+'_buffer_avg_multiplier',m.buffer_avg_multiplier||1.0), min_buffer_threshold_usd:readNum(k+'_min_buffer_threshold_usd',m.min_buffer_threshold_usd||0.0), min_price:readNum(k+'_min_price',m.min_price||0.0), max_price:readNum(k+'_max_price',m.max_price||1.0) });
-      }
-      var latePayload={ enabled:!!(document.getElementById('late_enabled')&&document.getElementById('late_enabled').checked), total_max_trades:readInt('late_total_max_trades',late.total_max_trades||1), modes:lateModes };
-      requestJson('POST','/api/late-modes',latePayload,function(lateResp){
-        modeCfg.late=lateResp||latePayload;
-        if(status) status.textContent='Applied';
-        renderLateModePanelConfig(window.latestModePerfData||{});
-      });
-    }
-
-    function saveVolumeEvalConfig(){
-      var status=document.getElementById('volumeEvalStatus'); if(status) status.textContent='Applying...';
-      var ve=modeCfg.volEval||{};
-      var vePayload={ enabled:!!(document.getElementById('ve_enabled')&&document.getElementById('ve_enabled').checked), time_left_sec:readInt('ve_time_left_sec',ve.time_left_sec||0), min_contracts:readInt('ve_min_contracts',ve.min_contracts||1), max_trades:readInt('ve_max_trades',ve.max_trades||1), buffer_avg_multiplier:readNum('ve_buffer_avg_multiplier',ve.buffer_avg_multiplier||1.0), min_buffer_threshold_usd:readNum('ve_min_buffer_threshold_usd',ve.min_buffer_threshold_usd||0.0), volume_check_enabled:(document.getElementById('ve_volume_check_enabled')?!!document.getElementById('ve_volume_check_enabled').checked:!!ve.volume_check_enabled), entry_min_current_volume_diffs:[readNum('ve_entry_vol_1',1000),readNum('ve_entry_vol_2',2000),readNum('ve_entry_vol_3',3000)], entry_trade_limits:[readInt('ve_entry_limit_1',1),readInt('ve_entry_limit_2',1),readInt('ve_entry_limit_3',1)], min_price:readNum('ve_min_price',ve.min_price||0.0), max_price:readNum('ve_max_price',ve.max_price||1.0) };
-      var va=modeCfg.volAccel||{}, basisEl=document.getElementById('va_volume_basis');
-      var vaPayload={ min_current_volume_diff:readNum('va_min_current_volume_diff',va.min_current_volume_diff||0.0), min_accel_diff:readNum('va_min_accel_diff',va.min_accel_diff||0.0), volume_basis:basisEl?String(basisEl.value||'total'):'total' };
-      requestJson('POST','/api/volume-eval-mode',vePayload,function(veResp){
-        modeCfg.volEval=veResp||vePayload;
-        requestJson('POST','/api/volume-accel-check',vaPayload,function(vaResp){
-          modeCfg.volAccel=vaResp||vaPayload;
-          if(status) status.textContent='Applied';
-          renderVolumeEvalPanelConfig();
-        });
       });
     }
 
@@ -798,9 +641,6 @@ _HTML = """<!DOCTYPE html>
       scheduleTick(document.hidden?POLL_MS_HIDDEN:250);
     });
 
-    // TEMPORARILY DISABLED: loadLateModeConfig();
-    // TEMPORARILY DISABLED: loadVolumeEvalConfig();
-    loadTimerAlertConfig();
     loadStreakAlertConfig();
     loadStreakReversalBotConfig();
     tick();
@@ -851,14 +691,6 @@ def build_app(
   *,
   get_indicator_controls: Optional[Callable[[], Dict[str, Any]]] = None,
   update_indicator_controls: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_volume_accel_check: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_streak_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_streak_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_streak_reversal_bot: Optional[Callable[[], Dict[str, Any]]] = None,
@@ -892,48 +724,6 @@ def build_app(
       if not update_indicator_controls:
         return JSONResponse(_sanitize_for_json(payload or {}))
       return JSONResponse(_sanitize_for_json(update_indicator_controls(payload or {})))
-
-    @app.get("/api/late-modes")
-    async def api_get_late_modes():
-      # TEMPORARILY DISABLED: Return enabled=False regardless of backend state
-      return JSONResponse({"enabled": False, "modes": []})
-
-    @app.post("/api/late-modes")
-    async def api_update_late_modes(payload: Dict[str, Any] = Body(default={})):
-      # TEMPORARILY DISABLED: Always return enabled=False
-      return JSONResponse({"enabled": False, "modes": []})
-
-    @app.get("/api/volume-accel-check")
-    async def api_get_volume_accel_check():
-      # TEMPORARILY DISABLED: Return defaults regardless of backend state
-      return JSONResponse({"min_current_volume_diff": 0.0, "min_accel_diff": 0.0, "volume_basis": "total"})
-
-    @app.post("/api/volume-accel-check")
-    async def api_update_volume_accel_check(payload: Dict[str, Any] = Body(default={})):
-      # TEMPORARILY DISABLED: Always return defaults
-      return JSONResponse({"min_current_volume_diff": 0.0, "min_accel_diff": 0.0, "volume_basis": "total"})
-
-    @app.get("/api/volume-eval-mode")
-    async def api_get_volume_eval_mode():
-      # TEMPORARILY DISABLED: Return enabled=False regardless of backend state
-      return JSONResponse({"enabled": False})
-
-    @app.post("/api/volume-eval-mode")
-    async def api_update_volume_eval_mode(payload: Dict[str, Any] = Body(default={})):
-      # TEMPORARILY DISABLED: Always return enabled=False
-      return JSONResponse({"enabled": False})
-
-    @app.get("/api/timer-alert")
-    async def api_get_timer_alert():
-      if not get_timer_alert:
-        return JSONResponse({"enabled": False})
-      return JSONResponse(_sanitize_for_json(get_timer_alert()))
-
-    @app.post("/api/timer-alert")
-    async def api_update_timer_alert(payload: Dict[str, Any] = Body(default={})):
-      if not update_timer_alert:
-        return JSONResponse(_sanitize_for_json(payload or {}))
-      return JSONResponse(_sanitize_for_json(update_timer_alert(payload or {})))
 
     @app.get("/api/streak-alert")
     async def api_get_streak_alert():
@@ -1004,14 +794,6 @@ def start_web_dashboard(
   *,
   get_indicator_controls: Optional[Callable[[], Dict[str, Any]]] = None,
   update_indicator_controls: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_late_modes: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_late_modes: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_volume_accel_check: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_volume_accel_check: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_volume_eval_mode: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_volume_eval_mode: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-  get_timer_alert: Optional[Callable[[], Dict[str, Any]]] = None,
-  update_timer_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_streak_alert: Optional[Callable[[], Dict[str, Any]]] = None,
   update_streak_alert: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
   get_streak_reversal_bot: Optional[Callable[[], Dict[str, Any]]] = None,
@@ -1028,14 +810,6 @@ def start_web_dashboard(
       holder,
       get_indicator_controls=get_indicator_controls,
       update_indicator_controls=update_indicator_controls,
-      get_late_modes=get_late_modes,
-      update_late_modes=update_late_modes,
-      get_volume_accel_check=get_volume_accel_check,
-      update_volume_accel_check=update_volume_accel_check,
-      get_volume_eval_mode=get_volume_eval_mode,
-      update_volume_eval_mode=update_volume_eval_mode,
-      get_timer_alert=get_timer_alert,
-      update_timer_alert=update_timer_alert,
       get_streak_alert=get_streak_alert,
       update_streak_alert=update_streak_alert,
       get_streak_reversal_bot=get_streak_reversal_bot,
