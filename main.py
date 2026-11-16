@@ -4115,7 +4115,6 @@ class LiveTradingBot:
         self._sim_history: Optional[SimulationHistoryLogger] = None
         self._web_snapshot_holder: Optional[WebSnapshotHolder] = None
         self._config_lock = threading.Lock()
-        self._timer_alert_last_sent_slug: str = ""
         self._streak_direction: str = ""
         self._streak_count: int = 0
         self._streak_last_counted_slug: str = ""
@@ -4666,250 +4665,6 @@ class LiveTradingBot:
             return {"momentum": True, "vwap_deviation": True, "zscore": True}
         return self.dashboard.update_indicator_controls(payload if isinstance(payload, dict) else {})
 
-    def _web_get_late_modes(self) -> Dict[str, Any]:
-        with self._config_lock:
-            modes = getattr(self.config.strategy, "late_entry_modes", None)
-            if not modes:
-                return {"enabled": False, "total_max_trades": 0, "modes": []}
-
-            mode_keys = []
-            if self.dashboard is not None:
-                mode_keys = self.dashboard._late_mode_keys()
-            if not mode_keys:
-                mode_keys = ["mode_70s", "mode_60s", "mode_40s", "mode_30s", "mode_20s"]
-
-            out_modes = []
-            for key in mode_keys:
-                m = getattr(modes, key, None)
-                if not m:
-                    continue
-                out_modes.append({
-                    "key": key,
-                    "enabled": bool(getattr(m, "enabled", False)),
-                    "time_left_sec": int(getattr(m, "time_left_sec", 0)),
-                    "min_contracts": int(getattr(m, "min_contracts", 1)),
-                    "max_trades": int(getattr(m, "max_trades", 1)),
-                    "buffer_avg_multiplier": float(getattr(m, "buffer_avg_multiplier", 1.0)),
-                    "min_buffer_threshold_usd": float(getattr(m, "min_buffer_threshold_usd", self.config.buffer)),
-                    "min_price": float(getattr(m, "min_price", 0.0)),
-                    "max_price": float(getattr(m, "max_price", 1.0)),
-                })
-
-            return {
-                "enabled": bool(getattr(modes, "enabled", False)),
-                "total_max_trades": int(getattr(modes, "total_max_trades", 1)),
-                "modes": out_modes,
-            }
-
-    def _web_update_late_modes(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(payload, dict):
-            return self._web_get_late_modes()
-
-        with self._config_lock:
-            modes = getattr(self.config.strategy, "late_entry_modes", None)
-            if not modes:
-                return {"enabled": False, "total_max_trades": 0, "modes": []}
-
-            modes.enabled = bool(payload.get("enabled", modes.enabled))
-            try:
-                modes.total_max_trades = max(1, int(payload.get("total_max_trades", modes.total_max_trades)))
-            except (TypeError, ValueError):
-                pass
-
-            incoming = payload.get("modes", [])
-            if isinstance(incoming, list):
-                for row in incoming:
-                    if not isinstance(row, dict):
-                        continue
-                    key = str(row.get("key", "")).strip()
-                    mode_cfg = getattr(modes, key, None)
-                    if not mode_cfg:
-                        continue
-                    try:
-                        mode_cfg.enabled = bool(row.get("enabled", mode_cfg.enabled))
-                        mode_cfg.time_left_sec = max(0, int(row.get("time_left_sec", mode_cfg.time_left_sec)))
-                        mode_cfg.min_contracts = max(1, int(row.get("min_contracts", mode_cfg.min_contracts)))
-                        mode_cfg.max_trades = max(1, int(row.get("max_trades", mode_cfg.max_trades)))
-                        mode_cfg.buffer_avg_multiplier = max(0.0, float(row.get("buffer_avg_multiplier", mode_cfg.buffer_avg_multiplier)))
-                        mode_cfg.min_buffer_threshold_usd = max(0.0, float(row.get("min_buffer_threshold_usd", getattr(mode_cfg, "min_buffer_threshold_usd", self.config.buffer))))
-                        mode_cfg.min_price = float(row.get("min_price", mode_cfg.min_price))
-                        mode_cfg.max_price = float(row.get("max_price", mode_cfg.max_price))
-                    except (TypeError, ValueError):
-                        continue
-
-        return self._web_get_late_modes()
-
-    def _web_get_volume_accel_check(self) -> Dict[str, Any]:
-        with self._config_lock:
-            vac = getattr(self.config.strategy, "volume_acceleration_check", None)
-            if not vac:
-                return {"min_current_volume_diff": 0.0, "min_accel_diff": 0.0}
-            return {
-                "min_current_volume_diff": float(getattr(vac, "min_current_volume_diff", 0.0) or 0.0),
-                "min_accel_diff": float(getattr(vac, "min_accel_diff", 0.0) or 0.0),
-                "volume_basis": str(getattr(vac, "volume_basis", "total") or "total").strip().lower(),
-            }
-
-    def _web_update_volume_accel_check(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(payload, dict):
-            return self._web_get_volume_accel_check()
-
-        with self._config_lock:
-            vac = getattr(self.config.strategy, "volume_acceleration_check", None)
-            if not vac:
-                return {"min_current_volume_diff": 0.0, "min_accel_diff": 0.0}
-
-            try:
-                vac.min_current_volume_diff = max(0.0, float(payload.get("min_current_volume_diff", vac.min_current_volume_diff)))
-                vac.min_accel_diff = max(0.0, float(payload.get("min_accel_diff", vac.min_accel_diff)))
-                if "volume_basis" in payload:
-                    basis = str(payload.get("volume_basis", vac.volume_basis)).strip().lower()
-                    if basis in {"total", "buy"}:
-                        vac.volume_basis = basis
-            except (TypeError, ValueError):
-                pass
-
-        return self._web_get_volume_accel_check()
-
-    def _web_get_volume_eval_mode(self) -> Dict[str, Any]:
-        with self._config_lock:
-            mode = getattr(self.config.strategy, "volume_eval_mode", None)
-            if not mode:
-                return {"enabled": False}
-            return {
-                "enabled": bool(getattr(mode, "enabled", False)),
-                "time_left_sec": int(getattr(mode, "time_left_sec", 0)),
-                "min_contracts": int(getattr(mode, "min_contracts", self.config.entry.min_contracts)),
-                "max_trades": int(getattr(mode, "max_trades", 1)),
-                "buffer_avg_multiplier": float(getattr(mode, "buffer_avg_multiplier", 1.0)),
-                "min_buffer_threshold_usd": float(getattr(mode, "min_buffer_threshold_usd", self.config.buffer)),
-                "volume_check_enabled": bool(getattr(mode, "volume_check_enabled", True)),
-                "entry_min_current_volume_diffs": list(getattr(mode, "entry_min_current_volume_diffs", [1000.0, 2000.0, 3000.0])),
-                "entry_trade_limits": list(getattr(mode, "entry_trade_limits", [1, 1, 1])),
-                "min_price": float(getattr(mode, "min_price", self.config.strategy.min_price)),
-                "max_price": float(getattr(mode, "max_price", self.config.strategy.max_price)),
-            }
-
-    def _web_update_volume_eval_mode(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(payload, dict):
-            return self._web_get_volume_eval_mode()
-
-        with self._config_lock:
-            mode = getattr(self.config.strategy, "volume_eval_mode", None)
-            if not mode:
-                return {"enabled": False}
-
-            try:
-                mode.enabled = bool(payload.get("enabled", mode.enabled))
-                mode.time_left_sec = max(0, int(payload.get("time_left_sec", mode.time_left_sec)))
-                mode.min_contracts = max(1, int(payload.get("min_contracts", mode.min_contracts)))
-                mode.max_trades = max(1, int(payload.get("max_trades", mode.max_trades)))
-                mode.buffer_avg_multiplier = max(0.0, float(payload.get("buffer_avg_multiplier", mode.buffer_avg_multiplier)))
-                mode.min_buffer_threshold_usd = max(0.0, float(payload.get("min_buffer_threshold_usd", mode.min_buffer_threshold_usd)))
-                mode.volume_check_enabled = bool(payload.get("volume_check_enabled", mode.volume_check_enabled))
-                raw_levels = payload.get("entry_min_current_volume_diffs", getattr(mode, "entry_min_current_volume_diffs", []))
-                levels = []
-                if isinstance(raw_levels, list):
-                    for raw in raw_levels:
-                        try:
-                            v = float(raw)
-                        except (TypeError, ValueError):
-                            continue
-                        if v >= 0.0:
-                            levels.append(v)
-                if levels:
-                    mode.entry_min_current_volume_diffs = levels
-                raw_limits = payload.get("entry_trade_limits", getattr(mode, "entry_trade_limits", []))
-                limits = []
-                if isinstance(raw_limits, list):
-                    for raw in raw_limits:
-                        try:
-                            v = int(float(raw))
-                        except (TypeError, ValueError):
-                            continue
-                        if v > 0:
-                            limits.append(v)
-                if limits:
-                    mode.entry_trade_limits = limits
-                mode.min_price = float(payload.get("min_price", mode.min_price))
-                mode.max_price = float(payload.get("max_price", mode.max_price))
-            except (TypeError, ValueError):
-                pass
-
-        return self._web_get_volume_eval_mode()
-
-    def _web_get_timer_alert(self) -> Dict[str, Any]:
-        with self._config_lock:
-            timer_alert = getattr(self.config.telegram, "timer_alert", None)
-            if not timer_alert:
-                return {
-                    "enabled": False,
-                    "time_left_sec": 100,
-                    "min_price": 0.75,
-                    "max_price": 0.95,
-                    "btc_buffer_multiplier": 0.0,
-                    "timer_bot_ready": False,
-                }
-            return {
-                "enabled": bool(getattr(timer_alert, "enabled", False)),
-                "time_left_sec": int(getattr(timer_alert, "time_left_sec", 100)),
-                "min_price": float(getattr(timer_alert, "min_price", 0.75)),
-                "max_price": float(getattr(timer_alert, "max_price", 0.95)),
-                "btc_buffer_multiplier": float(getattr(timer_alert, "btc_buffer_multiplier", 0.0)),
-                "timer_bot_ready": bool(
-                    getattr(self.config.telegram, "timer_bot_token", "")
-                    and getattr(self.config.telegram, "timer_chat_id", "")
-                ),
-            }
-
-    def _web_update_timer_alert(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(payload, dict):
-            return self._web_get_timer_alert()
-
-        with self._config_lock:
-            timer_alert = getattr(self.config.telegram, "timer_alert", None)
-            if not timer_alert:
-                return self._web_get_timer_alert()
-
-            # Parse fields independently so one bad value does not discard other updates.
-            if "enabled" in payload:
-                timer_alert.enabled = bool(payload.get("enabled"))
-
-            if "time_left_sec" in payload:
-                try:
-                    timer_alert.time_left_sec = max(0, int(payload.get("time_left_sec")))
-                except (TypeError, ValueError):
-                    pass
-
-            if "min_price" in payload:
-                try:
-                    timer_alert.min_price = min(1.0, max(0.0, float(payload.get("min_price"))))
-                except (TypeError, ValueError):
-                    pass
-
-            if "max_price" in payload:
-                try:
-                    timer_alert.max_price = min(1.0, max(0.0, float(payload.get("max_price"))))
-                except (TypeError, ValueError):
-                    pass
-
-            # Accept both the current key and the older alias for compatibility.
-            mult_raw = None
-            if "btc_buffer_multiplier" in payload:
-                mult_raw = payload.get("btc_buffer_multiplier")
-            elif "min_btc_buffer_threshold_usd" in payload:
-                mult_raw = payload.get("min_btc_buffer_threshold_usd")
-            if mult_raw is not None:
-                try:
-                    timer_alert.btc_buffer_multiplier = max(0.0, float(mult_raw))
-                except (TypeError, ValueError):
-                    pass
-
-            if timer_alert.min_price > timer_alert.max_price:
-                timer_alert.min_price, timer_alert.max_price = timer_alert.max_price, timer_alert.min_price
-
-        return self._web_get_timer_alert()
-
     def _web_get_streak_alert(self) -> Dict[str, Any]:
         with self._config_lock:
             streak_alert = getattr(self.config.telegram, "streak_alert", None)
@@ -5428,94 +5183,6 @@ class LiveTradingBot:
         if up_price >= down_price:
             return {"favorite": "UP", "price": up_price}
         return {"favorite": "DOWN", "price": down_price}
-
-    async def _check_timer_alert(self) -> None:
-        timer_alert = getattr(self.config.telegram, "timer_alert", None)
-        if not timer_alert or not bool(getattr(timer_alert, "enabled", False)):
-            return
-
-        if not self.timer_telegram or not self.timer_telegram.enabled:
-            return
-
-        market_slug = str(self.state.slug or "").strip()
-        if not market_slug or market_slug == self._timer_alert_last_sent_slug:
-            return
-
-        time_left = max(0.0, self.state.end_time - time.time())
-        threshold = float(getattr(timer_alert, "time_left_sec", 100))
-        if time_left > threshold:
-            return
-
-        fav = self._get_favorite_price_snapshot()
-        if not fav:
-            return
-
-        fav_price = float(fav["price"])
-        min_price = float(getattr(timer_alert, "min_price", 0.75))
-        max_price = float(getattr(timer_alert, "max_price", 0.95))
-        if not (min_price <= fav_price <= max_price):
-            return
-
-        btc_buffer_multiplier = float(getattr(timer_alert, "btc_buffer_multiplier", 0.0) or 0.0)
-        current_btc_buffer_usd = None
-        btc_now = float(getattr(self.state, "btc_current_price", 0.0) or 0.0)
-        btc_anchor = float(getattr(self.state, "btc_anchor_price", 0.0) or 0.0)
-        if btc_now > 0.0 and btc_anchor > 0.0:
-            current_btc_buffer_usd = abs(btc_now - btc_anchor)
-
-        required_btc_buffer_usd = None
-        if btc_buffer_multiplier > 0.0:
-            recent_moves = list(self.state.btc_window_moves)[-5:]
-            if recent_moves:
-                abs_values: List[float] = []
-                for row in recent_moves:
-                    try:
-                        abs_values.append(abs(float(row.get("abs_usd", 0.0) or 0.0)))
-                    except (TypeError, ValueError):
-                        continue
-                if abs_values:
-                    required_btc_buffer_usd = (sum(abs_values) / len(abs_values)) * btc_buffer_multiplier
-
-        if btc_buffer_multiplier > 0.0:
-            if current_btc_buffer_usd is None:
-                return
-            if required_btc_buffer_usd is None:
-                return
-            if current_btc_buffer_usd < required_btc_buffer_usd:
-                return
-
-        self._timer_alert_last_sent_slug = market_slug
-        btc_buffer_line = ""
-        if (
-            btc_buffer_multiplier > 0.0
-            and current_btc_buffer_usd is not None
-            and required_btc_buffer_usd is not None
-        ):
-            btc_buffer_line = (
-                f"\nBTC Buffer: ${current_btc_buffer_usd:.2f} "
-                f"(need >= ${required_btc_buffer_usd:.2f}, mult {btc_buffer_multiplier:.2f}x)"
-            )
-        sent = await self.timer_telegram.send_message(
-            (
-                "⏰ <b>Timer Alert</b>\n"
-                f"Market: {market_slug}\n"
-                f"Time left: {int(time_left)}s (threshold {int(threshold)}s)\n"
-                f"Favorite: {fav['favorite']}\n"
-                f"Price: {fav_price:.3f}\n"
-                f"Range: [{min_price:.3f}, {max_price:.3f}]"
-                f"{btc_buffer_line}"
-            )
-        )
-        if sent:
-            logger.info(
-                "Timer alert sent | "
-                f"market={market_slug} | left={time_left:.1f}s | fav={fav['favorite']} | price={fav_price:.4f}"
-            )
-        else:
-            logger.warning(
-                "Timer alert send failed | "
-                f"market={market_slug} | left={time_left:.1f}s | fav={fav['favorite']} | price={fav_price:.4f}"
-            )
 
     async def _check_streak_reversal_bot(self) -> None:
         """Check configured streak-reversal and streak-continuation buy signals."""
@@ -6098,8 +5765,6 @@ class LiveTradingBot:
             chat_id=getattr(self.config.telegram, "timer_chat_id", ""),
             enabled=True,
         )
-        if getattr(self.config.telegram, "timer_alert", None) and self.config.telegram.timer_alert.enabled and not self.timer_telegram.enabled:
-            logger.warning("Timer alert is enabled but TELEGRAM_TIMER_BOT_TOKEN / TELEGRAM_TIMER_CHAT_ID are missing")
         streak_alert_cfg = getattr(self.config.telegram, "streak_alert", None)
         if streak_alert_cfg and bool(getattr(streak_alert_cfg, "enabled", True)) and bool(getattr(streak_alert_cfg, "use_timer_bot", True)) and not self.timer_telegram.enabled:
             logger.warning("Streak alert uses timer bot but TELEGRAM_TIMER_BOT_TOKEN / TELEGRAM_TIMER_CHAT_ID are missing")
@@ -6273,14 +5938,6 @@ class LiveTradingBot:
                 self._web_snapshot_holder,
                 get_indicator_controls=self._web_get_indicator_controls,
                 update_indicator_controls=self._web_update_indicator_controls,
-                get_late_modes=self._web_get_late_modes,
-                update_late_modes=self._web_update_late_modes,
-                get_volume_accel_check=self._web_get_volume_accel_check,
-                update_volume_accel_check=self._web_update_volume_accel_check,
-                get_volume_eval_mode=self._web_get_volume_eval_mode,
-                update_volume_eval_mode=self._web_update_volume_eval_mode,
-                get_timer_alert=self._web_get_timer_alert,
-                update_timer_alert=self._web_update_timer_alert,
                 get_streak_alert=self._web_get_streak_alert,
                 update_streak_alert=self._web_update_streak_alert,
                 get_streak_reversal_bot=self._web_get_streak_reversal_bot,
@@ -7568,7 +7225,6 @@ class LiveTradingBot:
                         )
                     
                     # Check market end (быстрая операция - не выносим в task)
-                    await self._check_timer_alert()
                     await self.check_market_end()
                     await self._check_streak_reversal_bot()
                     await self._check_streak_prebuy_next_session()
