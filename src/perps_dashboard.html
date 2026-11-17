@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Perps Following | Polymarket</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:24px;background:#0d1117;color:#e6edf3;font:14px/1.5 system-ui,sans-serif}
+main{max-width:1400px;margin:auto}header,.toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+h1{margin:0;font-size:26px}h2{font-size:17px;margin-top:0}a{color:#58a6ff}.muted,small{color:#8b949e}.notice{color:#d29922}
+.layout{display:grid;grid-template-columns:350px minmax(0,1fr);gap:18px;margin-top:20px}.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;margin-bottom:18px;min-width:0}
+label{display:block;margin-bottom:12px}input,select,textarea,button{font:inherit;border-radius:6px;padding:9px}
+input,select,textarea{width:100%;margin-top:5px;background:#0d1117;border:1px solid #30363d;color:inherit}input[type=checkbox]{width:auto;margin-right:8px}textarea{min-height:100px;resize:vertical;font-size:12px}
+button{cursor:pointer;background:#1f6feb;color:white;border:1px solid transparent}button.danger{background:#682323}button.secondary{background:#30363d}button:disabled{opacity:.5}
+.pair,.stats{display:grid;grid-template-columns:1fr 1fr;gap:12px}.stat{border:1px solid #30363d;border-radius:8px;padding:10px}.stat strong{display:block;font-size:20px}
+.badge{padding:6px 12px;border-radius:20px;background:#30363d}.active{background:#164c2b}.live{background:#682323}
+.scroll{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}td,th{padding:10px 8px;border-bottom:1px solid #30363d;vertical-align:top}
+td{max-width:300px;overflow-wrap:anywhere}th{color:#8b949e}code{font-size:11px;overflow-wrap:anywhere}.error{color:#ff8b84;white-space:pre-wrap;overflow-wrap:anywhere}#message{position:sticky;top:0;background:#0d1117;z-index:1}
+.pending{border:1px solid #d29922;border-radius:8px;padding:12px;margin:12px 0}
+@media(max-width:850px){body{padding:12px}.layout{grid-template-columns:1fr}}
+</style>
+</head>
+<body><main>
+<header><div><h1>Perps Following</h1><div class="muted">Polymarket perpetual futures &middot; <a href="/">Prediction following</a> &middot; BTC strategy stays separate</div></div><div><span class="badge" id="status">Connecting...</span> <button class="danger" id="pause">Pause Perps</button></div></header>
+<p class="notice">Futures can liquidate your collateral, even at 1&times;. This mode copies new fills, not existing allocations or pending orders. Pausing never closes positions.</p>
+<div id="message" role="status" aria-live="polite"></div>
+<div class="layout"><aside class="card"><h2>Perps settings</h2>
+<form id="settings">
+<label>Perps account owner addresses<textarea id="wallets" placeholder="0x... (one per line)" spellcheck="false"></textarea><small>Up to 20 registered Perps addresses, not prediction outcome tokens.</small></label>
+<label>Execution<select id="environment"><option value="simulation">Simulation - no real orders</option><option value="live">LIVE - real funds</option></select></label>
+<label>Entry sizing<select id="sizing"><option value="fixed">Fixed USD notional per increase</option><option value="percentage">Percentage of source increase notional</option></select></label>
+<div class="pair">
+<label>Fixed notional USD<input id="fixed_usd" type="number" min=".01" step=".01" required></label>
+<label>Copy percentage<input id="copy_percentage" type="number" min=".01" max="100" step=".01" required></label>
+<label>Max increase USD<input id="max_trade_usd" type="number" min=".01" step=".01" required></label>
+<label>Max per instrument USD<input id="max_position_usd" type="number" min=".01" step=".01" required></label>
+<label>Max total gross USD<input id="max_exposure_usd" type="number" min=".01" step=".01" required></label>
+<label>Isolated leverage (1&times; default)<input id="leverage" type="number" min="1" max="20" step="1" required></label>
+<label>Slippage from source %<input id="slippage_pct" type="number" min="0" max="20" step=".1" required></label>
+<label>Max fill age (seconds)<input id="max_age_sec" type="number" min="10" max="600" step="1" required></label>
+<label>Poll interval (seconds)<input id="poll_seconds" type="number" min="3" max="60" step="1" required></label>
+<label>Paper starting equity USD<input id="simulation_equity_usd" type="number" min=".01" step=".01" required></label>
+</div>
+<label><input id="enabled" type="checkbox">Enable Perps copying after save</label>
+<button type="submit">Save Perps settings</button> <button type="button" class="secondary" id="reload">Reload</button>
+</form>
+<p class="notice">Sizing and limits are notional, not collateral. Exits proportionally reduce copied positions only. Opposing leaders cannot hedge each other in one account. Limits block increases; they do not stop losses or force liquidation.</p>
+<small>Simulation uses current book liquidity, but excludes fees, funding and liquidations. Live uses actual exchange fills/fees and an isolated, dedicated account. Manually verify eligibility and configure Perps credentials in Railway Variables. The server location is not your location.</small>
+</aside><section>
+<div class="card"><div class="toolbar"><h2>Copied Perps positions</h2><small id="updated"></small></div><div class="stats" id="stats"></div><div id="error" class="error" role="alert"></div><div id="unresolved"></div><div id="positions" class="scroll"></div>
+<details><summary>Record an external / forced close (accounting only)</summary>
+<p class="notice">This never places an order. Live exchange position must already be flat. External realized P&amp;L, fees and funding are excluded from the copy ledger.</p>
+<form id="flat"><div class="pair"><label>Instrument ID<input id="flatInstrument" type="number" min="0" step="1" required></label><label>Environment<select id="flatEnvironment"><option value="simulation">Simulation</option><option value="live">Live</option></select></label></div><label>Verified evidence<input id="flatNote" maxlength="1000" required></label><button class="secondary">Record flat position</button></form>
+</details></div>
+<div class="card"><h2>Live exchange account</h2><div id="account" class="muted">Not connected. Live sessions are opened only when explicitly activated.</div></div>
+<div class="card"><h2>Followed Perps portfolios</h2><div id="sources"></div></div>
+<div class="card"><h2>Perps activity</h2><small>Latest 100 decisions. Partial fills are not automatically retried. Flips close first, then open the opposite side only if safe.</small><div class="scroll" id="events"></div></div>
+</section></div></main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=value=>{const span=document.createElement('span');span.textContent=String(value??'');return span.innerHTML;};
+const usd=value=>Number(value).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const short=value=>value.slice(0,6)+'...'+value.slice(-4);
+const fields=['environment','sizing','fixed_usd','copy_percentage','max_trade_usd','max_position_usd','max_exposure_usd','leverage','slippage_pct','max_age_sec','poll_seconds','simulation_equity_usd'];
+let latest=null,loaded=false,busy=false,refreshing=false;
+async function api(path,data){
+  const response=await fetch('/api/perps/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if(!response.ok){let detail=await response.text();try{detail=JSON.parse(detail).detail;}catch{}throw new Error(typeof detail==='string'?detail:JSON.stringify(detail));}
+  return response.json();
+}
+function table(head,rows){return rows.length?'<table><thead><tr>'+head.map(h=>'<th>'+esc(h)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(v=>'<td>'+v+'</td>').join('')+'</tr>').join('')+'</tbody></table>':'<p class="muted">No positions or events yet.</p>';}
+function fill(settings){for(const key of fields)$(key).value=settings[key];$('enabled').checked=settings.enabled;$('wallets').value=settings.wallets.join('\n');loaded=true;}
+function render(state){
+  latest=state;if(!loaded)fill(state.settings);
+  const cfg=state.settings,env=cfg.environment,symbol=id=>esc(state.instruments[id]||('Instrument '+id));
+  $('status').textContent=(cfg.enabled?'COPYING':'PAUSED')+' / '+env.toUpperCase();
+  $('status').className='badge '+(cfg.enabled?'active ':'')+(env==='live'?'live':'');
+  $('updated').textContent=state.last_poll?'Last poll '+new Date(state.last_poll*1000).toLocaleTimeString():'Waiting for worker';
+  $('error').textContent=(state.error||'')+(Object.keys(state.external_closes||{}).length?'\nExternal closes exist: related external P&L, fees and funding are excluded from the copy ledger.':'');
+  const positions=state.positions.filter(p=>p.environment===env);
+  let gross=0,unrealized=0,realized=0,fees=0,missing=false;
+  for(const p of positions){const qty=Number(p.quantity),mark=state.marks[p.instrument];realized+=Number(p.realized);fees+=Number(p.fees);if(qty&&mark===undefined){missing=true;continue;}if(qty){gross+=Math.abs(qty)*Number(mark);unrealized+=qty*(Number(mark)-Number(p.entry));}}
+  $('stats').innerHTML=[['Gross notional',missing?'Awaiting marks':'$'+usd(gross)],['Unrealized P&L',missing?'Awaiting marks':'$'+usd(unrealized)],['Copied realized P&L (excludes funding)','$'+usd(realized-fees)],['Configured isolated leverage',cfg.leverage+'x']].map(([label,value])=>'<div class="stat"><small>'+esc(label)+'</small><strong>'+esc(value)+'</strong></div>').join('');
+  $('positions').innerHTML=table(['Source','Instrument','Direction / quantity','Entry','Mark','Copied realized / fees'],positions.filter(p=>Number(p.quantity)).map(p=>[esc(short(p.wallet)),symbol(p.instrument),(Number(p.quantity)>0?'LONG':'SHORT')+' / '+esc(p.quantity),'$'+usd(p.entry),state.marks[p.instrument]===undefined?'Unavailable':'$'+usd(state.marks[p.instrument]),'$'+usd(p.realized)+' / $'+usd(p.fees)]));
+  if(state.account){const a=state.account,m=a.margin;$('account').innerHTML='<p>Last exchange snapshot (may lag): equity <b>$'+usd(m.total_account_value)+'</b>, available margin <b>$'+usd(m.available_order_margin)+'</b>, initial margin $'+usd(m.total_initial_margin)+(a.in_liquidation?' <strong class="error">IN LIQUIDATION</strong>':'')+'</p>'+table(['Instrument','Size','Leverage / mode','Liquidation price','Unrealized P&L','Cumulative funding'],a.positions.map(p=>[symbol(p.instrument),esc(p.size),esc(p.leverage)+'x / '+(p.cross?'cross':'isolated'),'$'+usd(p.liquidation_price),'$'+usd(p.unrealized_pnl),'$'+usd(p.cumulative_funding)]));}
+  $('sources').innerHTML=cfg.wallets.length?cfg.wallets.map(wallet=>{const p=state.portfolios[wallet];return '<h3><code>'+esc(wallet)+'</code></h3>'+(state.wallet_errors[wallet]?'<p class="error">'+esc(state.wallet_errors[wallet])+'</p>':'')+(p?'<small>Source equity $'+usd(p.equity)+' / '+esc(new Date(p.timestamp).toLocaleString())+'</small>'+table(['Instrument','Signed size','Entry','Unrealized P&L'],p.positions.map(q=>[esc(q.symbol),esc(q.size),'$'+usd(q.entry_price),'$'+usd(q.unrealized_pnl)])):'<p class="muted">Waiting for public portfolio.</p>');}).join(''):'<p class="muted">Add registered Perps account addresses to begin.</p>';
+  $('events').innerHTML=table(['Time / source','Instrument','Action','Status','Actual quantity / price / fees','Details'],state.events.map(e=>[esc(new Date(e.timestamp).toLocaleString())+'<br>'+esc(short(e.wallet))+'<br>'+esc(e.environment),symbol(e.instrument),(e.reduce_only?'REDUCE ':'OPEN ')+(e.side>0?'BUY':'SELL'),esc(e.status),esc(e.quantity)+' / $'+usd(e.price)+' / $'+usd(e.fee),esc(e.message)+'<br><code>'+esc(e.client_id)+'</code>']));
+  const pending=state.unresolved.map(e=>e.id).join('|');
+  if($('unresolved').dataset.ids!==pending){$('unresolved').dataset.ids=pending;$('unresolved').innerHTML=state.unresolved.map((e,i)=>'<form class="pending" data-event="'+i+'"><h3>Reconcile uncertain '+esc(e.environment)+' order</h3><p class="notice">Verify exchange history using client ID <code>'+esc(e.client_id)+'</code> (order '+esc(e.order_id||'unknown')+'). Do not guess or clear a timeout as unfilled. Quantity is absolute executed quantity, not USD.</p><div class="pair"><label>Executed quantity<input name="quantity" type="number" min="0" step="any" required></label><label>Average fill price<input name="price" type="number" min="0" step="any" required></label><label>Total actual fees (rebates negative)<input name="fee" type="number" step="any" required></label></div><label>Settlement evidence<input name="note" maxlength="1000" required></label><button class="secondary">Record verified settlement</button></form>').join('');}
+}
+async function refresh(){if(refreshing)return;refreshing=true;try{render(await api('state'));}catch(error){$('message').textContent=error.message;$('message').className='error';}finally{refreshing=false;}}
+async function action(callback){if(busy)return;busy=true;try{await callback();$('message').textContent='Saved. Review the engine status below.';$('message').className='notice';await refresh();}catch(error){$('message').textContent=error.message;$('message').className='error';}finally{busy=false;}}
+$('settings').onsubmit=event=>{event.preventDefault();action(async()=>{
+  const cfg={wallets:$('wallets').value.split(/[\s,]+/).filter(Boolean),enabled:$('enabled').checked};
+  for(const key of fields)cfg[key]=['environment','sizing'].includes(key)?$(key).value:Number($(key).value);
+  const confirm_live=cfg.enabled&&cfg.environment==='live';if(confirm_live&&!confirm('Enable REAL Perps copying? Futures can liquidate collateral. Confirm your dedicated funded account, eligible location, sizing and leverage.'))return;
+  const result=await api('settings',{settings:cfg,confirm_live});fill(result.settings);
+});};
+$('pause').onclick=async()=>{try{await api('pause',{});$('enabled').checked=false;await refresh();}catch(error){$('message').className='error';$('message').textContent=error.message;}};
+$('reload').onclick=()=>{if(latest)fill(latest.settings);};
+$('flat').onsubmit=event=>{event.preventDefault();action(async()=>{if(!confirm('Record an already-flat position? This sends NO order and excludes external P&L from the ledger.'))return;await api('record-flat',{instrument:Number($('flatInstrument').value),environment:$('flatEnvironment').value,note:$('flatNote').value});});};
+$('unresolved').onsubmit=event=>{event.preventDefault();const form=event.target,order=latest.unresolved[Number(form.dataset.event)];if(!order)return;action(async()=>{if(!confirm('Have you verified the actual terminal outcome and all fills on the exchange?'))return;const data=new FormData(form);await api('reconcile',{event_id:order.id,quantity:data.get('quantity'),price:data.get('price'),fee:data.get('fee'),note:data.get('note')});});};
+refresh();setInterval(refresh,3000);
+</script></body></html>
