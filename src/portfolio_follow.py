@@ -1,680 +1,546 @@
-"""Polymarket Perps copying, with accounting independent of prediction tokens."""
+"""Independent portfolio copy-trading mode; never starts the BTC strategy."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
-import hashlib
 import json
 import logging
 import os
+import re
+import sqlite3
 import time
+from dataclasses import dataclass
+from decimal import Decimal, ROUND_DOWN
+from pathlib import Path
 from typing import Annotated, Callable, Literal
 
-import httpx
 from polymarket import AsyncPublicClient, AsyncSecureClient
-from polymarket.models.perps.account import PerpsPortfolio
-from polymarket.models.perps.market import PerpsInstrument, PerpsTicker
-from polymarket.models.perps.orders import PerpsFill
-from polymarket.perps import PerpsSession
-from pydantic import BaseModel, ConfigDict, Field
+from polymarket.models.data.activity import TradeActivity
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from src.portfolio_follow import ADDRESS, FollowSettings, PortfolioStore, Positive, OrderUncertain
-
+logger = logging.getLogger("portfolio")
 D = Decimal
 ZERO = D("0")
-logger = logging.getLogger("portfolio.perps")
-COUNTRY_CODES = frozenset((
-    "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ "
-    "CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR "
-    "GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP "
-    "KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ "
-    "NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ "
-    "TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW"
-).split())
+ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
+Positive = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
-class PerpsSettings(FollowSettings):
-    fixed_usd: Positive = 25.0
-    max_trade_usd: Positive = 25.0
-    max_exposure_usd: Positive = 100.0
-    max_position_usd: Positive = 50.0
-    leverage: Annotated[int, Field(ge=1, le=20)] = 1
-    simulation_equity_usd: Positive = 1000.0
+class FollowSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
+    enabled: bool = False
+    environment: Literal["simulation", "live"] = "simulation"
+    wallets: list[str] = Field(default_factory=list, max_length=20)
+    sizing: Literal["fixed", "percentage"] = "fixed"
+    fixed_usd: Positive = 5.0
+    copy_percentage: Annotated[float, Field(gt=0, le=100, allow_inf_nan=False)] = 10.0
+    max_trade_usd: Positive = 10.0
+    max_exposure_usd: Positive = 50.0
+    slippage_pct: Annotated[float, Field(ge=0, le=20, allow_inf_nan=False)] = 2.0
+    max_age_sec: Annotated[int, Field(ge=10, le=600)] = 120
+    poll_seconds: Annotated[int, Field(ge=3, le=60)] = 5
 
-class PublicPosition(BaseModel):
-    instrument_id: int
-    symbol: str
-    size: Decimal
-    entry_price: Decimal
-    unrealized_pnl: Decimal
-
-    model_config = ConfigDict(allow_inf_nan=False)
-
-
-class PublicPortfolio(BaseModel):
-    positions: list[PublicPosition]
-    equity: Decimal
-    timestamp: int
-
-    model_config = ConfigDict(allow_inf_nan=False)
+    @field_validator("wallets")
+    @classmethod
+    def valid_wallets(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip().lower() for value in values]
+        if any(not ADDRESS.fullmatch(value) for value in normalized):
+            raise ValueError("Use public Polymarket wallet/proxy addresses: 0x + 40 hex digits")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("Duplicate wallets are not allowed")
+        return normalized
 
 
 @dataclass(frozen=True)
-class PerpsTrade:
+class SourceTrade:
     wallet: str
-    order_id: int
-    instrument: int
+    transaction: str
+    asset: str
+    side: Literal["BUY", "SELL"]
+    shares: Decimal
+    cash: Decimal
     timestamp: int
-    previous: Decimal
-    delta: Decimal
-    price: Decimal
-    forced: bool = False
+    title: str
+    outcome: str
 
     @property
     def key(self) -> str:
-        return f"perps:{self.wallet}:{self.order_id}:{self.timestamp}:{self.instrument}:{self.previous.normalize()}:{self.delta > 0}"
+        # A transaction may contain multiple fills of the same outcome.
+        return f"{self.wallet}:{self.transaction}:{self.asset}:{self.side}"
 
     @property
-    def close_quantity(self) -> Decimal:
-        return min(abs(self.previous), abs(self.delta)) if self.previous * self.delta < 0 else ZERO
-
-    @property
-    def open_quantity(self) -> Decimal:
-        return abs(self.delta) - self.close_quantity
+    def price(self) -> Decimal:
+        return self.cash / self.shares
 
 
-def verify_operator_location() -> None:
-    if os.getenv("PERPS_LOCATION_VERIFIED", "").strip().lower() != "true":
-        raise ValueError("Live perps requires independently verified operator eligibility (PERPS_LOCATION_VERIFIED=true)")
-    country = os.getenv("PERPS_OPERATOR_COUNTRY", "").strip().upper()
-    region = os.getenv("PERPS_OPERATOR_REGION", "").strip().upper()
-    if country not in COUNTRY_CODES:
-        raise ValueError("Live perps requires PERPS_OPERATOR_COUNTRY after verifying the operator's location")
-    if country in {"US", "CA", "CU", "IR", "KP", "SY"}:
-        raise ValueError("Perps trading is not permitted in the configured operator jurisdiction")
-    if country == "UA" and region not in {
-        "UA-05", "UA-07", "UA-09", "UA-12", "UA-14", "UA-18", "UA-21", "UA-23", "UA-26",
-        "UA-30", "UA-32", "UA-35", "UA-40", "UA-43", "UA-46", "UA-48", "UA-51", "UA-53",
-        "UA-56", "UA-59", "UA-61", "UA-63", "UA-65", "UA-68", "UA-71", "UA-74", "UA-77",
-    }:
-        raise ValueError("A valid ISO 3166-2 PERPS_OPERATOR_REGION is required for Ukraine")
-    if region in {"UA-43", "UA-40", "UA-14", "UA-09", "CRIMEA", "DONETSK", "LUHANSK"}:
-        raise ValueError("Perps trading is not permitted in the configured operator region")
+class OrderUncertain(RuntimeError):
+    """The exchange may have accepted an order; automatic retry is unsafe."""
 
 
-class PerpsStore:
-    def __init__(self, store: PortfolioStore):
-        self.store = store
-        self.db = store.db
+class OrderRejected(RuntimeError):
+    """The exchange explicitly rejected the order."""
+
+
+class PortfolioStore:
+    def __init__(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_file = path.with_suffix(path.suffix + ".lock").open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self.lock_file.seek(0)
+                self.lock_file.write(b"0")
+                self.lock_file.flush()
+                self.lock_file.seek(0)
+                msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.lock_file.close()
+            raise RuntimeError("Another portfolio process is using this state database") from None
+        self.db = sqlite3.connect(path)
+        self.db.row_factory = sqlite3.Row
         self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS perps_positions (
-                wallet TEXT NOT NULL, instrument INTEGER NOT NULL, environment TEXT NOT NULL,
-                quantity TEXT NOT NULL, entry TEXT NOT NULL, realized TEXT NOT NULL, fees TEXT NOT NULL,
-                PRIMARY KEY(wallet,instrument,environment)
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=FULL;
+            CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY, wallet TEXT NOT NULL, asset TEXT NOT NULL,
+                side TEXT NOT NULL, environment TEXT NOT NULL, timestamp INTEGER NOT NULL,
+                title TEXT NOT NULL, outcome TEXT NOT NULL, status TEXT NOT NULL,
+                message TEXT NOT NULL DEFAULT '', order_id TEXT NOT NULL DEFAULT '',
+                shares TEXT NOT NULL DEFAULT '0', cash TEXT NOT NULL DEFAULT '0'
             );
-            CREATE TABLE IF NOT EXISTS perps_events (
-                id TEXT PRIMARY KEY, client_id TEXT NOT NULL, wallet TEXT NOT NULL,
-                instrument INTEGER NOT NULL, environment TEXT NOT NULL, timestamp INTEGER NOT NULL,
-                side INTEGER NOT NULL, reduce_only INTEGER NOT NULL, requested TEXT NOT NULL,
-                status TEXT NOT NULL, quantity TEXT NOT NULL DEFAULT '0', price TEXT NOT NULL DEFAULT '0',
-                fee TEXT NOT NULL DEFAULT '0', order_id TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT ''
+            CREATE TABLE IF NOT EXISTS holdings (
+                wallet TEXT NOT NULL, asset TEXT NOT NULL, environment TEXT NOT NULL,
+                title TEXT NOT NULL, outcome TEXT NOT NULL,
+                shares TEXT NOT NULL, cost TEXT NOT NULL, realized TEXT NOT NULL,
+                PRIMARY KEY (wallet, asset, environment)
             );
         """)
 
-    def positions(self, environment: str) -> list[dict]:
-        return [dict(row) for row in self.db.execute(
-            "SELECT * FROM perps_positions WHERE environment=?", (environment,)
-        )]
+    def close(self) -> None:
+        self.db.close()
+        self.lock_file.close()
 
-    def position(self, wallet: str, instrument: int, environment: str) -> tuple[Decimal, Decimal]:
+    def get(self, key: str, default: str) -> str:
+        row = self.db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def put(self, key: str, value: str) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (key, value))
+
+    def holding(self, wallet: str, asset: str, environment: str) -> tuple[Decimal, Decimal, Decimal]:
         row = self.db.execute(
-            "SELECT quantity,entry FROM perps_positions WHERE wallet=? AND instrument=? AND environment=?",
-            (wallet, instrument, environment),
+            "SELECT shares,cost,realized FROM holdings WHERE wallet=? AND asset=? AND environment=?",
+            (wallet, asset, environment),
         ).fetchone()
-        return (D(row["quantity"]), D(row["entry"])) if row else (ZERO, ZERO)
+        return (D(row["shares"]), D(row["cost"]), D(row["realized"])) if row else (ZERO, ZERO, ZERO)
+
+    def exposure(self, environment: str) -> Decimal:
+        return sum(
+            (D(row["cost"]) for row in self.db.execute(
+                "SELECT cost FROM holdings WHERE environment=?", (environment,)
+            )), ZERO
+        )
 
     def unresolved(self) -> list[dict]:
         return [dict(row) for row in self.db.execute(
-            "SELECT * FROM perps_events WHERE status IN ('pending','uncertain') ORDER BY rowid"
+            "SELECT * FROM events WHERE status IN ('pending','uncertain') ORDER BY timestamp"
         )]
 
-    def record(
-        self, event_id: str, trade: PerpsTrade, cfg: PerpsSettings, reduce: bool,
-        quantity: Decimal, status: str, message: str = "",
-    ) -> bool:
+    def seen(self, event_id: str) -> bool:
+        return self.db.execute("SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone() is not None
+
+    def record(self, trade: SourceTrade, environment: str, status: str, message: str = "") -> bool:
         with self.db:
             cursor = self.db.execute(
-                """INSERT OR IGNORE INTO perps_events
-                   (id,client_id,wallet,instrument,environment,timestamp,side,reduce_only,requested,status,message)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (event_id, hashlib.sha256(event_id.encode()).hexdigest()[:32], trade.wallet,
-                 trade.instrument, cfg.environment, trade.timestamp, 1 if trade.delta > 0 else -1,
-                 int(reduce), str(quantity), status, message),
+                """INSERT OR IGNORE INTO events
+                   (id,wallet,asset,side,environment,timestamp,title,outcome,status,message)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (trade.key, trade.wallet, trade.asset, trade.side, environment,
+                 trade.timestamp, trade.title, trade.outcome, status, message),
             )
         return cursor.rowcount == 1
 
-    def event(self, event_id: str):
-        return self.db.execute("SELECT * FROM perps_events WHERE id=?", (event_id,)).fetchone()
-
-    def status(self, event_id: str, status: str, message: str, order_id: str | None = None) -> None:
+    def status(self, event_id: str, status: str, message: str, order_id: str = "") -> None:
         with self.db:
             self.db.execute(
-                "UPDATE perps_events SET status=?,message=?,order_id=COALESCE(?,order_id) WHERE id=?",
+                "UPDATE events SET status=?,message=?,order_id=? WHERE id=?",
                 (status, message, order_id, event_id),
             )
 
-    def fill(self, event_id: str, quantity: Decimal, price: Decimal, fee: Decimal, note: str = "") -> None:
-        if any(not x.is_finite() for x in (quantity, price, fee)) or quantity < 0 or price < 0:
-            raise ValueError("Fill amounts must be finite; quantity and price cannot be negative")
-        if quantity > 0 and price <= 0 or quantity == 0 and (price != 0 or fee != 0):
-            raise ValueError("An executed fill needs a price; no-fill reconciliation must use zero amounts")
+    def fill(
+        self, event_id: str, shares: Decimal, cash: Decimal, message: str = "",
+        *, allow_zero_cash: bool = False,
+    ) -> None:
+        if not shares.is_finite() or not cash.is_finite() or shares < 0 or cash < 0:
+            raise ValueError("Fill amounts must be finite and nonnegative")
+        if (shares == 0 and cash != 0) or (shares != 0 and cash == 0 and not allow_zero_cash):
+            raise ValueError("Shares and cash must both be zero or both be positive")
         with self.db:
-            event = self.event(event_id)
-            if event is None or event["status"] not in ("pending", "uncertain"):
-                raise ValueError("Only pending/uncertain perps orders can be reconciled")
-            if quantity > D(event["requested"]):
-                raise ValueError("Fill exceeds requested perps quantity")
-            held, entry = self.position(event["wallet"], event["instrument"], event["environment"])
-            position = self.db.execute(
-                "SELECT realized,fees FROM perps_positions WHERE wallet=? AND instrument=? AND environment=?",
-                (event["wallet"], event["instrument"], event["environment"]),
-            ).fetchone()
-            realized, fees = (D(position["realized"]), D(position["fees"])) if position else (ZERO, ZERO)
-            delta = quantity * event["side"]
-            if quantity:
-                if event["reduce_only"]:
-                    if held * delta >= 0 or quantity > abs(held):
-                        raise ValueError("Reduce-only fill would increase or reverse the copied position")
-                    realized += (price - entry) * quantity * (1 if held > 0 else -1)
-                else:
-                    if held * delta < 0:
-                        raise ValueError("Opening fill conflicts with an existing copied position")
-                    entry = (abs(held) * entry + quantity * price) / (abs(held) + quantity)
-            held += delta
+            row = self.db.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+            if row is None or row["status"] not in ("pending", "uncertain"):
+                raise ValueError("Only a pending/uncertain order can be reconciled")
+            held, cost, realized = self.holding(row["wallet"], row["asset"], row["environment"])
+            if row["side"] == "BUY":
+                held, cost = held + shares, cost + cash
+            else:
+                if shares > held:
+                    raise ValueError("Sell fill exceeds this wallet's copied position")
+                released = cost * shares / held if held else ZERO
+                held, cost, realized = held - shares, cost - released, realized + cash - released
             self.db.execute(
-                "INSERT OR REPLACE INTO perps_positions VALUES (?,?,?,?,?,?,?)",
-                (event["wallet"], event["instrument"], event["environment"], str(held),
-                 str(entry if held else ZERO), str(realized), str(fees + fee)),
+                "INSERT OR REPLACE INTO holdings VALUES (?,?,?,?,?,?,?,?)",
+                (row["wallet"], row["asset"], row["environment"], row["title"], row["outcome"],
+                 str(held), str(cost), str(realized)),
             )
             self.db.execute(
-                "UPDATE perps_events SET status=?,quantity=?,price=?,fee=?,message=? WHERE id=?",
-                ("filled" if quantity else "unfilled", str(quantity), str(price), str(fee), note, event_id),
+                "UPDATE events SET status=?,shares=?,cash=?,message=? WHERE id=?",
+                ("filled" if shares else "unfilled", str(shares), str(cash), message, event_id),
             )
 
     def snapshot(self) -> dict:
         return {
-            "positions": self.positions("simulation") + self.positions("live"),
+            "holdings": [dict(row) for row in self.db.execute("SELECT * FROM holdings")],
             "events": [dict(row) for row in self.db.execute(
-                "SELECT * FROM perps_events ORDER BY rowid DESC LIMIT 100"
+                "SELECT * FROM events ORDER BY rowid DESC LIMIT 100"
             )],
             "unresolved": self.unresolved(),
         }
 
 
-class PerpsGateway:
-    def __init__(self):
+class PortfolioGateway:
+    def __init__(self) -> None:
         self.public = AsyncPublicClient()
-        self.http = httpx.AsyncClient(base_url="https://api.perpetuals.polymarket.com", timeout=20)
         self.secure: AsyncSecureClient | None = None
-        self.session: PerpsSession | None = None
-        self.wallet: str | None = None
 
     async def close(self) -> None:
-        if self.session is not None:
-            await self.session.close()
         if self.secure is not None:
             await self.secure.close()
         await self.public.close()
-        await self.http.aclose()
 
     async def prepare_live(self) -> str:
-        verify_operator_location()
-        key = os.getenv("PERPS_PRIVATE_KEY", "").strip()
-        wallet = os.getenv("PERPS_WALLET_ADDRESS", "").strip().lower()
-        if not key or not ADDRESS.fullmatch(wallet):
-            raise ValueError("Live perps requires PERPS_PRIVATE_KEY and PERPS_WALLET_ADDRESS")
-        if not await self.public.fetch_perps_registration(address=wallet):
-            raise ValueError("The configured wallet has no registered Perps account; fund/register it on Polymarket")
-        if self.session is not None:
-            await self.session.close()
-            self.session = None
-            self.wallet = None
-        if self.secure is not None:
-            await self.secure.close()
-        self.secure = await AsyncSecureClient.create(private_key=key, wallet=wallet)
-        self.session = await self.secure.open_perps_session(label="portfolio-following")
-        self.wallet = wallet
+        key = os.getenv("PRIVATE_KEY", "").strip().strip('"').strip("'")
+        if not key:
+            raise ValueError("Live mode requires PRIVATE_KEY in .env")
+        from eth_account import Account
+
+        wallet = (os.getenv("FUNDER_ADDRESS") or Account.from_key(key).address).strip().lower()
+        if not ADDRESS.fullmatch(wallet):
+            raise ValueError("FUNDER_ADDRESS is not a valid wallet address")
+        if self.secure is None:
+            self.secure = await AsyncSecureClient.create(private_key=key, wallet=wallet)
         return wallet
 
-    async def market_data(self) -> tuple[dict[int, PerpsInstrument], dict[int, PerpsTicker]]:
-        instruments = await self.public.fetch_perps_instruments()
-        tickers = await self.public.fetch_perps_tickers()
-        return {int(i.id): i for i in instruments}, {int(t.instrument_id): t for t in tickers}
-
-    async def source(self, wallet: str, start: int, end: int) -> tuple[list[PerpsTrade], dict]:
-        if not await self.public.fetch_perps_registration(address=wallet):
-            raise ValueError("Follow the registered Perps account owner address, not a prediction proxy without Perps")
-        params: dict[str, str | int] = {
-            "address": wallet, "start_timestamp": min(start, end), "end_timestamp": end, "sort": "asc",
-        }
-        groups: dict[tuple, list[PerpsFill]] = {}
-        cursors: set[str] = set()
-        seen: set[int] = set()
-        for _ in range(50):
-            response = await self.http.get("/v1/info/fills", params=params)
-            response.raise_for_status()
-            page = response.json()
-            for raw in page["data"]:
-                fill = PerpsFill.model_validate(raw)
-                if fill.trade_id in seen:
-                    continue
-                seen.add(fill.trade_id)
-                if fill.quantity <= 0 or fill.price <= 0:
-                    raise ValueError("Public Perps fill has an invalid quantity/price")
-                key = (int(fill.timestamp.timestamp() * 1000), int(fill.order_id),
-                       int(fill.instrument_id), fill.side, fill.previous_size)
-                groups.setdefault(key, []).append(fill)
-            if not page["more"]:
-                break
-            cursor = page["cursor"]
-            if not cursor or cursor in cursors:
-                raise ValueError("Perps fills pagination did not advance")
-            cursors.add(cursor)
-            params["cursor"] = cursor
-        else:
-            raise ValueError("Perps fill scan exceeded 5,000 rows; no partial batch was copied")
-        trades = []
-        chronological = sorted(groups.items(), key=lambda item: (
-            item[0][0], min(f.trade_id for f in item[1]),
-        ))
-        for (timestamp, order, instrument, side, previous), fills in chronological:
-            quantity = sum((f.quantity for f in fills), ZERO)
-            price = sum((f.quantity * f.price for f in fills), ZERO) / quantity
-            trades.append(PerpsTrade(
-                wallet, order, instrument, timestamp, previous,
-                quantity if side == "long" else -quantity, price,
-                any(f.liquidation or f.adl or f.settlement for f in fills),
-            ))
-        response = await self.http.get("/v1/info/portfolio", params={"address": wallet})
-        response.raise_for_status()
-        portfolio = PublicPortfolio.model_validate(response.json())
-        return trades, portfolio.model_dump(mode="json")
-
-    async def account(self) -> PerpsPortfolio:
-        if self.session is None:
-            raise ValueError("Open a live Perps session first")
-        if await self.session.fetch_open_orders():
-            raise ValueError("Unmanaged/open Perps orders exist; cancel them before copying")
-        return await self.session.fetch_portfolio()
-
-    async def set_leverage(self, instrument: int, leverage: int) -> None:
-        if self.session is None:
-            raise ValueError("No live Perps session")
-        result = await self.session.update_leverage(
-            instrument_id=instrument, leverage=leverage, cross_margin=False,
+    async def source(self, wallet: str, start: int) -> tuple[list[SourceTrade], list[dict]]:
+        trades: dict[str, SourceTrade] = {}
+        pages = self.public.list_activity(
+            user=wallet, activity_types=["TRADE"], start=start, sort_direction="ASC", page_size=500
         )
-        if result.leverage != leverage or result.cross_margin:
-            raise ValueError("Exchange did not confirm the requested isolated leverage")
+        count = 0
+        async for page in pages:
+            count += 1
+            if count > 50:
+                raise RuntimeError("Activity scan exceeded 25,000 rows; no partial batch was copied")
+            for item in page.items:
+                if not isinstance(item, TradeActivity):
+                    raise ValueError("Unsupported combo/unknown activity; wallet batch was not copied")
+                trade = SourceTrade(
+                    wallet, str(item.transaction_hash), str(item.asset_id), item.side,
+                    item.shares, item.amount, int(item.timestamp.timestamp()),
+                    item.title or str(item.asset_id), item.outcome or "",
+                )
+                if trade.shares <= 0 or not ZERO < trade.price < 1:
+                    raise ValueError("Source trade has an invalid size or price")
+                previous = trades.get(trade.key)
+                if previous:
+                    trade = SourceTrade(
+                        wallet, trade.transaction, trade.asset, trade.side,
+                        previous.shares + trade.shares, previous.cash + trade.cash,
+                        max(previous.timestamp, trade.timestamp), trade.title, trade.outcome,
+                    )
+                trades[trade.key] = trade
+
+        positions = []
+        count = 0
+        async for page in self.public.list_positions(user=wallet, page_size=500):
+            count += 1
+            if count > 50:
+                raise RuntimeError("Portfolio scan exceeded 25,000 rows; no partial batch was copied")
+            for item in page.items:
+                positions.append({
+                    "asset": str(item.token_id), "title": item.title or str(item.token_id),
+                    "outcome": item.outcome or "", "shares": str(item.current_size),
+                    "value": str(item.current_value), "pnl": str(item.total_pnl),
+                    "redeemable": item.redeemable,
+                })
+        return sorted(trades.values(), key=lambda t: (t.timestamp, t.transaction, t.side)), positions
 
     async def quote(
-        self, trade: PerpsTrade, instrument: PerpsInstrument, cfg: PerpsSettings,
-        quantity: Decimal, reduce: bool, *, max_notional: Decimal | None = None,
-    ) -> tuple[Decimal, Decimal, Decimal]:
-        if instrument.settlement is not None or instrument.close_only and not reduce:
-            raise ValueError("Instrument is settled or close-only")
-        book = await self.public.fetch_perps_book(instrument_id=trade.instrument)
-        if abs(time.time() - book.timestamp.timestamp()) > 30:
-            raise ValueError("Perps order book is stale")
-        buy = trade.delta > 0
-        bound = trade.price * (1 + D(str(cfg.slippage_pct)) / 100 * (1 if buy else -1))
-        bound = bound.quantize(
-            D(1).scaleb(-instrument.price_decimals), rounding=ROUND_DOWN if buy else ROUND_UP,
+        self, trade: SourceTrade, settings: FollowSettings, amount: Decimal,
+    ) -> tuple[Decimal, Decimal]:
+        book = await self.public.get_order_book(asset_id=trade.asset)
+        tick = book.tick_size
+        slip = D(str(settings.slippage_pct)) / 100
+        bound = trade.price * (1 + slip if trade.side == "BUY" else 1 - slip)
+        rounding = ROUND_DOWN if trade.side == "BUY" else "ROUND_UP"
+        price = (bound / tick).to_integral_value(rounding=rounding) * tick
+        if not tick <= price <= 1 - tick:
+            raise ValueError("Slippage bound is outside the market's tradable prices")
+        levels = sorted(
+            book.asks if trade.side == "BUY" else book.bids,
+            key=lambda level: level.price, reverse=trade.side == "SELL",
         )
-        if bound <= 0:
-            raise ValueError("Invalid Perps slippage price")
-        levels = sorted(book.asks if buy else book.bids, key=lambda x: x.price, reverse=not buy)
-        if any(not v.is_finite() or v <= 0 for level in levels for v in (level.price, level.quantity)):
-            raise ValueError("Invalid Perps book price or quantity")
-        if not reduce and max_notional is not None:
-            largest_price = max(
-                (level.price for level in levels if (level.price <= bound if buy else level.price >= bound)),
-                default=ZERO,
-            )
-            if largest_price:
-                quantity = min(quantity, max_notional / largest_price)
-        available = ZERO
+        remaining, shares, cash = amount, ZERO, ZERO
         for level in levels:
-            if buy and level.price > bound or not buy and level.price < bound:
+            if (trade.side == "BUY" and level.price > price) or (
+                trade.side == "SELL" and level.price < price
+            ):
                 break
-            take = min(level.quantity, quantity - available)
-            available += take
-            if available >= quantity:
-                break
-        available = available.quantize(D(1).scaleb(-instrument.quantity_decimals), rounding=ROUND_DOWN)
-        if available <= 0 or not reduce and available * bound < instrument.min_notional:
-            raise ValueError("Perps order below minimum or no liquidity inside slippage limit")
-        remaining, cash = available, ZERO
-        for level in levels:
-            take = min(level.quantity, remaining)
+            take = min(level.size, remaining / level.price if trade.side == "BUY" else remaining)
+            shares += take
             cash += take * level.price
-            remaining -= take
-            if not remaining:
+            remaining -= take * level.price if trade.side == "BUY" else take
+            if remaining <= D("0.000001"):
                 break
-        return bound, available, cash / available
-
-    async def resolve(self, client_id: str) -> tuple[str, Decimal, Decimal, Decimal]:
-        if self.session is None:
-            raise ValueError("No live Perps session")
-        for _ in range(25):
-            orders = await self.session.fetch_orders(client_order_id=client_id)
-            if len(orders) == 1:
-                order = orders[0]
-                if order.status in {"duplicate_order", "order_not_found", "order_already_terminal"}:
-                    raise OrderUncertain("Perps response cannot establish the original order outcome")
-                if order.status not in {"accepted", "open", "partial", "untriggered", "armed", "triggered"}:
-                    if order.resting_quantity != 0:
-                        raise OrderUncertain("Perps order still has resting quantity")
-                    if order.filled_quantity == 0:
-                        return str(order.id), ZERO, ZERO, ZERO
-                    fills: dict[int, PerpsFill] = {}
-                    count = 0
-                    async for page in self.session.list_fills(
-                        instrument_id=int(order.instrument_id), start=order.created_at, sort="asc",
-                    ):
-                        count += 1
-                        if count > 50:
-                            raise OrderUncertain("Perps fill reconciliation exceeded its page limit")
-                        fills.update((int(f.trade_id), f) for f in page.items if f.order_id == order.id)
-                    if any(f.fee_asset != "pUSD" for f in fills.values()):
-                        raise OrderUncertain("Unsupported Perps fee currency; reconcile actual USD-equivalent fees")
-                    quantity = sum((f.quantity for f in fills.values()), ZERO)
-                    if quantity == order.filled_quantity:
-                        price = sum((f.quantity * f.price for f in fills.values()), ZERO) / quantity
-                        return str(order.id), quantity, price, sum((f.total_fee for f in fills.values()), ZERO)
-            await asyncio.sleep(.2)
-        raise OrderUncertain("Perps IOC outcome/fills are not confirmed; reconcile by client order ID")
+        shares = shares.quantize(D("0.01"), rounding=ROUND_DOWN)
+        if trade.side == "BUY":
+            shares = min(shares, (amount / price).quantize(D("0.01"), rounding=ROUND_DOWN))
+        if shares < book.min_order_size or cash <= 0:
+            raise ValueError("Insufficient liquidity/order size within the slippage limit")
+        return price, shares
 
     async def submit(
-        self, trade: PerpsTrade, quantity: Decimal, price: Decimal, reduce: bool,
-        client_id: str, accepted: Callable[[str], None],
-    ) -> tuple[str, Decimal, Decimal, Decimal]:
-        verify_operator_location()
-        if self.session is None:
-            raise ValueError("No live Perps session")
-        result = await self.session.place_order(
-            instrument_id=trade.instrument, side="BUY" if trade.delta > 0 else "SELL",
-            quantity=quantity, price=price, time_in_force="ioc", reduce_only=reduce,
-            client_order_id=client_id,
+        self, trade: SourceTrade, amount: Decimal, bound: Decimal,
+        on_accepted: Callable[[str], None],
+    ) -> tuple[str, Decimal, Decimal]:
+        if self.secure is None:
+            raise RuntimeError("Live client has not been initialized")
+        if trade.side == "BUY":
+            response = await self.secure.place_market_order(
+                asset_id=trade.asset, side="BUY", amount=amount,
+                max_spend=amount, max_price=bound, order_type="FAK",
+            )
+        else:
+            response = await self.secure.place_market_order(
+                asset_id=trade.asset, side="SELL", shares=amount, min_price=bound, order_type="FAK",
+            )
+        if not response.ok:
+            raise OrderRejected(f"{response.code}: {response.message}")
+        on_accepted(str(response.order_id))
+        if response.status != "matched" or not response.trade_ids:
+            raise OrderUncertain(f"Order {response.order_id}: {response.status}; inspect exchange fills")
+        # Settlement failure cannot safely be treated as an unfilled order.
+        await self.secure.wait_for_order_fill_settlement(response)
+        shares, cash = (
+            (response.taking_amount, response.making_amount) if trade.side == "BUY"
+            else (response.making_amount, response.taking_amount)
         )
-        accepted(str(result.order.id))
-        return await self.resolve(client_id)
+        if shares <= 0 or cash <= 0:
+            raise OrderUncertain(f"Order {response.order_id}: matched without confirmed amounts")
+        return str(response.order_id), shares, cash
 
 
-class PerpsFollower:
-    def __init__(self, store: PerpsStore, gateway: PerpsGateway):
-        self.store, self.gateway = store, gateway
-        self.settings = PerpsSettings.model_validate_json(store.store.get("perps_settings", "{}"))
+class PortfolioFollower:
+    def __init__(self, store: PortfolioStore, gateway: PortfolioGateway):
+        self.store = store
+        self.gateway = gateway
+        self.settings = FollowSettings.model_validate_json(store.get("settings", "{}"))
+        # Every process start requires a fresh, explicit activation.
         self.settings.enabled = False
-        self.since: dict[str, int] = json.loads(store.store.get("perps_since", "{}"))
         self.lock = asyncio.Lock()
-        self.pause_revision = 0
-        self.worker_failed = False
         self.error = ""
+        self.worker_failed = False
+        self.pause_revision = 0
         self.last_poll: float | None = None
-        self.portfolios: dict[str, dict] = {}
+        self.portfolios: dict[str, list[dict]] = {}
         self.wallet_errors: dict[str, str] = {}
-        self.instruments: dict[int, PerpsInstrument] = {}
-        self.tickers: dict[int, PerpsTicker] = {}
-        self.live_account: PerpsPortfolio | None = None
+        self.since: dict[str, int] = json.loads(store.get("since", "{}"))
+
+    async def configure(self, settings: FollowSettings, confirm_live: bool = False) -> None:
+        async with self.lock:
+            revision = self.pause_revision
+            if settings.enabled and self.worker_failed:
+                raise ValueError("The portfolio worker stopped; restart this process before enabling copying")
+            if settings.enabled and not settings.wallets:
+                raise ValueError("Add at least one wallet before enabling copying")
+            if settings.enabled and settings.environment == "live":
+                if not confirm_live:
+                    raise ValueError("Explicit live-trading confirmation is required")
+                if self.store.unresolved():
+                    raise ValueError("Reconcile all uncertain orders before enabling live copying")
+                wallet = await self.gateway.prepare_live()
+                if wallet in settings.wallets:
+                    raise ValueError("Cannot copy your own trading wallet")
+                owner = self.store.get("live_wallet", wallet)
+                if owner != wallet:
+                    raise ValueError("Live wallet changed; use a separate state database for this account")
+                self.store.put("live_wallet", wallet)
+            if settings.enabled and revision != self.pause_revision:
+                raise ValueError("Copying was paused while settings were being applied; enable again explicitly")
+            if settings.enabled and self.store.unresolved():
+                raise ValueError("Reconcile unresolved orders before enabling copying")
+            now = int(time.time())
+            for wallet in settings.wallets:
+                if wallet not in self.settings.wallets or (
+                    settings.enabled and (
+                        not self.settings.enabled or settings.environment != self.settings.environment
+                    )
+                ):
+                    self.since[wallet] = now
+            removed = set(self.settings.wallets) - set(settings.wallets)
+            for wallet in removed:
+                self.portfolios.pop(wallet, None)
+                self.wallet_errors.pop(wallet, None)
+            self.store.put("since", json.dumps(self.since))
+            self.store.put("settings", settings.model_dump_json())
+            self.settings = settings
+            self.error = ""
 
     def pause(self) -> None:
         self.pause_revision += 1
         self.settings.enabled = False
-        self.store.store.put("perps_settings", self.settings.model_dump_json())
+        self.store.put("settings", self.settings.model_dump_json())
 
-    def totals(self, environment: str) -> tuple[Decimal, Decimal, dict[int, Decimal]]:
-        gross, profit, by_instrument = ZERO, ZERO, {}
-        for position in self.store.positions(environment):
-            quantity, entry = D(position["quantity"]), D(position["entry"])
-            profit += D(position["realized"]) - D(position["fees"])
-            if quantity:
-                mark = self.tickers[position["instrument"]].mark_price
-                if not mark.is_finite() or mark <= 0:
-                    raise ValueError("A held Perps instrument has no valid mark price; exposure cannot be verified")
-                notional = abs(quantity) * mark
-                gross += notional
-                by_instrument[position["instrument"]] = by_instrument.get(position["instrument"], ZERO) + notional
-                profit += (mark - entry) * quantity
-        return gross, profit, by_instrument
-
-    async def check_account(self) -> PerpsPortfolio:
-        owner = self.store.store.get("perps_live_wallet", "")
-        if owner and self.gateway.wallet != owner:
-            raise ValueError("Live Perps session wallet differs from the persisted account")
-        account = await self.gateway.account()
-        if account.in_liquidation:
-            raise ValueError("Perps account is in liquidation; copying is blocked")
-        expected: dict[int, Decimal] = {}
-        for position in self.store.positions("live"):
-            key = position["instrument"]
-            expected[key] = expected.get(key, ZERO) + D(position["quantity"])
-        actual = {int(p.instrument_id): p.size for p in account.positions if p.size}
-        if {k: v for k, v in expected.items() if v} != actual:
-            raise ValueError("Live Perps inventory differs from copied positions (external trade/liquidation). Pause and reconcile.")
-        self.live_account = account
-        return account
-
-    async def configure(self, cfg: PerpsSettings, confirm_live: bool = False) -> None:
+    async def reconcile(self, event_id: str, shares: Decimal, cash: Decimal, note: str) -> None:
         async with self.lock:
-            revision = self.pause_revision
-            if cfg.enabled:
-                if self.worker_failed or self.store.unresolved():
-                    raise ValueError("Restart failed workers and reconcile uncertain Perps orders before enabling")
-                if not cfg.wallets:
-                    raise ValueError("Add at least one Perps account owner address")
-                if cfg.environment == "live":
-                    if not confirm_live:
-                        raise ValueError("Explicit live Perps confirmation is required")
-                    wallet = await self.gateway.prepare_live()
-                    if wallet in cfg.wallets:
-                        raise ValueError("Cannot copy your own Perps account")
-                    if self.store.store.get("perps_live_wallet", wallet) != wallet:
-                        raise ValueError("Perps live wallet changed; use a different database")
-                    await self.check_account()
-                    self.store.store.put("perps_live_wallet", wallet)
-            if cfg.enabled and revision != self.pause_revision:
-                raise ValueError("Perps copying was paused during activation; enable explicitly again")
-            now = int(time.time() * 1000)
-            for wallet in cfg.wallets:
-                if wallet not in self.settings.wallets or cfg.enabled and (
-                    not self.settings.enabled or cfg.environment != self.settings.environment
-                ):
-                    self.since[wallet] = now
-            self.store.store.put("perps_since", json.dumps(self.since))
-            self.store.store.put("perps_settings", cfg.model_dump_json())
-            self.settings = cfg
+            if self.settings.enabled:
+                raise ValueError("Pause copying before reconciling an order")
+            if not note.strip():
+                raise ValueError("An exchange reconciliation note is required")
+            self.store.fill(event_id, shares, cash, "Manually reconciled: " + note.strip())
             self.error = ""
+
+    async def external_close(
+        self, wallet: str, asset: str, environment: Literal["simulation", "live"],
+        cash: Decimal, note: str,
+    ) -> None:
+        async with self.lock:
+            if self.settings.enabled or self.store.unresolved():
+                raise ValueError("Pause copying and reconcile pending orders before recording a close")
+            if not note.strip() or not cash.is_finite() or cash < 0:
+                raise ValueError("A settlement note and nonnegative cash proceeds are required")
+            shares, _, _ = self.store.holding(wallet, asset, environment)
+            if shares <= 0:
+                raise ValueError("There is no copied position to close")
+            position = self.store.db.execute(
+                "SELECT title,outcome FROM holdings WHERE wallet=? AND asset=? AND environment=?",
+                (wallet, asset, environment),
+            ).fetchone()
+            event = SourceTrade(
+                wallet, f"external-{time.time_ns()}", asset, "SELL",
+                shares, cash, int(time.time()), position["title"], position["outcome"],
+            )
+            self.store.record(event, environment, "pending")
+            # A resolved losing token has zero proceeds but a positive extinguished balance.
+            self.store.fill(event.key, shares, cash, "External close: " + note.strip(), allow_zero_cash=True)
 
     async def poll(self) -> None:
         async with self.lock:
             cfg = self.settings
-            if not cfg.wallets and not any(D(p["quantity"]) for p in self.store.snapshot()["positions"]):
-                self.last_poll = time.time()
-                return
-            try:
-                self.instruments, self.tickers = await self.gateway.market_data()
-                if self.gateway.session is not None and not self.store.unresolved():
-                    await self.check_account()
-                now = int(time.time() * 1000)
-                for wallet in cfg.wallets:
-                    since = self.since.setdefault(wallet, now)
-                    try:
-                        trades, portfolio = await self.gateway.source(wallet, max(since, now - cfg.max_age_sec * 1000), now - 2000)
-                        self.portfolios[wallet] = portfolio
-                        self.wallet_errors.pop(wallet, None)
-                        for trade in trades:
-                            for reduce, size in ((True, trade.close_quantity), (False, trade.open_quantity)):
-                                if size:
-                                    await self.copy(trade, reduce, size)
-                    except Exception as exc:
-                        logger.exception("Perps source poll failed for %s", wallet)
-                        self.wallet_errors[wallet] = str(exc)
-                self.error = "" if cfg.enabled else self.error
-            except Exception as exc:
-                logger.exception("Perps market/account risk check failed")
-                self.error = str(exc)
-                if cfg.environment == "live":
-                    self.pause()
+            now = int(time.time())
+            for wallet in cfg.wallets:
+                if wallet not in self.since:
+                    self.since[wallet] = now
+                    self.store.put("since", json.dumps(self.since))
+                try:
+                    start = max(self.since[wallet], now - cfg.max_age_sec)
+                    trades, positions = await self.gateway.source(wallet, start)
+                    self.portfolios[wallet] = positions
+                    self.wallet_errors.pop(wallet, None)
+                    # Reconstruct pre-sale inventory backwards from the current source portfolio.
+                    balances = {p["asset"]: D(p["shares"]) for p in positions}
+                    before: dict[str, Decimal] = {}
+                    for trade in reversed(trades):
+                        balance = balances.get(trade.asset, ZERO)
+                        balance += trade.shares if trade.side == "SELL" else -trade.shares
+                        balances[trade.asset] = balance
+                        before[trade.key] = balance
+                    for trade in trades:
+                        if self.store.seen(trade.key):
+                            continue
+                        if trade.timestamp <= self.since[wallet] or now - trade.timestamp > cfg.max_age_sec:
+                            self.store.record(trade, cfg.environment, "skipped", "Before activation or stale")
+                            continue
+                        if not cfg.enabled or self.store.unresolved():
+                            self.store.record(trade, cfg.environment, "skipped", "Copying paused")
+                            continue
+                        await self.copy(trade, before[trade.key])
+                except Exception as exc:
+                    # Boundary for one wallet: errors remain visible, never become empty portfolios.
+                    logger.exception("Portfolio poll failed for %s", wallet)
+                    self.wallet_errors[wallet] = str(exc)
             self.last_poll = time.time()
 
-    async def copy(self, trade: PerpsTrade, reduce: bool, source_quantity: Decimal) -> None:
+    async def copy(self, trade: SourceTrade, source_before: Decimal) -> None:
         cfg = self.settings
-        event_id = trade.key + (":close" if reduce else ":open")
-        if self.store.event(event_id):
-            return
-        quantity, _ = self.store.position(trade.wallet, trade.instrument, cfg.environment)
-        side = 1 if trade.delta > 0 else -1
-
-        def skip(message: str) -> None:
-            self.store.record(event_id, trade, cfg, reduce, ZERO, "skipped", message)
-
-        if not cfg.enabled or self.store.unresolved():
-            skip("Perps copying paused or awaiting reconciliation")
-            return
-        if trade.timestamp <= self.since.get(trade.wallet, 0) or not 0 <= time.time() * 1000 - trade.timestamp <= cfg.max_age_sec * 1000:
-            skip("Before activation or stale source fill")
-            return
-        instrument, ticker = self.instruments[trade.instrument], self.tickers[trade.instrument]
-        if ticker.mark_price <= 0 or not ticker.mark_price.is_finite():
-            raise ValueError("Invalid Perps mark price")
-        try:
-            account = await self.check_account() if cfg.environment == "live" else None
-            if reduce:
-                if quantity * side >= 0 or trade.previous == 0:
-                    skip("No matching copied position to reduce")
-                    return
-                desired = abs(quantity) * source_quantity / abs(trade.previous)
-            else:
-                if trade.forced:
-                    skip("Forced/liquidation fills cannot open copied exposure")
-                    return
-                peers = self.store.positions(cfg.environment)
-                if any(p["instrument"] == trade.instrument and D(p["quantity"]) * side < 0 for p in peers):
-                    skip("Opposing copied position remains; no hedging/netting across followed accounts")
-                    return
-                if cfg.leverage > instrument.max_leverage:
-                    skip("Configured leverage exceeds this instrument's limit")
-                    return
-                gross, pnl, by_instrument = self.totals(cfg.environment)
-                if account:
-                    by_instrument = {int(p.instrument_id): abs(p.position_value) for p in account.positions}
-                    gross = sum(by_instrument.values(), ZERO)
-                budget = D(str(cfg.fixed_usd)) if cfg.sizing == "fixed" else (
-                    source_quantity * trade.price * D(str(cfg.copy_percentage)) / 100
-                )
-                available = (
-                    account.margin.available_order_margin if account else
-                    D(str(cfg.simulation_equity_usd)) + pnl - gross / cfg.leverage
-                )
-                budget = min(
-                    budget, D(str(cfg.max_trade_usd)), instrument.max_limit_notional, instrument.max_market_notional,
-                    D(str(cfg.max_position_usd)) - by_instrument.get(trade.instrument, ZERO),
-                    D(str(cfg.max_exposure_usd)) - gross, max(ZERO, available) * cfg.leverage * D(".98"),
-                )
-                worst = max(ticker.mark_price, trade.price * (1 + D(str(cfg.slippage_pct)) / 100))
-                desired = max(ZERO, budget) / worst
-            desired = desired.quantize(D(1).scaleb(-instrument.quantity_decimals), rounding=ROUND_DOWN)
-            if desired <= 0:
-                skip("Position/exposure/margin limit or quantity below instrument precision")
-                return
-            bound, filled, average = await self.gateway.quote(
-                trade, instrument, cfg, desired, reduce, max_notional=None if reduce else budget,
+        held, _, _ = self.store.holding(trade.wallet, trade.asset, cfg.environment)
+        if trade.side == "BUY":
+            desired = D(str(cfg.fixed_usd)) if cfg.sizing == "fixed" else (
+                trade.cash * D(str(cfg.copy_percentage)) / 100
             )
-            if cfg.environment == "live" and not reduce:
-                await self.gateway.set_leverage(trade.instrument, cfg.leverage)
-                account = await self.check_account()
-                position = next((p for p in account.positions if p.instrument_id == trade.instrument), None)
-                if position and (position.cross or position.leverage != cfg.leverage):
-                    raise ValueError("Perps account leverage/margin mode does not match configured isolated risk")
-                if any(p.cross or p.leverage > cfg.leverage for p in account.positions if p.size):
-                    raise ValueError("Existing Perps positions exceed the configured isolated leverage")
-                gross = sum((abs(p.position_value) for p in account.positions), ZERO)
-                value = abs(position.position_value) if position else ZERO
-                remaining = min(
-                    D(str(cfg.max_exposure_usd)) - gross, D(str(cfg.max_position_usd)) - value,
-                    account.margin.available_order_margin * cfg.leverage * D(".98"),
-                )
-                if filled * max(bound, ticker.mark_price) > remaining:
-                    raise ValueError("Perps account margin/exposure changed during preflight")
-            if not cfg.enabled or time.time() * 1000 - trade.timestamp > cfg.max_age_sec * 1000:
-                skip("Paused or stale before Perps submission")
+            amount = min(
+                desired, D(str(cfg.max_trade_usd)),
+                D(str(cfg.max_exposure_usd)) - self.store.exposure(cfg.environment),
+            ).quantize(D("0.01"), rounding=ROUND_DOWN)
+        else:
+            if source_before < trade.shares:
+                self.store.record(trade, cfg.environment, "skipped", "Source position snapshot inconsistent")
                 return
-        except Exception as exc:
-            logger.warning("Perps trade skipped: %s", exc)
-            skip(str(exc))
+            amount = (held * trade.shares / source_before).quantize(D("0.01"), rounding=ROUND_DOWN)
+        if amount <= 0:
+            self.store.record(trade, cfg.environment, "skipped", "Exposure limit or no copied shares to sell")
             return
-        if not self.store.record(event_id, trade, cfg, reduce, filled, "pending"):
+        try:
+            bound, quoted_shares = await self.gateway.quote(trade, cfg, amount)
+        except Exception as exc:
+            logger.warning("Copy quote skipped: %s", exc)
+            self.store.record(trade, cfg.environment, "skipped", str(exc))
+            return
+        if not cfg.enabled or time.time() - trade.timestamp > cfg.max_age_sec:
+            self.store.record(trade, cfg.environment, "skipped", "Paused or stale before submission")
+            return
+        # Commit before sending: crashes/timeouts must never cause a duplicate submission.
+        if not self.store.record(trade, cfg.environment, "pending"):
             return
         try:
             if cfg.environment == "simulation":
-                self.store.fill(event_id, filled, average, ZERO, "Paper fill; fees/funding/liquidation not simulated")
+                shares = min(quoted_shares, (amount / bound).quantize(
+                    D("0.01"), rounding=ROUND_DOWN
+                )) if trade.side == "BUY" else quoted_shares
+                # Conservative paper fills use the worst permitted execution price.
+                cash = shares * bound
+                order_id = "simulation"
             else:
-                event = self.store.event(event_id)
-                order_id, executed, price, fee = await self.gateway.submit(
-                    trade, filled, bound, reduce, event["client_id"],
-                    lambda oid: self.store.status(event_id, "pending", "", oid),
+                order_id, shares, cash = await self.gateway.submit(
+                    trade, amount, bound,
+                    lambda order_id: self.store.status(trade.key, "pending", "", order_id),
                 )
-                self.store.status(event_id, "pending", "", order_id)
-                self.store.fill(event_id, executed, price, fee)
+            self.store.status(trade.key, "pending", "", order_id)
+            self.store.fill(trade.key, shares, cash)
+        except OrderRejected as exc:
+            logger.warning("Copy order rejected: %s", exc)
+            self.store.status(trade.key, "rejected", str(exc))
         except Exception as exc:
-            logger.exception("Perps order requires reconciliation")
-            self.store.status(event_id, "uncertain", str(exc))
+            logger.exception("Copy order requires reconciliation: %s", trade.key)
+            row = self.store.db.execute(
+                "SELECT order_id FROM events WHERE id=?", (trade.key,)
+            ).fetchone()
+            self.store.status(trade.key, "uncertain", str(exc), row["order_id"])
             self.pause()
-            self.error = "Perps order outcome uncertain. Copying paused; reconcile the persisted client order ID."
-
-    async def reconcile(
-        self, event_id: str, quantity: Decimal, price: Decimal, fee: Decimal, note: str,
-    ) -> None:
-        async with self.lock:
-            if self.settings.enabled or not note.strip():
-                raise ValueError("Pause Perps copying and provide verified exchange settlement evidence")
-            self.store.fill(event_id, quantity, price, fee, "Manually reconciled: " + note.strip())
-            self.error = ""
-
-    async def record_flat(self, instrument: int, environment: Literal["simulation", "live"], note: str) -> None:
-        async with self.lock:
-            if self.settings.enabled or self.store.unresolved() or not note.strip():
-                raise ValueError("Pause, reconcile pending orders, and provide evidence before recording a flat position")
-            if not any(p["instrument"] == instrument and D(p["quantity"]) for p in self.store.positions(environment)):
-                raise ValueError("No open copied position exists for this instrument/environment")
-            if environment == "live":
-                wallet = await self.gateway.prepare_live()
-                if self.store.store.get("perps_live_wallet", "") != wallet:
-                    raise ValueError("Cannot reconcile a different or unknown Perps live wallet")
-                account = await self.gateway.account()
-                if any(p.instrument_id == instrument and p.size for p in account.positions):
-                    raise ValueError("Exchange position is not flat; this accounting action never sends orders")
-            with self.store.db:
-                self.store.db.execute(
-                    "UPDATE perps_positions SET quantity='0',entry='0' WHERE instrument=? AND environment=?",
-                    (instrument, environment),
-                )
-                self.store.store.put(f"perps_external_close:{environment}:{instrument}", note.strip())
-            self.error = "External close recorded. External P&L/fees/funding are not attributed to the copy ledger."
+            self.error = "Copying paused: an order outcome is uncertain. Reconcile it before restarting."
 
     def snapshot(self) -> dict:
         result = self.store.snapshot()
         result.update(
-            settings=self.settings.model_dump(), error=self.error, last_poll=self.last_poll,
+            mode="portfolio", settings=self.settings.model_dump(),
             portfolios=self.portfolios, wallet_errors=self.wallet_errors,
-            instruments={str(k): v.symbol for k, v in self.instruments.items()},
-            marks={str(k): str(v.mark_price) for k, v in self.tickers.items()},
-            account=self.live_account.model_dump(mode="json") if self.live_account else None,
-            external_closes={row["key"]: row["value"] for row in self.store.db.execute(
-                "SELECT key,value FROM metadata WHERE key LIKE 'perps_external_close:%'"
-            )},
+            error=self.error, last_poll=self.last_poll,
+            exposure={mode: str(self.store.exposure(mode)) for mode in ("simulation", "live")},
         )
         return result
