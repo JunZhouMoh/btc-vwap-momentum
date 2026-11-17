@@ -6,41 +6,50 @@ Automated trading bot for **Polymarket BTC Up/Down** binary markets (**5- or 15-
 
 ---
 
-## Portfolio following (separate from BTC trading)
+## Portfolio following on Railway (alongside BTC)
 
-Run `python portfolio.py` (Windows: `run_portfolio.bat`), then open
-**http://127.0.0.1:8082**. This starts only portfolio following, not the BTC bot.
-Install the updated `requirements.txt` first. The original `python main.py`
-command and BTC configuration are unchanged.
+Use **two services in the same Railway project**, connected to this repository.
+Set both services' root directory to `btc-binary-VWAP-Momentum-bot` and install
+dependencies with `python -m pip install -r requirements.txt`.
 
-- Add public Polymarket wallet/proxy addresses in the new dashboard; none are preconfigured.
-- Choose **fixed USD per buy** or **percentage of the source buy value**,
-  a maximum buy size, aggregate entry-cost exposure limit, slippage, and trade-age limit.
-- Start with simulation. Live mode requires `PRIVATE_KEY` and, for proxy/Safe wallets,
-  `FUNDER_ADDRESS` in `.env`, a funded account with trading approvals, and explicit UI confirmation.
-  The unified SDK authenticates the wallet; no credentials are sent to the browser.
-- Copies new **BUY/SELL trades across markets**, not existing allocations, transfers,
-  splits/merges, combos, or redemptions. Multiple fills of the same transaction/outcome/side
-  are grouped. Sells are proportional to the source holding sold and limited to this
-  mode's copied shares for that source wallet. Polling/indexer latency means copies
-  can differ from the source; stale trades, inconsistent snapshots, insufficient
-  liquidity and below-minimum orders are skipped, never rounded above your budget.
-- Separate simulation/live ledgers and processed trades persist in
-  `logs/portfolio_follow.sqlite3`. Restarts always pause copying. Re-activation,
-  switching execution environments, or adding a wallet starts from new trades only.
-  Removing a wallet or pausing does **not** close its positions.
-- Unknown live outcomes (including crashes during submission) block further copying.
-  Pause and reconcile **actual settled shares and cash** in the dashboard before resuming.
-  Do not assume a timed-out order failed. Rejected/partially filled orders are not retried.
-- Manage redemption or external sales on Polymarket. Then, while paused, use
-  **Record external close** with verified proceeds to release the copied position's
-  exposure. This is accounting only and does not submit an order. Paper positions
-  can be closed the same way after resolution.
+| Service | Start command |
+|---|---|
+| Existing BTC bot | `python main.py` |
+| Portfolio following | `python portfolio.py` |
 
-The dashboard is loopback-only; do not expose its trading controls to the Internet.
-Do not run BTC or other bots against the same live inventory. One process may use a
-state database at a time. Back up the SQLite database (and WAL when active), not just
-the BTC JSON logs. See [CONFIG.md](CONFIG.md#portfolio-following-settings) for settings.
+For the **portfolio service**:
+
+1. Attach its own persistent volume at **`/data`** and use **one replica**.
+   The default database is `/data/logs/portfolio_follow.sqlite3`; settings,
+   copied positions and deduplication history survive redeployments.
+2. Set `PORTFOLIO_DASHBOARD_USER` (default `admin`) and a unique
+   `PORTFOLIO_DASHBOARD_PASSWORD` of **at least 16 printable ASCII characters**
+   in Railway Variables. Never commit the password. Startup fails without a
+   suitable password on Railway, even in simulation.
+3. Generate a public domain in Railway Networking and open its **HTTPS** URL.
+   The browser prompts for the dashboard username/password. Railway's
+   `RAILWAY_PUBLIC_DOMAIN` is trusted automatically; add custom domains to
+   `PORTFOLIO_ALLOWED_HOSTS` as comma-separated bare hostnames (no scheme,
+   port or wildcard). Redeploy after adding/changing domains so the service
+   loads the updated hostnames.
+4. Set the healthcheck path to **`/healthz`**. This read-only endpoint needs
+   no login and returns no portfolio data. Dashboard pages, API controls and
+   API documentation all require authentication.
+5. Add wallets and configure sizing/exposure limits in the dashboard.
+   Copying starts **paused** after every deployment. Test in simulation;
+   live copying also needs `PRIVATE_KEY`, the appropriate `FUNDER_ADDRESS`,
+   funded/approved inventory, and explicit UI confirmation.
+
+The portfolio server automatically binds to `0.0.0.0:$PORT` on Railway.
+Use the launcher above, not `uvicorn main:app`, for the portfolio worker.
+Do not share its database/volume or live trading wallet with the BTC service.
+This authentication protects the portfolio dashboard only; keep the existing
+BTC dashboard private or protect it separately.
+
+Local use remains `python portfolio.py` (or `run_portfolio.bat`) at
+http://127.0.0.1:8082, without a password unless one is configured. The new
+mode copies new source buys/sells, not pre-existing allocations. See
+[CONFIG.md](CONFIG.md#portfolio-hosting) for hosting variables.
 
 ---
 
@@ -147,6 +156,10 @@ source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
+
+The BTC executor requires both `py-clob-client` and `py-clob-client-v2`.
+After updating dependencies on a hosted deployment, rebuild/redeploy with this
+requirements file; restarting an old image will not install missing packages.
 
 ### Step 5: Configure Environment Variables
 
