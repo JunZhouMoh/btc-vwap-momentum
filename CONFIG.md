@@ -38,6 +38,67 @@ for BTC and portfolio strategies. The portfolio process keeps a single-writer
 SQLite lock and always pauses copying on startup. A redeployment is not a
 signal to resume real orders automatically.
 
+### Perps configuration
+
+`/perps` runs within the same authenticated portfolio service and SQLite
+database, using separate tables/settings. Prediction and Perps workers can run
+independently; neither starts the BTC strategy. Both are paused on restart.
+
+| Environment variable | Purpose |
+|---|---|
+| `PERPS_PRIVATE_KEY` | Signer for the dedicated, already registered/funded Perps account. No fallback to `PRIVATE_KEY`. Keep it in Railway Variables, never source control. |
+| `PERPS_WALLET_ADDRESS` | Registered account wallet passed to the SDK; it must match the account controlled by the signer. Changing the live account requires a different state database. |
+| `PERPS_LOCATION_VERIFIED` | Defaults to `false`. Set `true` only after independently verifying the single operator's current location and eligibility. This trusted deployment configuration is not automatic geolocation/KYC. |
+| `PERPS_OPERATOR_COUNTRY` | Verified operator ISO alpha-2 country, not the hosting region. Required for live. US, CA, CU, IR, KP and SY are blocked. |
+| `PERPS_OPERATOR_REGION` | Operator subdivision; a valid `UA-xx` code is required for Ukraine. Crimea/Sevastopol (`UA-43`, `UA-40`), Donetsk (`UA-14`) and Luhansk (`UA-09`) are blocked. |
+| `SSL_CERT_FILE` | Optional approved CA bundle for networks with a private TLS CA. Do not disable certificate validation. |
+
+Review the latest official geographic restrictions before every deployment or
+operator-location change; the list can change and additional legal restrictions
+may apply. Do not deploy this single-operator tool as a multi-user brokerage.
+Location checks run again before each live submission, including reductions.
+Simulation and public data need no trading credentials or location attestation.
+
+Perps settings are saved in the UI, not BTC `config.json`:
+
+- Fixed sizing defaults to **$25 notional**, not $25 collateral. Percentage
+  sizing scales only the opening portion of a source fill/flip.
+- Defaults: **1x isolated leverage**, $25 max increase, $50 max per instrument
+  across followed wallets, $100 total gross notional, and $1,000 paper equity.
+  Leverage can be set from 1 to 20, subject to each instrument's exchange limit.
+  Effective isolated leverage is explicitly set and verified before increases;
+  the exchange's potentially higher default is not used.
+- Reductions scale copied quantity by the source position fraction closed and
+  use reduce-only orders. Minimums, precision, lack of protected liquidity,
+  partial fills and opposing followed positions can prevent a complete flip.
+  Skipped/partial actions are not retried automatically.
+- Gross limits use current mark values (live exchange position values for live
+  preflight), without long/short offsets. An account-margin buffer is reserved
+  on increases. Reductions are allowed over exposure limits. Limits do not
+  cap losses, trigger stops or flatten positions after price moves.
+- The public fill window is paginated completely, delayed two seconds for the
+  API cache, and bounded by max fill age. History is scanned for new fills only.
+  API downtime beyond that window can miss exits: monitor the dashboard and
+  manage the exchange account yourself when necessary.
+- Paper fills use available book liquidity. Paper equity includes copied
+  realized/unrealized P&L but excludes fees, funding and liquidation mechanics.
+  Live account funding/margin/liquidation data is shown separately; copied
+  realized P&L subtracts actual fill fees but excludes funding and external P&L.
+- Pending intents/client IDs are committed before submission. A timeout,
+  nonterminal result or missing fill confirmation pauses Perps copying until
+  verified reconciliation. Restarting never retries an uncertain order.
+- SDK trading sessions expire (the SDK default is one week). Expired sessions
+  or failed live account checks pause copying. Inspect positions and explicitly
+  enable live again to establish a fresh session; no orders are retried.
+- External trades/liquidations or unmanaged open orders block copying. After
+  closing a position on Polymarket, pause and use **Record external / forced
+  close** to clear its copied quantity only after the exchange confirms flat.
+  Supply evidence; no order is submitted, and external P&L/fees/funding are not
+  invented or attributed to the ledger. Other still-open positions are untouched.
+
+The experimental Perps SDK is pinned to the tested `polymarket-client==0.20.0`.
+No exchange order/deposit is needed for startup, healthchecks or simulation.
+
 ---
 
 ## market -- Which Polymarket window to trade
