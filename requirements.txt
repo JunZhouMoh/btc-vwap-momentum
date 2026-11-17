@@ -3,8 +3,8 @@
 # Polymarket SDK
 py-clob-client>=0.16.0
 py-clob-client-v2>=1.2.2,<2.0
-# Portfolio following (unified SDK; independent of the BTC executor)
-polymarket-client>=0.20.0,<0.21
+# Portfolio and Perps following (Perps APIs are experimental; pin the tested SDK)
+polymarket-client==0.20.0
 
 # Web3 for blockchain interactions
 web3>=6.0.0
