@@ -6,6 +6,40 @@ This file explains **every parameter** in `config.json`. The bot is highly confi
 
 ---
 
+## Portfolio hosting
+
+Portfolio following runs separately with `python portfolio.py`, with its own UI
+and persisted settings; the BTC `config.json` does not control this mode.
+
+| Environment variable | Purpose |
+|---|---|
+| `PORT` | Listening port; defaults to `8082`. `--port` takes precedence. |
+| `PORTFOLIO_DASHBOARD_USER` | HTTP Basic login username; defaults to `admin`. |
+| `PORTFOLIO_DASHBOARD_PASSWORD` | Required on Railway or when public hostnames are configured; at least 16 printable ASCII characters. Optional for localhost-only use. |
+| `RAILWAY_PUBLIC_DOMAIN` | Railway-provided public hostname; automatically added to trusted hosts. |
+| `PORTFOLIO_ALLOWED_HOSTS` | Additional exact hostnames, comma-separated; no schemes, ports or wildcards. |
+| `DATA_DIR` | Persistent volume root on Railway; defaults to `/data`. Mount a volume there. |
+| `PORTFOLIO_STATE_PATH` | SQLite state path; defaults to `logs/portfolio_follow.sqlite3`, resolved under `DATA_DIR` on Railway. `--state` takes precedence. |
+
+Railway is detected from `RAILWAY_PROJECT_ID` or `RAILWAY_ENVIRONMENT`.
+The server binds to `0.0.0.0` there and requires dashboard credentials before
+starting. Locally it continues to bind to `127.0.0.1`. Use HTTPS for hosted
+access. Trusted public-domain origins are checked against HTTPS, independently
+of the internal HTTP connection behind Railway's TLS proxy; arbitrary forwarded
+headers cannot select the allowed origin.
+
+Set the Railway healthcheck path to `/healthz`. GET/HEAD are unauthenticated
+and report process/worker readiness (not Polymarket API availability); a failed
+worker returns HTTP 503. Every other endpoint, including API documentation,
+requires HTTP Basic authentication when a password is configured.
+
+Use one replica, a separate volume for each service, and different live wallets
+for BTC and portfolio strategies. The portfolio process keeps a single-writer
+SQLite lock and always pauses copying on startup. A redeployment is not a
+signal to resume real orders automatically.
+
+---
+
 ## market -- Which Polymarket window to trade
 
 ```
