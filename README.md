@@ -51,6 +51,52 @@ http://127.0.0.1:8082, without a password unless one is configured. The new
 mode copies new source buys/sells, not pre-existing allocations. See
 [CONFIG.md](CONFIG.md#portfolio-hosting) for hosting variables.
 
+### Polymarket Perps following
+
+The same `python portfolio.py` service also serves **`/perps`**. Switch between
+prediction following and Perps using the dashboard links; each has its own
+settings, positions, activity, pause button, and simulation/live accounting.
+Both start paused after a restart. No third Railway service or extra port is
+needed. `python main.py` still runs only the existing BTC strategy.
+
+Perps supports long/short increases, proportional reduce-only exits, and
+close-then-open flips. Configure fixed USD **notional** or a percentage of the
+source increase, per-increase/per-instrument/total gross limits, and isolated
+leverage (**1x by default**). It never copies existing allocations, leverage
+changes, collateral transfers, funding payments or unfilled orders.
+
+Start with simulation. For live Perps, additionally:
+
+1. Register and fund a **dedicated Perps account** on Polymarket yourself.
+   The bot does not deposit, approve, withdraw or transfer funds.
+2. Set `PERPS_PRIVATE_KEY` and `PERPS_WALLET_ADDRESS` in the portfolio service's
+   Railway Variables. These are separate from BTC/prediction credentials.
+3. Independently verify the single operator's current location and eligibility
+   against [Polymarket's current Perps restrictions](https://docs.polymarket.com/api-reference/perps/geographic-restrictions).
+   Only then configure `PERPS_OPERATOR_COUNTRY`, `PERPS_OPERATOR_REGION` when
+   applicable, and `PERPS_LOCATION_VERIFIED=true`. Unknown/unverified and known
+   restricted locations cannot submit orders. This is trusted manual deployment
+   verification, **not automatic IP/KYC verification**; do not operate it as a
+   multi-user trading service. Railway's location is not the operator's location.
+4. Open `/perps`, enter registered leader account owner addresses, review the
+   limits, select live, enable copying, save, and explicitly confirm real trading.
+
+Use the Perps account exclusively for this copier: external positions/open
+orders block copying. Opposing leaders on one instrument are not netted or
+hedged; conflicting increases are skipped. IOC orders use slippage-protected
+prices, instrument precision/minimums and actual settled fills/fees. Unknown
+outcomes persist and pause copying; verify the client order ID in exchange
+history before using the dashboard reconciliation form. Never clear a timeout
+as unfilled without evidence.
+
+Simulation walks the public book but **does not simulate fees, funding or
+liquidations**. Live exchange equity, margin, liquidation prices and cumulative
+funding are displayed separately from copied trading P&L. Source liquidations
+can trigger reductions, but exchange-forced/external closes of your account
+require explicit accounting reconciliation after the exchange position is
+flat. Limits are checked before increases; price moves can exceed them later.
+Pausing does not close positions and 1x leverage is not risk-free.
+
 ---
 
 ## Why this strategy can work (and what breaks it)
