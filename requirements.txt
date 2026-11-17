@@ -2,6 +2,8 @@
 
 # Polymarket SDK
 py-clob-client>=0.16.0
+# Portfolio following (unified SDK; independent of the BTC executor)
+polymarket-client>=0.20.0,<0.21
 
 # Web3 for blockchain interactions
 web3>=6.0.0
@@ -33,4 +35,3 @@ uvicorn[standard]>=0.32.0
 
 # Misc
 requests>=2.31.0
-py_clob_client_v2
