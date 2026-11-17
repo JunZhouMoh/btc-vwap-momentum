@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portfolio Following | Polymarket</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --muted:#8b949e; --blue:#58a6ff; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:24px; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+    main { max-width:1400px; margin:auto; }
+    h1 { font-size:26px; margin:4px 0; } h2 { font-size:17px; margin-top:0; }
+    header,.toolbar { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+    .muted,small { color:var(--muted); } .eyebrow { color:var(--blue); letter-spacing:2px; font-size:11px; }
+    .layout { display:grid; grid-template-columns:340px minmax(0,1fr); gap:18px; margin-top:20px; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:18px; min-width:0; }
+    label { display:block; margin-bottom:12px; } input,select,textarea,button { font:inherit; border-radius:6px; padding:9px; }
+    input,select,textarea { width:100%; margin-top:5px; background:var(--bg); border:1px solid var(--line); color:var(--text); }
+    input[type=checkbox] { width:auto; margin-right:8px; }
+    textarea { min-height:115px; resize:vertical; font-size:12px; }
+    button { cursor:pointer; background:#1f6feb; color:white; border:1px solid transparent; }
+    button.danger { background:#682323; } button.secondary { background:#30363d; }
+    button:disabled { opacity:.5; cursor:wait; }
+    .pair,.stats { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .stat { border:1px solid var(--line); border-radius:8px; padding:12px; }
+    .stat strong { font-size:21px; display:block; }
+    .badge { display:inline-block; padding:6px 12px; border-radius:20px; background:#30363d; }
+    .live { background:#682323; } .active { background:#164c2b; }
+    .notice { padding:10px 0; color:#d29922; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .error { color:#ff8b84; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .scroll { overflow:auto; } table { width:100%; border-collapse:collapse; text-align:left; font-size:12px; }
+    th { color:var(--muted); font-weight:500; } td,th { padding:10px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+    td { max-width:280px; overflow-wrap:anywhere; } a { color:var(--blue); }
+    .wallet { border-top:1px solid var(--line); padding-top:14px; margin-top:14px; }
+    code { font-size:11px; overflow-wrap:anywhere; }
+    #message { position:sticky; top:0; background:var(--bg); z-index:1; }
+    @media(max-width:850px) { body { padding:12px; } .layout { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><div class="eyebrow">POLYMARKET / INDEPENDENT STRATEGY</div><h1>Portfolio Following</h1><div class="muted">Copy new wallet trades across markets. BTC signals are not running in this mode.</div></div>
+    <div><span class="badge" id="status">Connecting...</span> <button class="danger" id="pause">Pause copying</button></div>
+  </header>
+  <div id="message" role="status" aria-live="polite"></div>
+  <div class="layout">
+    <aside class="card">
+      <h2>Follow settings</h2>
+      <form id="settings">
+        <label>Public wallet / proxy addresses<textarea id="wallets" placeholder="0x... (one per line)" spellcheck="false"></textarea><small>Up to 20 wallets. Use the address shown on their Polymarket profile.</small></label>
+        <label>Execution<select id="environment"><option value="simulation">Simulation - no real orders</option><option value="live">LIVE - real funds</option></select></label>
+        <label>Buy sizing<select id="sizing"><option value="fixed">Fixed USD per source buy</option><option value="percentage">Percentage of source buy value</option></select></label>
+        <div class="pair">
+          <label>Fixed USD<input id="fixed_usd" type="number" min="0.01" step="0.01" required></label>
+          <label>Copy percentage<input id="copy_percentage" type="number" min="0.01" max="100" step="0.01" required></label>
+          <label>Max buy USD<input id="max_trade_usd" type="number" min="0.01" step="0.01" required></label>
+          <label>Max exposure USD<input id="max_exposure_usd" type="number" min="0.01" step="0.01" required></label>
+          <label>Slippage %<input id="slippage_pct" type="number" min="0" max="20" step="0.1" required></label>
+          <label>Max trade age (sec)<input id="max_age_sec" type="number" min="10" max="600" step="1" required></label>
+          <label>Poll interval (sec)<input id="poll_seconds" type="number" min="3" max="60" step="1" required></label>
+        </div>
+        <label><input id="enabled" type="checkbox">Enable copying after save</label>
+        <button type="submit">Save settings</button> <button type="button" class="secondary" id="reload">Reload</button>
+      </form>
+      <div class="notice">Only trades after activation are copied. Existing holdings are not bought. Sells reduce only this mode's copied shares, proportional to the source holding sold.</div>
+      <small>Exposure is remaining entry cost, separately for simulation and live, before fees. Pausing, removing a wallet, or changing execution does not liquidate positions. Manage resolved positions/redemptions on Polymarket.</small>
+    </aside>
+    <section>
+      <div class="card">
+        <div class="toolbar"><h2>Copied portfolio</h2><span id="updated" class="muted"></span></div>
+        <div class="stats" id="stats"></div>
+        <div id="engineError" class="error" role="alert"></div>
+        <div id="unresolved"></div>
+        <div id="holdings" class="scroll"></div>
+      </div>
+      <div class="card"><h2>Followed portfolios</h2><div class="muted">Public source holdings; not your copied positions. Polling may lag the exchange.</div><div id="portfolios"></div></div>
+      <div class="card"><h2>Copy activity</h2><div class="muted">Latest 100 decisions. Partial fills use actual confirmed amounts; stale or unsafe trades are skipped, not retried.</div><div id="events" class="scroll"></div></div>
+    </section>
+  </div>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const money = n => Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+  const esc = value => { const el=document.createElement('span'); el.textContent=String(value ?? ''); return el.innerHTML; };
+  const short = value => value.slice(0,6)+'...'+value.slice(-4);
+  const fields = ['environment','sizing','fixed_usd','copy_percentage','max_trade_usd','max_exposure_usd','slippage_pct','max_age_sec','poll_seconds'];
+  let latest=null, loaded=false, busy=false;
+  async function api(url, data) {
+    const response=await fetch(url, data===undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+    const body=await response.json();
+    if(!response.ok) throw new Error(typeof body.detail==='string' ? body.detail : JSON.stringify(body.detail));
+    return body;
+  }
+  function message(text, error=false) { $('message').textContent=text; $('message').className=error?'error':'notice'; }
+  function loadForm(cfg) {
+    fields.forEach(key => $(key).value=cfg[key]);
+    $('wallets').value=cfg.wallets.join('\n'); $('enabled').checked=cfg.enabled;
+  }
+  function table(headers, rows) {
+    return '<table><thead><tr>'+headers.map(h=>'<th>'+esc(h)+'</th>').join('')+'</tr></thead><tbody>'+
+      (rows.length ? rows.map(row=>'<tr>'+row.map(cell=>'<td>'+esc(cell)+'</td>').join('')+'</tr>').join('') :
+      '<tr><td colspan="'+headers.length+'" class="muted">No records yet</td></tr>')+'</tbody></table>';
+  }
+  function render(s) {
+    latest=s;
+    if(!loaded) { loadForm(s.settings); loaded=true; }
+    $('status').textContent=(s.settings.environment==='live'?'LIVE':'SIMULATION')+' / '+(s.settings.enabled?'COPYING':'PAUSED');
+    $('status').className='badge '+(s.settings.environment==='live'?'live':s.settings.enabled?'active':'');
+    $('updated').textContent=s.last_poll?'Last poll '+new Date(s.last_poll*1000).toLocaleTimeString():'Waiting for first poll';
+    $('engineError').textContent=s.error;
+    $('stats').innerHTML=['simulation','live'].map(mode=>'<div class="stat"><span class="muted">'+esc(mode)+' exposure</span><strong>$'+money(s.exposure[mode])+'</strong><span class="muted">Realized P&amp;L $'+money(s.holdings.filter(h=>h.environment===mode).reduce((sum,h)=>sum+Number(h.realized),0))+' (before fees)</span></div>').join('');
+    $('holdings').innerHTML=table(['Mode / wallet','Market / outcome','Shares','Entry cost','Realized P&L'], s.holdings.map(h=>[h.environment+' / '+short(h.wallet),h.title+' / '+h.outcome,Number(h.shares).toFixed(2),'$'+money(h.cost),'$'+money(h.realized)]))+
+      '<p class="muted">After a manual sale/redemption, pause and record its proceeds to release exposure. This accounting action sends NO orders.</p>'+
+      s.holdings.map((h,i)=>Number(h.shares)>0?'<button class="secondary external-close" data-index="'+i+'">Record external close: '+esc(h.outcome||short(h.asset))+' ('+esc(h.environment)+')</button> ':'').join('');
+    $('portfolios').innerHTML=s.settings.wallets.length ? s.settings.wallets.map(wallet=>'<div class="wallet"><a target="_blank" rel="noopener noreferrer" href="https://polymarket.com/profile/'+encodeURIComponent(wallet)+'">'+esc(short(wallet))+'</a><div class="error">'+esc(s.wallet_errors[wallet]||'')+'</div><div class="scroll">'+
+      (s.portfolios[wallet] ? table(['Market / outcome','Shares','Value','P&L'],s.portfolios[wallet].map(p=>[p.title+' / '+p.outcome+(p.redeemable?' (resolved)':''),Number(p.shares).toFixed(2),'$'+money(p.value),'$'+money(p.pnl)])) : '<div class="muted">Waiting for portfolio data</div>')+'</div></div>').join('') : '<p class="muted">Add a public wallet to start following.</p>';
+    $('events').innerHTML=table(['Time / mode','Wallet / side','Market','Decision','Filled shares / cash','Details'],s.events.map(e=>[new Date(e.timestamp*1000).toLocaleString()+' / '+e.environment,short(e.wallet)+' / '+e.side,e.title+' / '+e.outcome,e.status,Number(e.shares).toFixed(2)+' / $'+money(e.cash),e.message+(e.order_id?' [order '+e.order_id+']':'')]));
+    $('unresolved').innerHTML=s.unresolved.length ? '<div class="notice">Uncertain orders block copying. Check actual settled fills on Polymarket before reconciling; NEVER assume a timeout means no fill.</div>'+
+      s.unresolved.map((e,i)=>'<div class="wallet"><code>'+esc(e.id)+'</code><p>'+esc(e.message||'Submission interrupted')+'</p><button class="secondary reconcile" data-index="'+i+'">Reconcile confirmed outcome</button></div>').join('') : '';
+  }
+  $('settings').addEventListener('submit',async event=>{
+    event.preventDefault(); if(busy) return; busy=true;
+    try {
+      const settings={wallets:$('wallets').value.split(/[\s,]+/).filter(Boolean), enabled:$('enabled').checked};
+      fields.forEach(key=>settings[key]=['environment','sizing'].includes(key)?$(key).value:Number($(key).value));
+      const live=settings.enabled&&settings.environment==='live';
+      if(live&&!window.confirm('Enable LIVE copying with real funds? Check your wallet, sizing, and exposure limits.')) return;
+      const result=await api('/api/settings',{settings,confirm_live:live});
+      loadForm(result.settings); message('Settings saved. '+(result.settings.enabled?'Copying new trades only.':'Copying is paused.'));
+      render(await api('/api/state'));
+    } catch(error) { message(error.message,true); } finally { busy=false; }
+  });
+  $('pause').onclick=async()=>{
+    try { await api('/api/pause',{}); $('enabled').checked=false; message('Copying paused. Existing positions remain open.'); await refresh(); }
+    catch(error) { message(error.message,true); }
+  };
+  $('reload').onclick=()=>{ if(latest) { loadForm(latest.settings); message('Loaded saved settings.'); } };
+  $('unresolved').onclick=async event=>{
+    const button=event.target.closest('.reconcile'); if(!button||!latest) return;
+    const order=latest.unresolved[Number(button.dataset.index)];
+    const shares=window.prompt('Actual SETTLED copied shares for this order (0 only if confirmed no fill):');
+    if(shares===null||shares.trim()==='') return;
+    const cash=window.prompt('Actual cash spent (BUY) or received (SELL), excluding fees:');
+    if(cash===null||cash.trim()==='') return;
+    const note=window.prompt('Exchange order ID / evidence of settlement:');
+    if(!note) return;
+    try { await api('/api/reconcile',{event_id:order.id,shares,cash,note}); message('Reconciliation saved. Copying remains paused.'); await refresh(); }
+    catch(error) { message(error.message,true); }
+  };
+  $('holdings').onclick=async event=>{
+    const button=event.target.closest('.external-close'); if(!button||!latest) return;
+    const holding=latest.holdings[Number(button.dataset.index)];
+    if(!window.confirm('Accounting only: confirm ALL '+holding.shares+' copied shares were sold/redeemed externally (or resolved in simulation). No order will be sent.')) return;
+    const cash=window.prompt('Total proceeds for these copied shares (0 for a resolved losing position):');
+    if(cash===null||cash.trim()==='') return;
+    const note=window.prompt('Settlement evidence / transaction ID:');
+    if(!note) return;
+    try { await api('/api/external-close',{wallet:holding.wallet,asset:holding.asset,environment:holding.environment,cash,note}); message('External close recorded. Copying remains paused.'); await refresh(); }
+    catch(error) { message(error.message,true); }
+  };
+  async function refresh() { render(await api('/api/state')); }
+  async function poll() {
+    try { await refresh(); } catch(error) { message('Dashboard connection failed: '+error.message,true); }
+    setTimeout(poll,3000);
+  }
+  poll();
+</script>
+</body>
+</html>
