@@ -25,6 +25,7 @@ import uvicorn
 
 from src.path_utils import is_railway_runtime, resolve_runtime_path
 from src.portfolio_follow import FollowSettings, PortfolioFollower, PortfolioGateway, PortfolioStore
+from src.perps_follow import PerpsFollower, PerpsGateway, PerpsSettings, PerpsStore
 
 ROOT = Path(__file__).resolve().parent
 logger = logging.getLogger("portfolio")
@@ -107,35 +108,61 @@ class ExternalCloseRequest(BaseModel):
     note: Annotated[str, Field(min_length=1, max_length=1000)]
 
 
+class PerpsSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    settings: PerpsSettings
+    confirm_live: bool = False
+
+
+class PerpsReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_id: str
+    quantity: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
+    price: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
+    fee: Annotated[Decimal, Field(allow_inf_nan=False)]
+    note: Annotated[str, Field(min_length=1, max_length=1000)]
+
+
+class PerpsFlatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instrument: Annotated[int, Field(ge=0)]
+    environment: Literal["simulation", "live"]
+    note: Annotated[str, Field(min_length=1, max_length=1000)]
+
+
 def build_app(
     follower: PortfolioFollower, *, run_worker: bool = True,
-    hosting: DashboardConfig | None = None,
+    hosting: DashboardConfig | None = None, perps: PerpsFollower | None = None,
 ) -> FastAPI:
     hosting = hosting or DashboardConfig.from_environment()
     basic = HTTPBasic(auto_error=False)
 
-    async def worker() -> None:
+    async def worker(engine: PortfolioFollower | PerpsFollower) -> None:
         while True:
             try:
-                await follower.poll()
+                await engine.poll()
             except Exception:
-                logger.exception("Portfolio worker failed; stopping to prevent unsafe copying")
-                follower.settings.enabled = False
-                follower.worker_failed = True
-                follower.error = "Worker stopped unexpectedly. Restart portfolio mode; inspect server logs."
+                logger.exception("Copy worker failed; stopping to prevent unsafe copying")
+                engine.pause()
+                engine.worker_failed = True
+                engine.error = "Worker stopped unexpectedly. Restart portfolio mode; inspect server logs."
                 return
-            await asyncio.sleep(follower.settings.poll_seconds)
+            await asyncio.sleep(engine.settings.poll_seconds)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        task = asyncio.create_task(worker()) if run_worker else None
+        engines = [follower] + ([perps] if perps is not None else [])
+        tasks = [asyncio.create_task(worker(engine)) for engine in engines] if run_worker else []
         try:
             yield
         finally:
-            if task is not None:
+            for task in tasks:
                 task.cancel()
+            for task in tasks:
                 with suppress(asyncio.CancelledError):
                     await task
+            if perps is not None:
+                await perps.gateway.close()
             await follower.gateway.close()
             follower.store.close()
 
@@ -184,9 +211,10 @@ def build_app(
 
     @app.api_route("/healthz", methods=["GET", "HEAD"])
     async def health():
+        failed = follower.worker_failed or perps is not None and perps.worker_failed
         return JSONResponse(
-            {"status": "unhealthy" if follower.worker_failed else "ok"},
-            status_code=503 if follower.worker_failed else 200,
+            {"status": "unhealthy" if failed else "ok"},
+            status_code=503 if failed else 200,
         )
 
     @app.get("/", response_class=HTMLResponse)
@@ -234,6 +262,50 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True}
 
+    if perps is not None:
+        @app.get("/perps", response_class=HTMLResponse)
+        async def perps_index():
+            return HTMLResponse((ROOT / "src" / "perps_dashboard.html").read_text(encoding="utf-8"))
+
+        @app.get("/api/perps/state")
+        async def perps_state():
+            return perps.snapshot()
+
+        @app.post("/api/perps/settings")
+        async def perps_settings(payload: PerpsSettingsRequest):
+            try:
+                await perps.configure(payload.settings, payload.confirm_live)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                logger.exception("Unable to apply Perps settings")
+                raise HTTPException(status_code=503, detail="Unable to initialize Perps; inspect server logs") from exc
+            return {"settings": perps.settings.model_dump()}
+
+        @app.post("/api/perps/pause")
+        async def perps_pause():
+            perps.pause()
+            return {"enabled": False}
+
+        @app.post("/api/perps/reconcile")
+        async def perps_reconcile(payload: PerpsReconcileRequest):
+            try:
+                await perps.reconcile(payload.event_id, payload.quantity, payload.price, payload.fee, payload.note)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return {"ok": True}
+
+        @app.post("/api/perps/record-flat")
+        async def perps_record_flat(payload: PerpsFlatRequest):
+            try:
+                await perps.record_flat(payload.instrument, payload.environment, payload.note)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:
+                logger.exception("Unable to verify external Perps close")
+                raise HTTPException(status_code=503, detail="Unable to verify Perps position; inspect server logs") from exc
+            return {"ok": True}
+
     return app
 
 
@@ -248,11 +320,12 @@ def main() -> None:
     store = PortfolioStore(resolve_runtime_path(args.state))
     gateway = PortfolioGateway()
     follower = PortfolioFollower(store, gateway)
+    perps = PerpsFollower(PerpsStore(store), PerpsGateway())
     logger.info("Portfolio dashboard listening on %s:%s (copying paused)", hosting.host, hosting.port)
     if hosting.host == "0.0.0.0" and not hosting.public_origins:
         logger.warning("Generate a Railway domain or set PORTFOLIO_ALLOWED_HOSTS to access the dashboard")
     uvicorn.run(
-        build_app(follower, hosting=hosting), host=hosting.host, port=hosting.port,
+        build_app(follower, hosting=hosting, perps=perps), host=hosting.host, port=hosting.port,
         proxy_headers=False,
     )
 
