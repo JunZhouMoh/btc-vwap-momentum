@@ -6,6 +6,44 @@ Automated trading bot for **Polymarket BTC Up/Down** binary markets (**5- or 15-
 
 ---
 
+## Portfolio following (separate from BTC trading)
+
+Run `python portfolio.py` (Windows: `run_portfolio.bat`), then open
+**http://127.0.0.1:8082**. This starts only portfolio following, not the BTC bot.
+Install the updated `requirements.txt` first. The original `python main.py`
+command and BTC configuration are unchanged.
+
+- Add public Polymarket wallet/proxy addresses in the new dashboard; none are preconfigured.
+- Choose **fixed USD per buy** or **percentage of the source buy value**,
+  a maximum buy size, aggregate entry-cost exposure limit, slippage, and trade-age limit.
+- Start with simulation. Live mode requires `PRIVATE_KEY` and, for proxy/Safe wallets,
+  `FUNDER_ADDRESS` in `.env`, a funded account with trading approvals, and explicit UI confirmation.
+  The unified SDK authenticates the wallet; no credentials are sent to the browser.
+- Copies new **BUY/SELL trades across markets**, not existing allocations, transfers,
+  splits/merges, combos, or redemptions. Multiple fills of the same transaction/outcome/side
+  are grouped. Sells are proportional to the source holding sold and limited to this
+  mode's copied shares for that source wallet. Polling/indexer latency means copies
+  can differ from the source; stale trades, inconsistent snapshots, insufficient
+  liquidity and below-minimum orders are skipped, never rounded above your budget.
+- Separate simulation/live ledgers and processed trades persist in
+  `logs/portfolio_follow.sqlite3`. Restarts always pause copying. Re-activation,
+  switching execution environments, or adding a wallet starts from new trades only.
+  Removing a wallet or pausing does **not** close its positions.
+- Unknown live outcomes (including crashes during submission) block further copying.
+  Pause and reconcile **actual settled shares and cash** in the dashboard before resuming.
+  Do not assume a timed-out order failed. Rejected/partially filled orders are not retried.
+- Manage redemption or external sales on Polymarket. Then, while paused, use
+  **Record external close** with verified proceeds to release the copied position's
+  exposure. This is accounting only and does not submit an order. Paper positions
+  can be closed the same way after resolution.
+
+The dashboard is loopback-only; do not expose its trading controls to the Internet.
+Do not run BTC or other bots against the same live inventory. One process may use a
+state database at a time. Back up the SQLite database (and WAL when active), not just
+the BTC JSON logs. See [CONFIG.md](CONFIG.md#portfolio-following-settings) for settings.
+
+---
+
 ## Why this strategy can work (and what breaks it)
 
 **Idea:** Near the end of a short binary window, the market often **prices one side as favorite** (higher last price). The bot does **not** buy blindly: it waits for **(a)** favorite price in a **tunable band**, **(b)** a **late** entry slice, **(c)** price **stretched above short-horizon VWAP** (`min_deviation_pct`), and **(d)** **positive momentum**—roughly, **crowd consensus plus recent upward flow** on that token.
@@ -25,7 +63,9 @@ On each interval (e.g. every 5 or 15 minutes, depending on config), Polymarket o
 - **UP token** pays $1.00 if BTC rises, $0.00 if it falls
 - **DOWN token** pays $1.00 if BTC falls, $0.00 if it rises
 
-The bot identifies the "favorite" (the token with higher probability), waits for specific technical conditions to align, then buys it. If the prediction is correct, the token resolves to $1.00 for a profit. If wrong, it resolves to $0.00 for a loss.
+The bot identifies the "favorite" (the token with higher probability), waits for specific technical conditions to align, then buys it. Markets resolve based on Chainlink's **BTC/USD TWAP (Time-Weighted Average Price)**:
+- **UP token** pays $1.00 if TWAP ≥ opening price, $0.00 otherwise
+- **DOWN token** pays $1.00 if TWAP < opening price, $0.00 otherwise
 
 ### Key Features
 
@@ -35,7 +75,7 @@ The bot identifies the "favorite" (the token with higher probability), waits for
 - FAK order execution with retry logic and WebSocket fill confirmation
 - Optional hedging via GTD orders on the opposite token at $0.02
 - Timeout recovery: detects fills via User WebSocket even after network timeouts
-- Chainlink BTC/USD oracle tracking: real-time BTC price and deviation from market start
+- Chainlink BTC/USD TWAP oracle tracking: real-time TWAP and deviation from market opening price (used for resolution)
 - Auto-redemption of winning positions on-chain
 - Telegram notifications with trade alerts and equity charts
 - Per-trade drawdown tracking with logging
