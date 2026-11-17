@@ -63,42 +63,6 @@ These parameters control **which signals the bot acts on**. Think of them as fil
 **Maximum token price to enter.** The bot rejects tokens priced above this. Higher prices mean higher probability but tiny profit margin. At $0.88, you profit only $0.12 per contract on a win but lose $0.88 on a loss (need 88% win rate). Range: 0.80 - 0.95. Start with 0.88.
 
 ```
-"dangerous": false
-```
-**Enable dangerous mode for late-entry behavior.** When `true`, and only in the final 20 seconds of a market, the bot bypasses time/deviation/momentum/BTC-buffer gates and uses only `min_price <= favorite_price <= max_price` to allow BUY. Keep `false` unless you explicitly want this aggressive override.
-
-```
-"late_entry_modes": {
-  "enabled": true,
-  "total_max_trades": 3,
-  "mode_60s": { "enabled": true, "time_left_sec": 60, "min_contracts": 5, "max_trades": 1, "buffer_avg_multiplier": 1.0, "min_price": 0.8, "max_price": 0.85 },
-  "mode_40s": { "enabled": true, "time_left_sec": 40, "min_contracts": 8, "max_trades": 1, "buffer_avg_multiplier": 0.8, "min_price": 0.85, "max_price": 0.9 },
-  "mode_20s": { "enabled": true, "time_left_sec": 20, "min_contracts": 12, "max_trades": 1, "buffer_avg_multiplier": 0.5, "min_price": 0.9, "max_price": 0.99 }
-}
-```
-
-**Three late-entry strategies for last 60s / 40s / 20s with mode-specific price ranges.**
-
-- `enabled`: turns the mode system on/off.
-- `total_max_trades`: maximum number of entries allowed across all late-entry modes per market.
-- `mode_60s`, `mode_40s`, `mode_20s`: each mode activates when remaining time is less than or equal to `time_left_sec`.
-  - `time_left_sec`: per-mode activation threshold (seconds remaining in market).
-  - `min_contracts`: minimum contracts enforced for entries in that late window.
-  - `max_trades`: maximum number of entries allowed in this mode per market.
-  - `buffer_avg_multiplier`: multiplier applied to average BTC buffer (`avg_abs_usd_last_N_windows`) before comparing with current BTC move.
-  - `min_price` / `max_price`: price range specific to this late-entry window (overrides global `min_price`/`max_price` when active).
-
-When multiple windows are active (for example at 18s left), the tightest window has priority (`20s` over `40s` over `60s`). The price range of the active mode applies.
-
-Effective late-window behavior:
-
-- **Price gate:** `mode_min_price <= favorite_price <= mode_max_price`
-- **BTC buffer:** `max(buffer, avg_abs_usd_last_N_windows * buffer_avg_multiplier)`
-- **Min contracts:** enforced per mode
-- **Trade count:** capped by `max_trades` per active mode and market
-- **Trade count:** capped by both mode `max_trades` and `total_max_trades` across all late modes per market
-
-```
 "min_elapsed_sec": 530
 ```
 **Minimum seconds elapsed since market opened before allowing entry.** Each market lasts 900 seconds (15 min). This prevents entering too early when the market direction is unclear. At 530, the bot waits ~8.8 minutes. Range: 300 - 800. Higher = safer but fewer opportunities.
@@ -259,6 +223,65 @@ Optional Telegram integration for trade alerts and equity charts. Requires TELEG
 ```
 **Send an equity chart every N trades.** After every 5 trades (by default), the bot generates a P&L chart and sends it to your Telegram. Range: 1 - 50.
 
+### telegram.streak_alert -- Consecutive-direction alert
+
+Notifies when N completed BTC windows in a row close the same way (UP, UP, UP... or DOWN, DOWN, DOWN...).
+
+```
+"streak_alert": {
+  "enabled": true,
+  "min_streak": 3,
+  "notify_every_extension": true,
+  "notify_on_startup": false,
+  "use_timer_bot": false
+}
+```
+
+**Direction** comes from `signed_usd` of each completed window in the rolling buffer -- the same close-vs-open move the up/down market resolves on. Positive is UP, negative is DOWN. A window with a move of exactly `0.0` counts as **no direction and breaks the streak**; bootstrap rows recovered from `bot.log` carry `0.0` because the real move is unknown, so they can shorten a streak that spans a restart.
+
+- **`min_streak`** -- how many same-direction windows trigger the first alert. Must be `>= 2`.
+- **`notify_every_extension`** -- `true` sends a fresh alert on each window that extends the run (3x, then 4x, then 5x). `false` sends one alert when the run first reaches `min_streak`, then stays quiet until the direction flips.
+- **`notify_on_startup`** -- `false` (default) baselines the existing history at boot so a restart does not re-announce a streak you were already told about. `true` alerts once at startup if the bootstrapped history already qualifies.
+- **`use_timer_bot`** -- send via the dedicated timer bot (`TELEGRAM_TIMER_BOT_TOKEN` / `TELEGRAM_TIMER_CHAT_ID`) instead of the main bot.
+
+This alert is **informational only** -- it does not gate entries or change sizing.
+
+### Streak-based auto-buy strategies -- reversal and continuation
+
+The dashboard's **Streak-Based Buy Bot** supports direction rules for streak lengths 1–10. Each length can use the global setting, reverse, same direction, both, or off. The global reverse/continue switches are master enables; a per-length rule only places orders for a strategy whose global switch is enabled. Modes share their buy amount, trigger limit, and time-left price thresholds with that streak length.
+
+**Pre-buy Next Session** can queue a buy for the upcoming market near the current market's close. When time left is at or below its configured limit and the current UP or DOWN token reaches the confirmation price, the bot projects the close: if that direction extends the tracked streak, projected length is current length + 1; if direction differs, projected length is 1. It applies the projected length's direction rule and buy amount, then queues the order for next market startup. Defaults are disabled, 20 seconds, and 0.99 confirmation price. When both same and reverse qualify, select one direction on that mode; the next-window queue only supports one position.
+
+```
+"streak_reversal_bot": {
+  "enabled": false,
+  "same_direction_enabled": false,
+  "min_streak_length": 3,
+  "time_left_price_pairs": [
+    {"time_left_sec": 300, "buy_price": 0.45},
+    {"time_left_sec": 150, "buy_price": 0.50},
+    {"time_left_sec": 60, "buy_price": 0.55}
+  ]
+}
+```
+
+- **`enabled`** -- global master enable for reverse buys. This is controlled by **Global Reverse Enabled** in the dashboard; continuation can be enabled independently.
+- **`same_direction_enabled`** -- global master enable for buys in the active streak direction. This is controlled by the dashboard's **Global Continue Enabled** checkbox and defaults to `false`.
+- **Per-mode `direction`** -- `global` (default), `reverse`, `same`, `both`, or `off`. Set individually for streak lengths 1–10 in the dashboard. `global` follows the two global master switches.
+- **`min_streak_length`** -- legacy setting for the original single-mode configuration. The dashboard's multi-mode settings use exact streak lengths.
+- **`time_left_price_pairs`** -- list of time-based price thresholds. The bot matches the **current time left** against these pairs and buys at the configured price if:
+  - The favorite price is **below** the matched threshold, AND
+  - The current streak length matches a configured mode (or a dynamically selected streak length).
+  - **Reverse** buys the opposite direction; **Same direction** buys the current streak direction.
+  - Each enabled strategy tracks its own per-mode trigger limit. If both direction strategies are enabled and qualify, they may each submit a separate order; orders are queued one at a time.
+  
+  Example: If `{"time_left_sec": 300, "buy_price": 0.45}` and time left is under 300 seconds, the bot can buy UP (if the active streak is DOWN) when favorite price <= 0.45.
+
+**How it works:**
+1. The bot checks the current active streak and selects its fixed or dynamic mode.
+2. It finds the matching `time_left_price_pairs` entry and checks the favorite price against that `buy_price`.
+3. If conditions match, each enabled direction strategy queues its corresponding buy, up to that mode's `max_triggers` limit.
+
 ---
 
 ## logging -- Log settings
@@ -286,9 +309,47 @@ The entry gate compares current absolute BTC move from anchor vs an adaptive thr
 
 Effective threshold:
 
-- `max(buffer, avg_abs_usd_last_N_windows)`
+- Without decay: `max(buffer, avg_abs_usd_last_N_windows)`
+- With decay enabled: `max(buffer, decayed_abs_usd_last_N_windows)`
 
-Decay features are not used in this version.
+To reduce this threshold inside the active market window (for example, lower it during the last minute), use:
+
+```
+"in_window_buffer_decay": {
+  "enabled": true,
+  "start_before_end_sec": 60,
+  "min_multiplier": 0.6
+}
+```
+
+- `enabled`: turn on in-window threshold reduction.
+- `start_before_end_sec`: start decaying when remaining time is at or below this value.
+- `min_multiplier`: multiplier applied at market end (0 sec left).
+
+Example with `buffer=100`, `start_before_end_sec=60`, `min_multiplier=0.6`:
+
+- at 60s left: threshold is 100
+- at 30s left: threshold is 80
+- at 0s left: threshold is 60
+
+```
+"buffer_decay": {
+  "enabled": true,
+  "half_life_windows": 2.5,
+  "min_periods": 2
+}
+```
+
+**Optional exponential decay on recent BTC windows.**
+
+- `enabled`: if true, newer windows get higher weight.
+- `half_life_windows`: how quickly older windows lose influence. Lower = faster adaptation.
+- `min_periods`: decay only applies after at least this many completed windows; before that the bot uses simple average.
+
+Practical starting points:
+
+- 5m markets: `half_life_windows` 2.0 - 3.0
+- 15m markets: `half_life_windows` 1.5 - 2.5
 
 ---
 
